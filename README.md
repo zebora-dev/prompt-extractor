@@ -163,6 +163,7 @@ docs/PREFECT.md
 10. Converts each product flyout `raw_html` into markdown and saves product rows to `prompts_outputs_products`. In Prefect runs this is the observable `product-output-process` task.
 11. Converts each entity flyout `raw_html` into markdown and saves entity rows to `prompts_outputs_entities`. In Prefect runs this is the observable `entity-output-process` task.
 12. Runs the `prompt-output-process` Prefect task, which converts `raw_html` into markdown, compares it with the copied markdown, and updates `response`/`markdown` with missing assets such as images and links.
+13. Triggers the downstream score workflow for each saved `prompts_outputs.id` by posting to `BRANDSIGHT_SCORE_WORKFLOW_URL`.
 
 The saved payload includes top-level `response`, `markdown`, `raw_html`, and `sources` fields. Metadata keeps capture method details, `source_count`, `product_count`, `entity_count`, and extraction summaries under `output_metadata.original_metadata.product_extraction` and `output_metadata.original_metadata.entity_extraction`. Individual product and entity flyouts are saved as rows in `prompts_outputs_products` and `prompts_outputs_entities`. The Supabase layer maps app field `output_metadata` to database column `metadata`.
 
@@ -222,6 +223,31 @@ create table if not exists prompts_outputs_entities (
 create index if not exists prompts_outputs_entities_output_id_idx on prompts_outputs_entities(output_id);
 create index if not exists prompts_outputs_entities_batch_id_idx on prompts_outputs_entities(batch_id);
 create index if not exists prompts_outputs_entities_prompt_id_idx on prompts_outputs_entities(prompt_id);
+```
+
+## Downstream Scoring Workflow
+
+After extraction and post-processing complete, each saved prompt output triggers:
+
+```text
+POST https://workflow.zebora.io/api/workflows/score-single-output
+```
+
+Payload:
+
+```json
+{
+  "batch_id": "<batch-id>",
+  "output_id": "<prompt-output-id>",
+  "force": false
+}
+```
+
+Configure the endpoint and optional API key with:
+
+```text
+BRANDSIGHT_SCORE_WORKFLOW_URL=https://workflow.zebora.io/api/workflows/score-single-output
+WORKFLOW_API_KEY=
 ```
 
 ## Notes

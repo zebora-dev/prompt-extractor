@@ -10,6 +10,7 @@ from automated_extraction.workflows.tasks import (
     extract_chatgpt_batch_task,
     product_output_process_task,
     prompt_output_process_task,
+    score_workflow_trigger_task,
 )
 
 
@@ -90,11 +91,18 @@ def prompt_extraction_flow(
     else:
         flow_logger.info("Skipping prompt output processing because no outputs were saved.")
 
+    score_workflow_result: dict[str, Any] | None = None
+    if not dry_run and result.get("saved_outputs"):
+        score_workflow_result = score_workflow_trigger_task(saved_outputs=result.get("saved_outputs") or [], force=False)
+    else:
+        flow_logger.info("Skipping score workflow trigger because no outputs were saved.")
+
     combined_result = {
         **result,
         "product_output_processing": product_processing_result,
         "entity_output_processing": entity_processing_result,
         "prompt_output_processing": processing_result,
+        "score_workflow_trigger": score_workflow_result,
     }
     flow_logger.info("Prompt extraction flow finished: %s", combined_result)
     return combined_result

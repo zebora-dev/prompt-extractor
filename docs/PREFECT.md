@@ -56,6 +56,15 @@ You can also run that processor without re-running ChatGPT extraction via:
 prompt-output-processing
 ```
 
+The final extraction-flow task is:
+
+```text
+trigger-score-workflow
+```
+
+It posts each newly saved `prompts_outputs.id` to
+`BRANDSIGHT_SCORE_WORKFLOW_URL` with `{batch_id, output_id, force:false}`.
+
 ## 1. Install Dependencies
 
 ```bash
@@ -103,6 +112,8 @@ BRANDSIGHT_SUPABASE_URL=https://hmwgplzdzffivawkflci.supabase.co
 BRANDSIGHT_PROMPT_OUTPUTS_TABLE=prompts_outputs
 BRANDSIGHT_PROMPT_OUTPUT_PRODUCTS_TABLE=prompts_outputs_products
 BRANDSIGHT_PROMPT_OUTPUT_ENTITIES_TABLE=prompts_outputs_entities
+BRANDSIGHT_SCORE_WORKFLOW_URL=https://workflow.zebora.io/api/workflows/score-single-output
+WORKFLOW_API_KEY=
 ```
 
 `BRANDSIGHT_SUPABASE_URL` is optional when `BRANDSIGHT_API_BASE_URL` is set to the project functions URL; the app derives the project URL automatically. `BRANDSIGHT_API_BASE_URL` is retained as a legacy compatibility setting.

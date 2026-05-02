@@ -13,6 +13,7 @@ from automated_extraction.entity_output_processor import process_entity_outputs
 from automated_extraction.extraction import run_extraction_job
 from automated_extraction.product_output_processor import process_product_outputs
 from automated_extraction.prompt_output_processor import process_prompt_outputs
+from automated_extraction.workflow_trigger import trigger_score_workflows
 
 
 LOGGER = logging.getLogger(__name__)
@@ -190,6 +191,47 @@ def entity_output_process_task(
     task_logger.info("Finished entity output process task: %s", payload)
     if result.failed_count:
         task_logger.warning("Entity output processing completed with %s failure(s).", result.failed_count)
+    return payload
+
+
+def _score_workflow_task_run_name() -> str:
+    try:
+        from prefect.runtime import task_run
+
+        params = getattr(task_run, "parameters", None) or {}
+        outputs = params.get("saved_outputs") or []
+        first_output = outputs[0] if outputs and isinstance(outputs[0], dict) else {}
+        batch_id = first_output.get("batch_id") or "latest"
+        return f"trigger-score-workflow-{batch_id}"
+    except Exception as exc:
+        LOGGER.debug("Prefect runtime not available: %s", exc)
+        return "trigger-score-workflow"
+
+
+@task(
+    name="trigger-score-workflow",
+    task_run_name=_score_workflow_task_run_name,
+    retries=0,
+    timeout_seconds=None,
+    tags=["workflow", "score", "post-process"],
+    cache_result_in_memory=False,
+)
+def score_workflow_trigger_task(
+    *,
+    saved_outputs: list[dict[str, Any]] | None = None,
+    force: bool = False,
+) -> dict[str, Any]:
+    """
+    Trigger the downstream score-single-output workflow for saved prompt outputs.
+    """
+    task_logger = get_run_logger()
+    task_logger.info("Starting score workflow trigger task. saved_outputs=%s force=%s", len(saved_outputs or []), force)
+    settings = Settings.from_env(require_api_key=True)
+    result = trigger_score_workflows(settings=settings, saved_outputs=saved_outputs, force=force)
+    payload = asdict(result)
+    task_logger.info("Finished score workflow trigger task: %s", payload)
+    if result.failed_count:
+        task_logger.warning("Score workflow trigger completed with %s failure(s).", result.failed_count)
     return payload
 
 

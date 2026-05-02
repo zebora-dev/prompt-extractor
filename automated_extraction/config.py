@@ -10,6 +10,7 @@ DEFAULT_API_BASE_URL = "https://hmwgplzdzffivawkflci.supabase.co/functions/v1/ap
 DEFAULT_PROMPT_OUTPUTS_TABLE = "prompts_outputs"
 DEFAULT_PROMPT_OUTPUT_PRODUCTS_TABLE = "prompts_outputs_products"
 DEFAULT_PROMPT_OUTPUT_ENTITIES_TABLE = "prompts_outputs_entities"
+DEFAULT_SCORE_WORKFLOW_URL = "https://workflow.zebora.io/api/workflows/score-single-output"
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CHROME_USER_DATA_DIR = PROJECT_ROOT / ".chrome-profile"
 
@@ -28,6 +29,8 @@ class Settings:
     login_wait_seconds: int
     response_timeout_seconds: int
     sources_panel_pause_seconds: int
+    score_workflow_url: str
+    workflow_api_key: str | None
 
     @classmethod
     def from_env(cls, *, require_api_key: bool = True) -> "Settings":
@@ -62,6 +65,9 @@ class Settings:
             login_wait_seconds=parse_int(os.getenv("CHATGPT_LOGIN_WAIT_SECONDS"), default=180),
             response_timeout_seconds=parse_int(os.getenv("CHATGPT_RESPONSE_TIMEOUT_SECONDS"), default=300),
             sources_panel_pause_seconds=parse_int(os.getenv("CHATGPT_SOURCES_PANEL_PAUSE_SECONDS"), default=0),
+            score_workflow_url=os.getenv("BRANDSIGHT_SCORE_WORKFLOW_URL", DEFAULT_SCORE_WORKFLOW_URL).strip()
+            or DEFAULT_SCORE_WORKFLOW_URL,
+            workflow_api_key=os.getenv("WORKFLOW_API_KEY", "").strip() or None,
         )
 
 

@@ -9,6 +9,7 @@ from .config import Settings
 from .entity_output_processor import process_entity_outputs
 from .extraction import run_extraction_job
 from .product_output_processor import process_product_outputs
+from .workflow_trigger import trigger_score_workflows
 
 
 LOGGER = logging.getLogger(__name__)
@@ -67,9 +68,13 @@ def main(argv: list[str] | None = None) -> int:
     entity_processing_result = None
     if not args.dry_run and entity_output_refs:
         entity_processing_result = process_entity_outputs(settings=settings, entity_output_refs=entity_output_refs)
+    score_workflow_result = None
+    if not args.dry_run and payload.get("saved_outputs"):
+        score_workflow_result = trigger_score_workflows(settings=settings, saved_outputs=payload.get("saved_outputs") or [])
 
     payload["product_output_processing"] = asdict(product_processing_result) if product_processing_result else None
     payload["entity_output_processing"] = asdict(entity_processing_result) if entity_processing_result else None
+    payload["score_workflow_trigger"] = asdict(score_workflow_result) if score_workflow_result else None
     payload["product_outputs_summary"] = {
         "output_ref_count": len(product_output_refs),
         "product_count": sum(len(ref.get("products") or []) for ref in product_output_refs if isinstance(ref, dict)),
