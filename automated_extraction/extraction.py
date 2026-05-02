@@ -1,0 +1,302 @@
+from __future__ import annotations
+
+import json
+import logging
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+from .api_client import ApiClient
+from .chatgpt_runner import ChatGPTRunner
+from .config import Settings
+
+
+LOGGER = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class ExtractionRunResult:
+    status: str
+    loaded_count: int
+    attempted_count: int
+    saved_count: int
+    skipped_count: int
+    failed_count: int
+    batch_id: str | None
+    brand_id: str | None
+    failures: list[dict[str, Any]]
+    saved_outputs: list[dict[str, Any]]
+
+
+def run_extraction_job(
+    *,
+    settings: Settings,
+    batch_id: str | None = None,
+    prompts_file: Path | None = None,
+    brand_id: str | None = None,
+    limit: int | None = None,
+    skip: int = 0,
+    dry_run: bool = False,
+    headless: bool | None = None,
+    chrome_user_data_dir: str | None = None,
+    sources_panel_pause_seconds: int = 0,
+) -> ExtractionRunResult:
+    if not batch_id and not prompts_file:
+        raise ValueError("one of batch_id or prompts_file is required")
+
+    api = ApiClient(settings.api_base_url, settings.anon_key)
+    prompts, resolved_batch_id, resolved_brand_id = load_prompt_work(
+        api=api,
+        batch_id=batch_id,
+        prompts_file=prompts_file,
+        brand_id=brand_id,
+    )
+    prompts = prompts[max(0, skip) :]
+    if limit:
+        prompts = prompts[:limit]
+
+    LOGGER.info(
+        "Loaded %s prompt(s). batch_id=%s brand_id=%s dry_run=%s",
+        len(prompts),
+        resolved_batch_id or "local",
+        resolved_brand_id or "mixed",
+        dry_run,
+    )
+
+    if dry_run:
+        for prompt in prompts[:5]:
+            LOGGER.info(
+                "Dry run prompt: id=%s brand_id=%s text=%r",
+                prompt.get("id"),
+                prompt.get("brand_id"),
+                prompt_text(prompt)[:120],
+            )
+        return ExtractionRunResult(
+            status="dry_run",
+            loaded_count=len(prompts),
+            attempted_count=0,
+            saved_count=0,
+            skipped_count=0,
+            failed_count=0,
+            batch_id=resolved_batch_id,
+            brand_id=resolved_brand_id,
+            failures=[],
+            saved_outputs=[],
+        )
+
+    saved_count = 0
+    skipped_count = 0
+    failed_count = 0
+    failures: list[dict[str, Any]] = []
+    saved_outputs: list[dict[str, Any]] = []
+
+    with ChatGPTRunner(
+        settings.chatgpt_url,
+        headless=headless if headless is not None else settings.headless,
+        chrome_user_data_dir=chrome_user_data_dir or settings.chrome_user_data_dir,
+        login_wait_seconds=settings.login_wait_seconds,
+        response_timeout_seconds=settings.response_timeout_seconds,
+        sources_panel_pause_seconds=sources_panel_pause_seconds,
+    ) as runner:
+        for index, prompt in enumerate(prompts, start=1):
+            prompt_id = str(prompt.get("id") or "")
+            prompt_brand_id = str(prompt.get("brand_id") or resolved_brand_id or "")
+            if not prompt_id or not prompt_brand_id:
+                skipped_count += 1
+                LOGGER.warning("Skipping prompt missing id or brand_id: %s", prompt)
+                continue
+
+            if resolved_batch_id and api.prompt_output_exists(prompt_id, prompt_brand_id, resolved_batch_id):
+                skipped_count += 1
+                LOGGER.info("[%s/%s] Skipping existing output for prompt %s", index, len(prompts), prompt_id)
+                continue
+
+            text = prompt_text(prompt)
+            LOGGER.info("[%s/%s] Running prompt %s", index, len(prompts), prompt_id)
+
+            try:
+                capture = runner.run_prompt(text)
+                output = build_prompt_output(
+                    prompt,
+                    capture.response,
+                    capture.capture_method,
+                    capture.raw_html,
+                    capture.raw_html_capture_method,
+                    capture.llm_model,
+                    capture.url,
+                    resolved_batch_id,
+                    capture.sources,
+                    capture.source_capture_method,
+                    capture.products,
+                    capture.product_capture_method,
+                )
+                LOGGER.info(
+                    "[%s/%s] Capture summary for prompt %s: markdown_length=%s raw_html_length=%s llm_model=%s source_count=%s source_method=%s product_count=%s product_method=%s",
+                    index,
+                    len(prompts),
+                    prompt_id,
+                    len(capture.response or ""),
+                    len(capture.raw_html or ""),
+                    capture.llm_model,
+                    len(capture.sources or []),
+                    capture.source_capture_method,
+                    len(capture.products or []),
+                    capture.product_capture_method,
+                )
+                saved = api.save_prompt_output(output)
+                saved_count += 1
+                saved_output = normalize_saved_output(saved, output)
+                saved_outputs.append(saved_output)
+                LOGGER.info(
+                    "[%s/%s] Saved prompt %s: output_id=%s response=%s",
+                    index,
+                    len(prompts),
+                    prompt_id,
+                    saved_output.get("output_id"),
+                    saved or "ok",
+                )
+            except Exception as exc:
+                failed_count += 1
+                failure = {"prompt_id": prompt_id, "brand_id": prompt_brand_id, "error": str(exc)}
+                failures.append(failure)
+                LOGGER.exception("[%s/%s] Prompt %s failed: %s", index, len(prompts), prompt_id, exc)
+
+    status = "completed" if failed_count == 0 else "completed_with_failures"
+    return ExtractionRunResult(
+        status=status,
+        loaded_count=len(prompts),
+        attempted_count=len(prompts) - skipped_count,
+        saved_count=saved_count,
+        skipped_count=skipped_count,
+        failed_count=failed_count,
+        batch_id=resolved_batch_id,
+        brand_id=resolved_brand_id,
+        failures=failures,
+        saved_outputs=saved_outputs,
+    )
+
+
+def load_prompt_work(
+    *,
+    api: ApiClient,
+    batch_id: str | None,
+    prompts_file: Path | None,
+    brand_id: str | None,
+) -> tuple[list[dict[str, Any]], str | None, str | None]:
+    if prompts_file:
+        with prompts_file.open("r", encoding="utf-8") as handle:
+            prompts = json.load(handle)
+        if not isinstance(prompts, list):
+            raise RuntimeError(f"Expected a JSON array in {prompts_file}")
+        resolved_brand_id = brand_id or first_brand_id(prompts)
+        prompts = [with_brand_id(prompt, resolved_brand_id) for prompt in prompts]
+        return prompts, None, resolved_brand_id
+
+    if not batch_id:
+        raise ValueError("batch_id is required when prompts_file is not provided")
+
+    batch = api.get_batch(batch_id)
+    resolved_brand_id = brand_id or batch.get("brand_id")
+    if not resolved_brand_id:
+        raise RuntimeError(f"Batch {batch_id} does not include brand_id")
+    return api.get_prompts(batch_id, str(resolved_brand_id)), batch_id, str(resolved_brand_id)
+
+
+def first_brand_id(prompts: list[dict[str, Any]]) -> str | None:
+    for prompt in prompts:
+        if prompt.get("brand_id"):
+            return str(prompt["brand_id"])
+    return None
+
+
+def with_brand_id(prompt: dict[str, Any], brand_id: str | None) -> dict[str, Any]:
+    if prompt.get("brand_id") or not brand_id:
+        return prompt
+    return {**prompt, "brand_id": brand_id}
+
+
+def prompt_text(prompt: dict[str, Any]) -> str:
+    text = prompt.get("text") or prompt.get("prompt")
+    if not text:
+        raise RuntimeError(f"Prompt missing text: {prompt}")
+    return str(text)
+
+
+def normalize_saved_output(saved: dict[str, Any] | None, original_output: dict[str, Any]) -> dict[str, Any]:
+    saved_data = saved if isinstance(saved, dict) else {}
+    nested_output = saved_data.get("output") if isinstance(saved_data.get("output"), dict) else {}
+    merged = {**original_output, **nested_output, **saved_data}
+    output_id = merged.get("id") or merged.get("output_id") or merged.get("prompt_output_id")
+    return {
+        "id": output_id,
+        "output_id": output_id,
+        "prompt_id": merged.get("prompt_id"),
+        "brand_id": merged.get("brand_id"),
+        "batch_id": merged.get("batch_id"),
+    }
+
+
+def build_prompt_output(
+    prompt: dict[str, Any],
+    response: str,
+    capture_method: str,
+    raw_html: str,
+    raw_html_capture_method: str,
+    llm_model: str,
+    url: str,
+    batch_id: str | None,
+    sources: list[dict[str, Any]] | None = None,
+    source_capture_method: str = "none",
+    products: list[dict[str, Any]] | None = None,
+    product_capture_method: str = "none",
+) -> dict[str, Any]:
+    now = datetime.now(timezone.utc).isoformat()
+    return {
+        "prompt_id": prompt.get("id"),
+        "brand_id": prompt.get("brand_id"),
+        "response": response,
+        "markdown": response,
+        "raw_html": raw_html,
+        "sources": sources or [],
+        "batch_id": batch_id or prompt.get("batch_id"),
+        "llm_model": llm_model or "chatgpt",
+        "config": {
+            "site": "OpenAI",
+            "category": prompt.get("category"),
+            "tags": prompt.get("tags"),
+            "measurements": prompt.get("measurements"),
+        },
+        "output_metadata": {
+            "brand_name": (prompt.get("brand") or {}).get("name") if isinstance(prompt.get("brand"), dict) else None,
+            "brand_description": (prompt.get("brand") or {}).get("description") if isinstance(prompt.get("brand"), dict) else None,
+            "approved": prompt.get("approved"),
+            "active": prompt.get("active"),
+            "created_at": prompt.get("created_at"),
+            "original_metadata": {
+                "main_response_capture_method": capture_method,
+                "copy_validation_status": "validated" if capture_method.startswith("copy_button") else "fallback",
+                "raw_html_capture_method": raw_html_capture_method,
+                "raw_html_length": len(raw_html or ""),
+                "url": url,
+                "source_count": len(sources or []),
+                "source_capture_method": source_capture_method,
+                "product_count": len(products or []),
+                "product_capture_method": product_capture_method,
+                "product_extraction": {
+                    "process_name": "product_extraction",
+                    "product_count": len(products or []),
+                    "capture_method": product_capture_method,
+                    "outputs": products or [],
+                },
+            },
+            "site_used": "OpenAI",
+            "timestamp": now,
+        },
+        "version_info": {
+            "app_type": "automated_extraction",
+            "app_version": "1.0.0",
+            "extension_version": None,
+            "prompt_source": "batch" if batch_id else "local",
+        },
+    }

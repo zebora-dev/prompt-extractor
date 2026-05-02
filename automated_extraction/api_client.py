@@ -112,6 +112,82 @@ class ApiClient:
 
         return None
 
+    def get_prompt_output(self, output_id: int | str) -> dict[str, Any] | None:
+        outputs = self.get_prompt_outputs(output_id=output_id, limit=1)
+        return outputs[0] if outputs else None
+
+    def get_prompt_outputs(
+        self,
+        *,
+        output_id: int | str | None = None,
+        batch_id: str | None = None,
+        brand_id: str | None = None,
+        prompt_id: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        params = {"limit": str(limit)}
+        if output_id:
+            params["output_id"] = str(output_id)
+        if batch_id:
+            params["batch_id"] = batch_id
+        if brand_id:
+            params["brand_id"] = brand_id
+        if prompt_id:
+            params["prompt_id"] = prompt_id
+
+        response = requests.get(
+            f"{self.base_url}/prompt-outputs",
+            params=params,
+            headers=self.headers,
+            timeout=60,
+        )
+        if response.status_code == 404:
+            return []
+        if not response.ok:
+            raise RuntimeError(f"Get prompt outputs failed ({response.status_code}): {response.text}")
+
+        return parse_outputs_response(response.json())
+
+    def update_prompt_output(self, output: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any] | None:
+        output_id = output.get("id") or output.get("output_id") or output.get("prompt_output_id")
+        if output_id:
+            for method in ("PATCH", "PUT"):
+                response = requests.request(
+                    method,
+                    f"{self.base_url}/prompt-outputs/{output_id}",
+                    headers=self.headers,
+                    json=patch,
+                    timeout=60,
+                )
+                if response.ok:
+                    payload = response.json() if response.content else {}
+                    return payload.get("data", payload)
+                if response.status_code not in {404, 405}:
+                    raise RuntimeError(f"Update prompt output failed ({response.status_code}): {response.text}")
+
+        identifier_patch = {
+            **patch,
+            "id": output_id,
+            "prompt_id": output.get("prompt_id"),
+            "brand_id": output.get("brand_id"),
+            "batch_id": output.get("batch_id"),
+        }
+        response = requests.patch(
+            f"{self.base_url}/prompt-outputs",
+            headers=self.headers,
+            json=identifier_patch,
+            timeout=60,
+        )
+        if response.ok:
+            payload = response.json() if response.content else {}
+            return payload.get("data", payload)
+        if response.status_code in {404, 405}:
+            raise RuntimeError(
+                "Prompt output update endpoint is unavailable. Expected PATCH/PUT /prompt-outputs/{id} "
+                "or PATCH /prompt-outputs."
+            )
+        raise RuntimeError(f"Update prompt output failed ({response.status_code}): {response.text}")
+
     def _request(self, method: str, path: str, **kwargs: Any) -> dict[str, Any]:
         response = requests.request(
             method,
@@ -140,6 +216,32 @@ def parse_exists_response(payload: dict[str, Any] | None) -> bool:
     if isinstance(payload.get("outputs"), list) and payload["outputs"]:
         return True
     return False
+
+
+def parse_outputs_response(payload: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not payload:
+        return []
+    data = payload.get("data")
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
+        output = data.get("output")
+        if isinstance(output, dict):
+            output_id = data.get("output_id")
+            if output_id is not None and not output.get("id"):
+                output = {**output, "id": output_id, "output_id": output_id}
+            return [output]
+        for key in ("outputs", "prompt_outputs", "promptOutputs", "items", "results"):
+            value = data.get(key)
+            if isinstance(value, list):
+                return value
+        if data.get("id") or data.get("output_id") or data.get("prompt_id"):
+            return [data]
+    for key in ("outputs", "prompt_outputs", "promptOutputs", "items", "results"):
+        value = payload.get(key)
+        if isinstance(value, list):
+            return value
+    return []
 
 
 def retry_after_seconds(response: requests.Response) -> int | None:

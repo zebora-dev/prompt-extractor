@@ -1,0 +1,24 @@
+[project]
+name = "prompt-extractor"
+version = "0.1.0"
+description = "Browser-based ChatGPT prompt extraction with Prefect orchestration"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "requests>=2.32.0",
+    "selenium>=4.23.0,<5",
+    "undetected-chromedriver>=3.5.5",
+    "pyperclip>=1.9.0",
+    "python-dotenv>=1.0.1",
+    "setuptools>=82.0.0",
+    "prefect>=3.6.19",
+    "httpx>=0.28.1",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]

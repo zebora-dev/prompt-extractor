@@ -1,6 +1,8 @@
 requests>=2.32.0
-selenium==4.23.0
+selenium>=4.23.0,<5
 undetected-chromedriver>=3.5.5
 pyperclip>=1.9.0
 python-dotenv>=1.0.1
 setuptools>=82.0.0
+prefect>=3.6.19
+httpx>=0.28.1

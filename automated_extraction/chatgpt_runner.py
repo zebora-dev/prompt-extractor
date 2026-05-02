@@ -87,6 +87,8 @@ class ChatGPTCapture:
     url: str
     sources: list[dict[str, Any]]
     source_capture_method: str
+    products: list[dict[str, Any]]
+    product_capture_method: str
 
 
 class ChatGPTRunner:
@@ -225,6 +227,9 @@ class ChatGPTRunner:
             sources = extract_sources_from_markdown(response)
             source_capture_method = "markdown_references" if sources else "none"
         LOGGER.info("Captured %s source(s) using %s", len(sources), source_capture_method)
+        products = self.capture_product_flyouts()
+        product_capture_method = "product_flyouts" if products else "none"
+        LOGGER.info("Captured %s product flyout(s) using %s", len(products), product_capture_method)
         return ChatGPTCapture(
             response=response.strip(),
             capture_method="copy_button_markdown",
@@ -234,6 +239,8 @@ class ChatGPTRunner:
             url=driver.current_url,
             sources=sources,
             source_capture_method=source_capture_method,
+            products=products,
+            product_capture_method=product_capture_method,
         )
 
     def wait_for_login(self) -> None:
@@ -915,6 +922,437 @@ class ChatGPTRunner:
             return str(result)
         except WebDriverException:
             return "No button diagnostics available."
+
+    def capture_product_flyouts(self) -> list[dict[str, Any]]:
+        latest_response = self.latest_response_element()
+        if not latest_response:
+            LOGGER.info("Skipping product capture: no latest assistant response element found.")
+            return []
+
+        scope = self.latest_response_turn_element(latest_response) or latest_response
+        button_count = self.count_product_buttons(scope)
+        if button_count <= 0:
+            LOGGER.info("No product select buttons found for latest ChatGPT response.")
+            return []
+
+        LOGGER.info("Found %s product select button(s); opening product flyouts. %s", button_count, self.product_button_diagnostics(scope))
+        products: list[dict[str, Any]] = []
+        for index in range(button_count):
+            self.close_product_flyout()
+            LOGGER.info("Opening product flyout. product_index=%s/%s", index + 1, button_count)
+            if not self.click_product_button_by_index(scope, index):
+                LOGGER.warning("Could not click product button. product_index=%s/%s", index + 1, button_count)
+                products.append(
+                    {
+                        "index": index + 1,
+                        "button_index": index + 1,
+                        "capture_method": "product_button_click_failed",
+                        "raw_html": "",
+                        "html_length": 0,
+                        "title": "",
+                    }
+                )
+                continue
+
+            if not self.wait_for_product_flyout_root(timeout=10):
+                LOGGER.warning(
+                    "Product flyout did not appear. product_index=%s/%s %s",
+                    index + 1,
+                    button_count,
+                    self.product_flyout_diagnostics(),
+                )
+                products.append(
+                    {
+                        "index": index + 1,
+                        "button_index": index + 1,
+                        "capture_method": "product_flyout_not_found",
+                        "raw_html": "",
+                        "html_length": 0,
+                        "title": "",
+                    }
+                )
+                continue
+
+            if not self.wait_for_product_flyout_content(timeout=45):
+                LOGGER.warning(
+                    "Product flyout opened but content did not stabilize. product_index=%s/%s %s",
+                    index + 1,
+                    button_count,
+                    self.product_flyout_diagnostics(),
+                )
+
+            product = self.extract_product_flyout(index + 1)
+            LOGGER.info(
+                "Product flyout captured. product_index=%s/%s title=%r html_length=%s",
+                index + 1,
+                button_count,
+                product.get("title") or "",
+                product.get("html_length") or 0,
+            )
+            products.append(product)
+            self.close_product_flyout()
+
+        return products
+
+    def count_product_buttons(self, scope: WebElement) -> int:
+        self.install_product_flyout_helpers()
+        try:
+            count = self.require_driver().execute_script(
+                """
+                return window.__brandsightCollectProductOpeners?.(arguments[0]).length || 0;
+                """,
+                scope,
+            )
+            return int(count or 0)
+        except (WebDriverException, ValueError, TypeError):
+            return 0
+
+    def click_product_button_by_index(self, scope: WebElement, index: int) -> bool:
+        self.install_product_flyout_helpers()
+        try:
+            return bool(
+                self.require_driver().execute_script(
+                    """
+                    return window.__brandsightClickProductOpener?.(arguments[0], arguments[1]) || false;
+                    """,
+                    scope,
+                    index,
+                )
+            )
+        except WebDriverException:
+            return False
+
+    def wait_for_product_flyout_root(self, timeout: int = 10) -> bool:
+        self.install_product_flyout_helpers()
+        try:
+            WebDriverWait(self.require_driver(), timeout).until(
+                lambda driver: driver.execute_script(
+                    """
+                    return Boolean(window.__brandsightFindProductFlyout?.());
+                    """
+                )
+            )
+            return True
+        except TimeoutException:
+            return False
+
+    def wait_for_product_flyout_content(self, timeout: int = 45) -> bool:
+        self.install_product_flyout_helpers()
+        deadline = time.time() + timeout
+        last_signature = ""
+        stable_checks = 0
+        last_logged_second = -1
+        while time.time() < deadline:
+            state = self.require_driver().execute_script(
+                """
+                const root = window.__brandsightFindProductFlyout?.();
+                if (!root) {
+                  return {
+                    ready: false,
+                    loading: false,
+                    signature: '',
+                    textLength: 0,
+                    imageCount: 0,
+                    linkCount: 0,
+                    markerCount: 0,
+                    textPreview: ''
+                  };
+                }
+                const text = (root.innerText || '').trim();
+                const normalized = text.toLowerCase();
+                const imageCount = root.querySelectorAll('img[src]').length;
+                const linkCount = root.querySelectorAll('a[href]').length;
+                const loading = normalized.includes('looking up product details');
+                const markerCount = [
+                  '[data-testid="bar-product-header"]',
+                  'section[aria-label="Product details"] h2',
+                  'button[aria-label^="Open offer from"]',
+                  'button[aria-label^="Open "]',
+                  'img[src*="images.openai.com"]'
+                ].reduce((count, selector) => count + root.querySelectorAll(selector).length, 0);
+                const textMarkers = [
+                  'what to know',
+                  'what people are saying',
+                  'in stock',
+                  'visit',
+                  'explore more',
+                  'delivery',
+                  'reviews'
+                ].filter((marker) => normalized.includes(marker)).length;
+                const ready = !loading && text.length >= 80 && (markerCount + textMarkers + imageCount + linkCount) > 0;
+                return {
+                  ready,
+                  loading,
+                  signature: `${text.length}:${imageCount}:${linkCount}:${markerCount}:${textMarkers}:${text.slice(0, 120)}`,
+                  textLength: text.length,
+                  imageCount,
+                  linkCount,
+                  markerCount: markerCount + textMarkers,
+                  textPreview: text.slice(0, 160)
+                };
+                """
+            )
+            if not isinstance(state, dict):
+                state = {}
+
+            elapsed = int(timeout - max(0, deadline - time.time()))
+            if elapsed >= last_logged_second + 5:
+                LOGGER.info(
+                    "Waiting for product flyout content. ready=%s loading=%s text_length=%s image_count=%s link_count=%s marker_count=%s elapsed=%ss preview=%r",
+                    state.get("ready"),
+                    state.get("loading"),
+                    state.get("textLength"),
+                    state.get("imageCount"),
+                    state.get("linkCount"),
+                    state.get("markerCount"),
+                    elapsed,
+                    state.get("textPreview") or "",
+                )
+                last_logged_second = elapsed
+
+            signature = str(state.get("signature") or "")
+            if state.get("ready") and signature and signature == last_signature:
+                stable_checks += 1
+            elif state.get("ready") and signature:
+                stable_checks = 0
+                last_signature = signature
+            else:
+                stable_checks = 0
+                last_signature = signature
+            if stable_checks >= 2:
+                return True
+            time.sleep(0.75)
+        return False
+
+    def extract_product_flyout(self, index: int) -> dict[str, Any]:
+        self.install_product_flyout_helpers()
+        raw = self.require_driver().execute_script(
+            """
+            const root = window.__brandsightFindProductFlyout?.();
+            if (!root) return null;
+            const section = root.matches?.('section[aria-label="Product details"]')
+              ? root
+              : root.querySelector('section[aria-label="Product details"]') || root;
+            const title = (
+              section.querySelector('h1,h2,h3,[data-testid*="title"]')?.innerText ||
+              section.querySelector(
+                'button[aria-label]:not([aria-label="Close"]):not([aria-label="Select product"])'
+              )?.getAttribute('aria-label') ||
+              ''
+            ).trim();
+            const links = [...section.querySelectorAll('a[href]')].map((link, linkIndex) => ({
+              index: linkIndex + 1,
+              url: link.href,
+              text: (link.innerText || '').trim()
+            }));
+            const images = [...section.querySelectorAll('img[src]')].map((image, imageIndex) => ({
+              index: imageIndex + 1,
+              src: image.src,
+              alt: image.alt || ''
+            }));
+            return {
+              raw_html: root.outerHTML || '',
+              title,
+              text_length: (section.innerText || '').trim().length,
+              link_count: links.length,
+              image_count: images.length,
+              links,
+              images
+            };
+            """
+        )
+        if not isinstance(raw, dict):
+            return {
+                "index": index,
+                "button_index": index,
+                "capture_method": "product_flyout_outer_html",
+                "raw_html": "",
+                "html_length": 0,
+                "title": "",
+                "text_length": 0,
+                "link_count": 0,
+                "image_count": 0,
+                "links": [],
+                "images": [],
+            }
+
+        html = str(raw.get("raw_html") or "")
+        return {
+            "index": index,
+            "button_index": index,
+            "capture_method": "product_flyout_outer_html",
+            "raw_html": html,
+            "html_length": len(html),
+            "title": clean_text(raw.get("title")),
+            "text_length": int(raw.get("text_length") or 0),
+            "link_count": int(raw.get("link_count") or 0),
+            "image_count": int(raw.get("image_count") or 0),
+            "links": raw.get("links") if isinstance(raw.get("links"), list) else [],
+            "images": raw.get("images") if isinstance(raw.get("images"), list) else [],
+        }
+
+    def close_product_flyout(self) -> None:
+        driver = self.require_driver()
+        self.install_product_flyout_helpers()
+        try:
+            closed = driver.execute_script(
+                """
+                const root = window.__brandsightFindProductFlyout?.();
+                const closeButton = root?.querySelector('button[aria-label="Close"]');
+                if (!closeButton) return false;
+                closeButton.click();
+                return true;
+                """
+            )
+            if closed:
+                time.sleep(0.5)
+                return
+        except WebDriverException:
+            pass
+
+        close_button = self.find_first(["section[aria-label='Product details'] button[aria-label='Close']"])
+        if close_button and self.click_if_visible(close_button):
+            time.sleep(0.5)
+            return
+        try:
+            if driver.execute_script("return Boolean(window.__brandsightFindProductFlyout?.());"):
+                driver.switch_to.active_element.send_keys(Keys.ESCAPE)
+                time.sleep(0.5)
+        except WebDriverException:
+            pass
+
+    def install_product_flyout_helpers(self) -> None:
+        self.require_driver().execute_script(
+            """
+            window.__brandsightCollectProductOpeners = function (root) {
+              const scope = root || document;
+              const buttons = [...scope.querySelectorAll('button[aria-label="Select product"]')]
+                .filter((button) => button.isConnected && button.getClientRects().length > 0);
+
+              return buttons.map((button, index) => {
+                const roleButton = button.closest('[role="button"]');
+                const imageTarget = button.closest('[data-shopping-product-image-pdp-click-target="true"]');
+                const cardButton = button.closest('button');
+                const target = roleButton || imageTarget || cardButton || button;
+                const card = target.closest('[role="button"], button, th, div') || target;
+                const title = (
+                  card.querySelector('h1,h2,h3,[aria-label],.font-semibold,.line-clamp-2')?.innerText ||
+                  card.querySelector('img[alt]')?.alt ||
+                  target.getAttribute('aria-label') ||
+                  button.getAttribute('aria-label') ||
+                  ''
+                ).trim();
+                return {
+                  index,
+                  button,
+                  target,
+                  title,
+                  targetTag: target.tagName,
+                  targetRole: target.getAttribute('role') || '',
+                  targetTextPreview: (target.innerText || '').trim().slice(0, 120)
+                };
+              });
+            };
+
+            window.__brandsightDispatchProductClick = function (target) {
+              target.scrollIntoView({block: 'center', inline: 'center'});
+              const rect = target.getBoundingClientRect();
+              const options = {
+                bubbles: true,
+                cancelable: true,
+                view: window,
+                clientX: rect.left + Math.max(1, rect.width / 2),
+                clientY: rect.top + Math.max(1, rect.height / 2),
+                pointerType: 'mouse'
+              };
+              target.dispatchEvent(new PointerEvent('pointerover', options));
+              target.dispatchEvent(new MouseEvent('mouseover', options));
+              target.dispatchEvent(new PointerEvent('pointermove', options));
+              target.dispatchEvent(new MouseEvent('mousemove', options));
+              target.dispatchEvent(new PointerEvent('pointerdown', options));
+              target.dispatchEvent(new MouseEvent('mousedown', options));
+              target.dispatchEvent(new PointerEvent('pointerup', options));
+              target.dispatchEvent(new MouseEvent('mouseup', options));
+              target.dispatchEvent(new MouseEvent('click', options));
+              return true;
+            };
+
+            window.__brandsightClickProductOpener = function (root, index) {
+              const candidate = window.__brandsightCollectProductOpeners(root)[index];
+              if (!candidate?.target) return false;
+              return window.__brandsightDispatchProductClick(candidate.target);
+            };
+
+            window.__brandsightFindProductFlyout = function () {
+              const productSectionSelectors = [
+                'section[aria-label="Product details"][data-testid="screen-threadFlyOut"]',
+                '[data-testid="stage-thread-flyout"] section[aria-label="Product details"]',
+                '[data-testid="stage-thread-flyout"] [data-testid="bar-product-header"]',
+                '[data-testid="screen-threadFlyOut"] [data-testid="bar-product-header"]',
+                'section[aria-label="Product details"]'
+              ];
+              for (const selector of productSectionSelectors) {
+                const marker = document.querySelector(selector);
+                if (marker) return marker.closest('[data-testid="stage-thread-flyout"]') || marker.closest('[data-testid="screen-threadFlyOut"]') || marker;
+              }
+
+              const flyouts = [
+                ...document.querySelectorAll('[data-testid="stage-thread-flyout"], [data-testid="screen-threadFlyOut"]')
+              ];
+              return flyouts.find((flyout) => {
+                const text = (flyout.innerText || '').trim().toLowerCase();
+                return (
+                  flyout.querySelector('[data-testid="bar-product-header"]') ||
+                  text.includes('product details') ||
+                  text.includes('what to know') ||
+                  text.includes('what people are saying') ||
+                  text.includes('buying options')
+                );
+              }) || null;
+            };
+            """
+        )
+
+    def product_button_diagnostics(self, scope: WebElement) -> str:
+        self.install_product_flyout_helpers()
+        try:
+            result = self.require_driver().execute_script(
+                """
+                const candidates = window.__brandsightCollectProductOpeners?.(arguments[0]) || [];
+                return {
+                  candidateCount: candidates.length,
+                  candidates: candidates.slice(0, 10).map((candidate) => ({
+                    index: candidate.index + 1,
+                    title: candidate.title,
+                    targetTag: candidate.targetTag,
+                    targetRole: candidate.targetRole,
+                    targetTextPreview: candidate.targetTextPreview
+                  }))
+                };
+                """,
+                scope,
+            )
+            return str(result)
+        except WebDriverException:
+            return "No product button diagnostics available."
+
+    def product_flyout_diagnostics(self) -> str:
+        self.install_product_flyout_helpers()
+        result = self.require_driver().execute_script(
+            """
+            const root = window.__brandsightFindProductFlyout?.() || null;
+            return {
+              found: Boolean(root),
+              stageThreadFlyoutCount: document.querySelectorAll('[data-testid="stage-thread-flyout"]').length,
+              screenThreadFlyoutCount: document.querySelectorAll('[data-testid="screen-threadFlyOut"]').length,
+              productHeaderCount: document.querySelectorAll('[data-testid="bar-product-header"]').length,
+              productSectionCount: document.querySelectorAll('section[aria-label="Product details"]').length,
+              selectProductButtonCount: document.querySelectorAll('button[aria-label="Select product"]').length,
+              textPreview: root ? (root.innerText || '').slice(0, 500) : ''
+            };
+            """
+        )
+        return str(result)
 
     def latest_response_text(self) -> str:
         element = self.latest_response_element()
