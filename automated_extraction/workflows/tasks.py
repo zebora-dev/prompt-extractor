@@ -9,6 +9,7 @@ from prefect import task
 from prefect.logging import get_run_logger
 
 from automated_extraction.config import Settings
+from automated_extraction.entity_output_processor import process_entity_outputs
 from automated_extraction.extraction import run_extraction_job
 from automated_extraction.product_output_processor import process_product_outputs
 from automated_extraction.prompt_output_processor import process_prompt_outputs
@@ -93,9 +94,14 @@ def extract_chatgpt_batch_task(
 def summarize_extraction_payload(payload: dict[str, Any]) -> dict[str, Any]:
     summary = dict(payload)
     product_outputs = summary.pop("product_outputs", []) or []
+    entity_outputs = summary.pop("entity_outputs", []) or []
     summary["product_outputs_summary"] = {
         "output_ref_count": len(product_outputs),
         "product_count": sum(len(ref.get("products") or []) for ref in product_outputs if isinstance(ref, dict)),
+    }
+    summary["entity_outputs_summary"] = {
+        "output_ref_count": len(entity_outputs),
+        "entity_count": sum(len(ref.get("entities") or []) for ref in entity_outputs if isinstance(ref, dict)),
     }
     return summary
 
@@ -142,6 +148,48 @@ def product_output_process_task(
     task_logger.info("Finished product output process task: %s", payload)
     if result.failed_count:
         task_logger.warning("Product output processing completed with %s failure(s).", result.failed_count)
+    return payload
+
+
+def _process_entities_task_run_name() -> str:
+    try:
+        from prefect.runtime import task_run
+
+        params = getattr(task_run, "parameters", None) or {}
+        refs = params.get("entity_output_refs") or []
+        first_ref = refs[0] if refs and isinstance(refs[0], dict) else {}
+        batch_id = first_ref.get("batch_id") or "latest"
+        return f"process-entity-outputs-{batch_id}"
+    except Exception as exc:
+        LOGGER.debug("Prefect runtime not available: %s", exc)
+        return "entity-output-process"
+
+
+@task(
+    name="entity-output-process",
+    task_run_name=_process_entities_task_run_name,
+    retries=0,
+    timeout_seconds=None,
+    tags=["prompt-output", "entity", "post-process"],
+    cache_result_in_memory=False,
+)
+def entity_output_process_task(
+    *,
+    entity_output_refs: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """
+    Persist captured entity flyouts for saved prompt outputs.
+    """
+    task_logger = get_run_logger()
+    refs = entity_output_refs or []
+    entity_count = sum(len(ref.get("entities") or []) for ref in refs if isinstance(ref, dict))
+    task_logger.info("Starting entity output process task. output_refs=%s entity_count=%s", len(refs), entity_count)
+    settings = Settings.from_env(require_api_key=True)
+    result = process_entity_outputs(settings=settings, entity_output_refs=refs)
+    payload = asdict(result)
+    task_logger.info("Finished entity output process task: %s", payload)
+    if result.failed_count:
+        task_logger.warning("Entity output processing completed with %s failure(s).", result.failed_count)
     return payload
 
 

@@ -9,6 +9,7 @@ from urllib.parse import urlsplit, urlunsplit
 DEFAULT_API_BASE_URL = "https://hmwgplzdzffivawkflci.supabase.co/functions/v1/api"
 DEFAULT_PROMPT_OUTPUTS_TABLE = "prompts_outputs"
 DEFAULT_PROMPT_OUTPUT_PRODUCTS_TABLE = "prompts_outputs_products"
+DEFAULT_PROMPT_OUTPUT_ENTITIES_TABLE = "prompts_outputs_entities"
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CHROME_USER_DATA_DIR = PROJECT_ROOT / ".chrome-profile"
 
@@ -20,6 +21,7 @@ class Settings:
     anon_key: str
     prompt_outputs_table: str
     prompt_output_products_table: str
+    prompt_output_entities_table: str
     chatgpt_url: str
     chrome_user_data_dir: str | None
     headless: bool
@@ -50,6 +52,10 @@ class Settings:
                 "BRANDSIGHT_PROMPT_OUTPUT_PRODUCTS_TABLE", DEFAULT_PROMPT_OUTPUT_PRODUCTS_TABLE
             ).strip()
             or DEFAULT_PROMPT_OUTPUT_PRODUCTS_TABLE,
+            prompt_output_entities_table=os.getenv(
+                "BRANDSIGHT_PROMPT_OUTPUT_ENTITIES_TABLE", DEFAULT_PROMPT_OUTPUT_ENTITIES_TABLE
+            ).strip()
+            or DEFAULT_PROMPT_OUTPUT_ENTITIES_TABLE,
             chatgpt_url=os.getenv("CHATGPT_URL", "https://chatgpt.com").strip(),
             chrome_user_data_dir=os.getenv("CHATGPT_CHROME_USER_DATA_DIR") or str(DEFAULT_CHROME_USER_DATA_DIR),
             headless=parse_bool(os.getenv("CHATGPT_HEADLESS"), default=False),

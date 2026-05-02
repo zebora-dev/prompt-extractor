@@ -14,7 +14,7 @@ LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
-class ProductOutputProcessResult:
+class EntityOutputProcessResult:
     status: str
     processed_count: int
     saved_count: int
@@ -23,11 +23,11 @@ class ProductOutputProcessResult:
     failures: list[dict[str, Any]]
 
 
-def process_product_outputs(
+def process_entity_outputs(
     *,
     settings: Settings,
-    product_output_refs: list[dict[str, Any]] | None = None,
-) -> ProductOutputProcessResult:
+    entity_output_refs: list[dict[str, Any]] | None = None,
+) -> EntityOutputProcessResult:
     api = ApiClient(
         settings.api_base_url,
         settings.anon_key,
@@ -36,8 +36,8 @@ def process_product_outputs(
         prompt_output_products_table=settings.prompt_output_products_table,
         prompt_output_entities_table=settings.prompt_output_entities_table,
     )
-    refs = product_output_refs or []
-    LOGGER.info("Starting product output persistence. output_refs=%s", len(refs))
+    refs = entity_output_refs or []
+    LOGGER.info("Starting entity output persistence. output_refs=%s", len(refs))
 
     processed_count = 0
     saved_count = 0
@@ -50,43 +50,45 @@ def process_product_outputs(
         prompt_id = ref.get("prompt_id")
         brand_id = ref.get("brand_id")
         batch_id = ref.get("batch_id")
-        products = ref.get("products") if isinstance(ref.get("products"), list) else []
+        entities = ref.get("entities") if isinstance(ref.get("entities"), list) else []
 
         if not output_id or not prompt_id or not brand_id or not batch_id:
-            skipped_count += len(products) or 1
+            skipped_count += len(entities) or 1
             LOGGER.warning(
-                "Skipping product output ref missing required identifiers. output_id=%s prompt_id=%s brand_id=%s batch_id=%s products=%s",
+                "Skipping entity output ref missing required identifiers. output_id=%s prompt_id=%s brand_id=%s batch_id=%s entities=%s",
                 output_id,
                 prompt_id,
                 brand_id,
                 batch_id,
-                len(products),
+                len(entities),
             )
             continue
 
         rows: list[dict[str, Any]] = []
-        for product in products:
+        for entity in entities:
             processed_count += 1
-            if not isinstance(product, dict):
+            if not isinstance(entity, dict):
                 skipped_count += 1
                 continue
 
             try:
-                rows.append(build_product_row(product, output_id=output_id, prompt_id=prompt_id, brand_id=brand_id, batch_id=batch_id))
+                rows.append(build_entity_row(entity, output_id=output_id, prompt_id=prompt_id, brand_id=brand_id, batch_id=batch_id))
             except Exception as exc:
                 failed_count += 1
                 failure = {
                     "output_id": output_id,
                     "prompt_id": prompt_id,
-                    "button_index": product.get("button_index"),
+                    "entity_index": entity.get("entity_index"),
+                    "entity_text": entity.get("entity_text"),
                     "error": str(exc),
                 }
                 failures.append(failure)
                 LOGGER.exception(
-                    "Failed to prepare product row. output_id=%s prompt_id=%s button_index=%s: %s",
+                    "Failed to prepare entity row. output_id=%s prompt_id=%s entity_index=%s entity_text=%r: %s",
                     output_id,
                     prompt_id,
-                    product.get("button_index"),
+                    entity.get("entity_index"),
+                    entity.get("entity_text"),
                     exc,
                 )
 
@@ -94,10 +96,10 @@ def process_product_outputs(
             continue
 
         try:
-            saved_rows = api.save_prompt_output_products(rows)
+            saved_rows = api.save_prompt_output_entities(rows)
             saved_count += len(saved_rows)
             LOGGER.info(
-                "Saved product output rows. output_id=%s prompt_id=%s prepared=%s saved=%s",
+                "Saved entity output rows. output_id=%s prompt_id=%s prepared=%s saved=%s",
                 output_id,
                 prompt_id,
                 len(rows),
@@ -107,10 +109,10 @@ def process_product_outputs(
             failed_count += len(rows)
             failure = {"output_id": output_id, "prompt_id": prompt_id, "error": str(exc)}
             failures.append(failure)
-            LOGGER.exception("Failed to save product output rows. output_id=%s prompt_id=%s: %s", output_id, prompt_id, exc)
+            LOGGER.exception("Failed to save entity output rows. output_id=%s prompt_id=%s: %s", output_id, prompt_id, exc)
 
     status = "completed" if failed_count == 0 else "completed_with_failures"
-    return ProductOutputProcessResult(
+    return EntityOutputProcessResult(
         status=status,
         processed_count=processed_count,
         saved_count=saved_count,
@@ -120,19 +122,19 @@ def process_product_outputs(
     )
 
 
-def build_product_row(
-    product: dict[str, Any],
+def build_entity_row(
+    entity: dict[str, Any],
     *,
     output_id: int | str,
     prompt_id: str,
     brand_id: str,
     batch_id: str,
 ) -> dict[str, Any]:
-    raw_html = str(product.get("raw_html") or "")
+    raw_html = str(entity.get("raw_html") or "")
     markdown = html_to_markdown(raw_html) if raw_html else ""
-    images = product.get("images") if isinstance(product.get("images"), list) else []
-    links = product.get("links") if isinstance(product.get("links"), list) else []
-    text_length = product.get("text_length")
+    images = entity.get("images") if isinstance(entity.get("images"), list) else []
+    links = entity.get("links") if isinstance(entity.get("links"), list) else []
+    text_length = entity.get("text_length")
     if text_length is None:
         text_length = len(markdown)
 
@@ -141,14 +143,16 @@ def build_product_row(
         "prompt_id": str(prompt_id),
         "brand_id": str(brand_id),
         "batch_id": str(batch_id),
+        "entity_text": str(entity.get("entity_text") or ""),
+        "title": str(entity.get("title") or ""),
         "raw_html": raw_html,
         "markdown": markdown,
         "links": links,
         "images": images,
-        "html_length": int(product.get("html_length") or len(raw_html)),
-        "image_count": int(product.get("image_count") or len(images)),
+        "html_length": int(entity.get("html_length") or len(raw_html)),
+        "image_count": int(entity.get("image_count") or len(images)),
         "text_length": int(text_length or 0),
-        "button_index": int(product.get("button_index") or product.get("index") or 0),
-        "capture_method": str(product.get("capture_method") or "unknown"),
+        "entity_index": int(entity.get("entity_index") or entity.get("index") or 0),
+        "capture_method": str(entity.get("capture_method") or "unknown"),
         "created_at": datetime.now(timezone.utc).isoformat(),
     }

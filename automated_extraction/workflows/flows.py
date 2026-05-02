@@ -5,7 +5,12 @@ from typing import Any
 from prefect import flow
 from prefect.logging import get_run_logger
 
-from automated_extraction.workflows.tasks import extract_chatgpt_batch_task, product_output_process_task, prompt_output_process_task
+from automated_extraction.workflows.tasks import (
+    entity_output_process_task,
+    extract_chatgpt_batch_task,
+    product_output_process_task,
+    prompt_output_process_task,
+)
 
 
 @flow(
@@ -60,12 +65,19 @@ def prompt_extraction_flow(
         llm_model_filter=llm_model_filter,
     )
     product_output_refs = result.pop("product_outputs", []) or []
+    entity_output_refs = result.pop("entity_outputs", []) or []
 
     product_processing_result: dict[str, Any] | None = None
     if not dry_run and product_output_refs:
         product_processing_result = product_output_process_task(product_output_refs=product_output_refs)
     else:
         flow_logger.info("Skipping product output processing because no product flyouts were captured.")
+
+    entity_processing_result: dict[str, Any] | None = None
+    if not dry_run and entity_output_refs:
+        entity_processing_result = entity_output_process_task(entity_output_refs=entity_output_refs)
+    else:
+        flow_logger.info("Skipping entity output processing because no entity flyouts were captured.")
 
     processing_result: dict[str, Any] | None = None
     if not dry_run and result.get("saved_count", 0) > 0:
@@ -81,6 +93,7 @@ def prompt_extraction_flow(
     combined_result = {
         **result,
         "product_output_processing": product_processing_result,
+        "entity_output_processing": entity_processing_result,
         "prompt_output_processing": processing_result,
     }
     flow_logger.info("Prompt extraction flow finished: %s", combined_result)

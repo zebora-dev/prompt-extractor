@@ -158,12 +158,13 @@ docs/PREFECT.md
 5. Creates a fresh chat for each prompt where possible.
 6. Sends the prompt and waits for the response to finish.
 7. Clicks the latest assistant response copy button.
-8. Captures copied markdown, rendered raw HTML, source links, product flyout HTML, and model slug.
+8. Captures copied markdown, rendered raw HTML, source links, product flyout HTML, entity flyout HTML, and model slug.
 9. Saves the output directly to Supabase table `prompts_outputs`.
 10. Converts each product flyout `raw_html` into markdown and saves product rows to `prompts_outputs_products`. In Prefect runs this is the observable `product-output-process` task.
-11. Runs the `prompt-output-process` Prefect task, which converts `raw_html` into markdown, compares it with the copied markdown, and updates `response`/`markdown` with missing assets such as images and links.
+11. Converts each entity flyout `raw_html` into markdown and saves entity rows to `prompts_outputs_entities`. In Prefect runs this is the observable `entity-output-process` task.
+12. Runs the `prompt-output-process` Prefect task, which converts `raw_html` into markdown, compares it with the copied markdown, and updates `response`/`markdown` with missing assets such as images and links.
 
-The saved payload includes top-level `response`, `markdown`, `raw_html`, and `sources` fields. Metadata keeps capture method details, `source_count`, `product_count`, and a product extraction summary under `output_metadata.original_metadata.product_extraction`. Individual product flyouts are saved as rows in `prompts_outputs_products`. The Supabase layer maps app field `output_metadata` to database column `metadata`.
+The saved payload includes top-level `response`, `markdown`, `raw_html`, and `sources` fields. Metadata keeps capture method details, `source_count`, `product_count`, `entity_count`, and extraction summaries under `output_metadata.original_metadata.product_extraction` and `output_metadata.original_metadata.entity_extraction`. Individual product and entity flyouts are saved as rows in `prompts_outputs_products` and `prompts_outputs_entities`. The Supabase layer maps app field `output_metadata` to database column `metadata`.
 
 ## Product Table
 
@@ -191,6 +192,36 @@ create table if not exists prompts_outputs_products (
 create index if not exists prompts_outputs_products_output_id_idx on prompts_outputs_products(output_id);
 create index if not exists prompts_outputs_products_batch_id_idx on prompts_outputs_products(batch_id);
 create index if not exists prompts_outputs_products_prompt_id_idx on prompts_outputs_products(prompt_id);
+```
+
+## Entity Table
+
+Create a Supabase table for captured entity flyouts:
+
+```sql
+create table if not exists prompts_outputs_entities (
+  id bigserial primary key,
+  output_id bigint not null references prompts_outputs(id) on delete cascade,
+  brand_id uuid not null,
+  batch_id uuid not null,
+  prompt_id uuid not null,
+  entity_text text,
+  title text,
+  raw_html text,
+  markdown text,
+  links jsonb not null default '[]'::jsonb,
+  images jsonb not null default '[]'::jsonb,
+  html_length integer,
+  image_count integer,
+  text_length integer,
+  entity_index integer,
+  capture_method text,
+  created_at timestamptz not null default now()
+);
+
+create index if not exists prompts_outputs_entities_output_id_idx on prompts_outputs_entities(output_id);
+create index if not exists prompts_outputs_entities_batch_id_idx on prompts_outputs_entities(batch_id);
+create index if not exists prompts_outputs_entities_prompt_id_idx on prompts_outputs_entities(prompt_id);
 ```
 
 ## Notes

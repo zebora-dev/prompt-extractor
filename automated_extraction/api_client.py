@@ -14,6 +14,7 @@ class ApiClient:
     supabase_url: str | None = None
     prompt_outputs_table: str = "prompts_outputs"
     prompt_output_products_table: str = "prompts_outputs_products"
+    prompt_output_entities_table: str = "prompts_outputs_entities"
 
     @property
     def headers(self) -> dict[str, str]:
@@ -87,6 +88,16 @@ class ApiClient:
                 time.sleep(min(60, 2**attempt))
         return []
 
+    def save_prompt_output_entities(self, entities: list[dict[str, Any]], max_retries: int = 4) -> list[dict[str, Any]]:
+        for attempt in range(max_retries + 1):
+            try:
+                return self.supabase.save_prompt_output_entities(entities)
+            except Exception:
+                if attempt >= max_retries:
+                    raise
+                time.sleep(min(60, 2**attempt))
+        return []
+
     def get_prompt_output(self, output_id: int | str) -> dict[str, Any] | None:
         return self.supabase.get_prompt_output(output_id)
 
@@ -123,6 +134,7 @@ class ApiClient:
                     anon_key=self.anon_key,
                     table_name=self.prompt_outputs_table,
                     product_table_name=self.prompt_output_products_table,
+                    entity_table_name=self.prompt_output_entities_table,
                 ),
             )
         return getattr(self, "_supabase")

@@ -32,6 +32,17 @@ and capture method.
 The flow then runs:
 
 ```text
+entity-output-process
+```
+
+This task persists captured ChatGPT entity flyouts into
+`prompts_outputs_entities`. Each row includes identifiers for the prompt output,
+brand, batch, and prompt, plus `entity_text`, `raw_html`, generated `markdown`,
+`links`, `images`, counts, entity index, and capture method.
+
+The flow then runs:
+
+```text
 prompt-output-process
 ```
 
@@ -91,6 +102,7 @@ Prompt-output storage:
 BRANDSIGHT_SUPABASE_URL=https://hmwgplzdzffivawkflci.supabase.co
 BRANDSIGHT_PROMPT_OUTPUTS_TABLE=prompts_outputs
 BRANDSIGHT_PROMPT_OUTPUT_PRODUCTS_TABLE=prompts_outputs_products
+BRANDSIGHT_PROMPT_OUTPUT_ENTITIES_TABLE=prompts_outputs_entities
 ```
 
 `BRANDSIGHT_SUPABASE_URL` is optional when `BRANDSIGHT_API_BASE_URL` is set to the project functions URL; the app derives the project URL automatically. `BRANDSIGHT_API_BASE_URL` is retained as a legacy compatibility setting.
