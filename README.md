@@ -1,6 +1,6 @@
 # Automated ChatGPT Extraction
 
-Standalone automation for pulling prompts from the BrandSight API, running them in ChatGPT, capturing the answer via the ChatGPT copy button, and saving outputs back to the existing `prompt-outputs` API.
+Standalone automation for pulling batches/prompts from Supabase, running them in ChatGPT, capturing the answer via the ChatGPT copy button, and saving outputs directly back to Supabase.
 
 This mirrors the Chrome/Firefox extension flow in `chromeApp/extension-shared/background.js`, but can run either as a CLI process or as a Prefect-observed workflow.
 
@@ -16,7 +16,9 @@ cp .env.example .env
 
 Python 3.12 is recommended because `undetected-chromedriver` currently imports `distutils`, which Python 3.13 removed. If you run on Python 3.13, the automation falls back to Selenium's standard Chrome driver.
 
-Edit `.env` and set `BRANDSIGHT_SUPABASE_ANON_KEY`. The current extension value is in:
+Edit `.env` and set `BRANDSIGHT_SUPABASE_ANON_KEY`. Prompt-output CRUD uses the Supabase table configured by `BRANDSIGHT_PROMPT_OUTPUTS_TABLE` and defaults to `prompts_outputs`. Product flyout rows use `BRANDSIGHT_PROMPT_OUTPUT_PRODUCTS_TABLE` and default to `prompts_outputs_products`.
+
+The current extension key value is in:
 
 ```text
 chromeApp/extension-shared/background.js
@@ -56,6 +58,8 @@ Useful options:
 python -m automated_extraction --batch-id <batch-uuid> --limit 25 --skip 10
 python -m automated_extraction --prompts-file ../chromeApp/extension-shared/prompts.json
 python -m automated_extraction --batch-id <batch-uuid> --dry-run
+python -m automated_extraction --batch-id <batch-uuid> --limit 1 --force-rerun
+python -m automated_extraction --batch-id <batch-uuid> --limit 1 --llm-model-filter gpt
 ```
 
 ## Prefect Orchestration
@@ -110,7 +114,9 @@ Trigger parameters mirror the CLI:
   "skip": 0,
   "dry_run": false,
   "headless": null,
-  "sources_panel_pause_seconds": 0
+  "sources_panel_pause_seconds": 0,
+  "force_rerun": false,
+  "llm_model_filter": "gpt"
 }
 ```
 
@@ -145,21 +151,50 @@ docs/PREFECT.md
 
 ## What It Does
 
-1. Loads the batch and brand from `GET /batches`.
-2. Loads prompts from `POST /prompts`.
-3. Skips prompts already saved for the same prompt, brand, and batch.
+1. Loads the batch and brand directly from Supabase table `batches`.
+2. Loads active prompts directly from Supabase table `prompts`.
+3. Filters to prompts without an existing output for the same prompt, brand, batch, and matching `llm_model`.
 4. Opens `https://chatgpt.com`.
 5. Creates a fresh chat for each prompt where possible.
 6. Sends the prompt and waits for the response to finish.
 7. Clicks the latest assistant response copy button.
 8. Captures copied markdown, rendered raw HTML, source links, product flyout HTML, and model slug.
-9. Saves the output to `POST /prompt-outputs`.
-10. Runs the `prompt-output-process` Prefect task, which converts `raw_html` into markdown, compares it with the copied markdown, and updates `response`/`markdown` with missing assets such as images and links.
+9. Saves the output directly to Supabase table `prompts_outputs`.
+10. Converts each product flyout `raw_html` into markdown and saves product rows to `prompts_outputs_products`. In Prefect runs this is the observable `product-output-process` task.
+11. Runs the `prompt-output-process` Prefect task, which converts `raw_html` into markdown, compares it with the copied markdown, and updates `response`/`markdown` with missing assets such as images and links.
 
-The saved payload includes top-level `response`, `markdown`, `raw_html`, and `sources` fields. Metadata keeps capture method details, `source_count`, `product_count`, and captured product flyout HTML under `output_metadata.original_metadata.product_extraction.outputs`.
+The saved payload includes top-level `response`, `markdown`, `raw_html`, and `sources` fields. Metadata keeps capture method details, `source_count`, `product_count`, and a product extraction summary under `output_metadata.original_metadata.product_extraction`. Individual product flyouts are saved as rows in `prompts_outputs_products`. The Supabase layer maps app field `output_metadata` to database column `metadata`.
+
+## Product Table
+
+Create a Supabase table for captured product flyouts:
+
+```sql
+create table if not exists prompts_outputs_products (
+  id bigserial primary key,
+  output_id bigint not null references prompts_outputs(id) on delete cascade,
+  brand_id uuid not null,
+  batch_id uuid not null,
+  prompt_id uuid not null,
+  raw_html text,
+  markdown text,
+  links jsonb not null default '[]'::jsonb,
+  images jsonb not null default '[]'::jsonb,
+  html_length integer,
+  image_count integer,
+  text_length integer,
+  button_index integer,
+  capture_method text,
+  created_at timestamptz not null default now()
+);
+
+create index if not exists prompts_outputs_products_output_id_idx on prompts_outputs_products(output_id);
+create index if not exists prompts_outputs_products_batch_id_idx on prompts_outputs_products(batch_id);
+create index if not exists prompts_outputs_products_prompt_id_idx on prompts_outputs_products(prompt_id);
+```
 
 ## Notes
 
 - The baseline library referenced by the team, `daily-coding-problem/chatgpt-scraper-lib`, is Selenium-based and uses the same core pattern: browser session, prompt textbox, send button, wait for stop button to disappear, then prefer the copy button over DOM text.
-- This local implementation keeps those ideas but uses the BrandSight API payloads directly, so it can run without the extension.
+- This local implementation keeps those ideas but uses the BrandSight Supabase tables directly, so it can run without the extension.
 - ChatGPT UI selectors can change. If capture breaks, update `automated_extraction/chatgpt_runner.py`.

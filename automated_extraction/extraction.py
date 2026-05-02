@@ -27,6 +27,7 @@ class ExtractionRunResult:
     brand_id: str | None
     failures: list[dict[str, Any]]
     saved_outputs: list[dict[str, Any]]
+    product_outputs: list[dict[str, Any]]
 
 
 def run_extraction_job(
@@ -41,27 +42,39 @@ def run_extraction_job(
     headless: bool | None = None,
     chrome_user_data_dir: str | None = None,
     sources_panel_pause_seconds: int = 0,
+    force_rerun: bool = False,
+    llm_model_filter: str | None = "gpt",
 ) -> ExtractionRunResult:
     if not batch_id and not prompts_file:
         raise ValueError("one of batch_id or prompts_file is required")
 
-    api = ApiClient(settings.api_base_url, settings.anon_key)
+    api = ApiClient(
+        settings.api_base_url,
+        settings.anon_key,
+        supabase_url=settings.supabase_url,
+        prompt_outputs_table=settings.prompt_outputs_table,
+        prompt_output_products_table=settings.prompt_output_products_table,
+    )
     prompts, resolved_batch_id, resolved_brand_id = load_prompt_work(
         api=api,
         batch_id=batch_id,
         prompts_file=prompts_file,
         brand_id=brand_id,
+        only_remaining=not force_rerun,
+        llm_model_filter=llm_model_filter,
     )
     prompts = prompts[max(0, skip) :]
     if limit:
         prompts = prompts[:limit]
 
     LOGGER.info(
-        "Loaded %s prompt(s). batch_id=%s brand_id=%s dry_run=%s",
+        "Loaded %s prompt(s). batch_id=%s brand_id=%s dry_run=%s only_remaining=%s llm_model_filter=%s",
         len(prompts),
         resolved_batch_id or "local",
         resolved_brand_id or "mixed",
         dry_run,
+        not force_rerun,
+        llm_model_filter or "any",
     )
 
     if dry_run:
@@ -83,6 +96,7 @@ def run_extraction_job(
             brand_id=resolved_brand_id,
             failures=[],
             saved_outputs=[],
+            product_outputs=[],
         )
 
     saved_count = 0
@@ -90,6 +104,7 @@ def run_extraction_job(
     failed_count = 0
     failures: list[dict[str, Any]] = []
     saved_outputs: list[dict[str, Any]] = []
+    product_outputs: list[dict[str, Any]] = []
 
     with ChatGPTRunner(
         settings.chatgpt_url,
@@ -107,9 +122,28 @@ def run_extraction_job(
                 LOGGER.warning("Skipping prompt missing id or brand_id: %s", prompt)
                 continue
 
-            if resolved_batch_id and api.prompt_output_exists(prompt_id, prompt_brand_id, resolved_batch_id):
+            existing_output = (
+                None
+                if force_rerun
+                else api.find_existing_prompt_output(
+                    prompt_id,
+                    prompt_brand_id,
+                    resolved_batch_id,
+                    llm_model_filter=llm_model_filter,
+                )
+            )
+            if existing_output:
                 skipped_count += 1
-                LOGGER.info("[%s/%s] Skipping existing output for prompt %s", index, len(prompts), prompt_id)
+                LOGGER.info(
+                    "[%s/%s] Skipping existing output for prompt %s. output_id=%s llm_model=%s run_at=%s force_rerun=%s",
+                    index,
+                    len(prompts),
+                    prompt_id,
+                    existing_output.get("output_id") or existing_output.get("id"),
+                    existing_output.get("llm_model"),
+                    existing_output.get("run_at"),
+                    force_rerun,
+                )
                 continue
 
             text = prompt_text(prompt)
@@ -148,6 +182,13 @@ def run_extraction_job(
                 saved_count += 1
                 saved_output = normalize_saved_output(saved, output)
                 saved_outputs.append(saved_output)
+                if capture.products:
+                    product_outputs.append(
+                        {
+                            **saved_output,
+                            "products": capture.products,
+                        }
+                    )
                 LOGGER.info(
                     "[%s/%s] Saved prompt %s: output_id=%s response=%s",
                     index,
@@ -174,6 +215,7 @@ def run_extraction_job(
         brand_id=resolved_brand_id,
         failures=failures,
         saved_outputs=saved_outputs,
+        product_outputs=product_outputs,
     )
 
 
@@ -183,6 +225,8 @@ def load_prompt_work(
     batch_id: str | None,
     prompts_file: Path | None,
     brand_id: str | None,
+    only_remaining: bool = True,
+    llm_model_filter: str | None = "gpt",
 ) -> tuple[list[dict[str, Any]], str | None, str | None]:
     if prompts_file:
         with prompts_file.open("r", encoding="utf-8") as handle:
@@ -200,7 +244,16 @@ def load_prompt_work(
     resolved_brand_id = brand_id or batch.get("brand_id")
     if not resolved_brand_id:
         raise RuntimeError(f"Batch {batch_id} does not include brand_id")
-    return api.get_prompts(batch_id, str(resolved_brand_id)), batch_id, str(resolved_brand_id)
+    return (
+        api.get_prompts(
+            batch_id,
+            str(resolved_brand_id),
+            only_remaining=only_remaining,
+            llm_model_filter=llm_model_filter,
+        ),
+        batch_id,
+        str(resolved_brand_id),
+    )
 
 
 def first_brand_id(prompts: list[dict[str, Any]]) -> str | None:
@@ -287,7 +340,6 @@ def build_prompt_output(
                     "process_name": "product_extraction",
                     "product_count": len(products or []),
                     "capture_method": product_capture_method,
-                    "outputs": products or [],
                 },
             },
             "site_used": "OpenAI",

@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import argparse
 import logging
+from dataclasses import asdict
 from pathlib import Path
 
 from .config import Settings
 from .extraction import run_extraction_job
+from .product_output_processor import process_product_outputs
 
 
 LOGGER = logging.getLogger(__name__)
@@ -18,6 +20,7 @@ def main(argv: list[str] | None = None) -> int:
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s %(levelname)s %(message)s",
     )
+    quiet_third_party_http_logs()
 
     settings = Settings.from_env(require_api_key=not args.login_only)
 
@@ -51,8 +54,21 @@ def main(argv: list[str] | None = None) -> int:
         headless=args.headless if args.headless is not None else settings.headless,
         chrome_user_data_dir=args.chrome_user_data_dir,
         sources_panel_pause_seconds=args.sources_panel_pause_seconds,
+        force_rerun=args.force_rerun,
+        llm_model_filter=args.llm_model_filter,
     )
-    LOGGER.info("Extraction run finished: %s", result)
+    payload = asdict(result)
+    product_output_refs = payload.pop("product_outputs", []) or []
+    product_processing_result = None
+    if not args.dry_run and product_output_refs:
+        product_processing_result = process_product_outputs(settings=settings, product_output_refs=product_output_refs)
+
+    payload["product_output_processing"] = asdict(product_processing_result) if product_processing_result else None
+    payload["product_outputs_summary"] = {
+        "output_ref_count": len(product_output_refs),
+        "product_count": sum(len(ref.get("products") or []) for ref in product_output_refs if isinstance(ref, dict)),
+    }
+    LOGGER.info("Extraction run finished: %s", payload)
     if result.failed_count:
         return 1
 
@@ -69,6 +85,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--limit", type=int, help="Maximum prompts to run.")
     parser.add_argument("--skip", type=int, default=0, help="Number of loaded prompts to skip.")
     parser.add_argument("--dry-run", action="store_true", help="Load prompts and print a preview without opening ChatGPT.")
+    parser.add_argument("--force-rerun", action="store_true", help="Run prompts even when an output already exists for the same batch, brand, and prompt.")
+    parser.add_argument(
+        "--llm-model-filter",
+        default="gpt",
+        help="Only treat prompt outputs whose llm_model contains this value as completed. Defaults to 'gpt'. Use an empty string to match any model.",
+    )
     parser.add_argument("--headless", action=argparse.BooleanOptionalAction, default=None, help="Override CHATGPT_HEADLESS.")
     parser.add_argument("--chrome-user-data-dir", help="Chrome profile directory to reuse for ChatGPT login.")
     parser.add_argument(
@@ -79,3 +101,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--verbose", action="store_true", help="Enable debug logging.")
     return parser
+
+
+def quiet_third_party_http_logs() -> None:
+    for logger_name in [
+        "hpack",
+        "httpcore",
+        "httpx",
+        "postgrest",
+        "realtime",
+        "supabase",
+        "urllib3",
+    ]:
+        logging.getLogger(logger_name).setLevel(logging.WARNING)

@@ -35,6 +35,8 @@ def get_flows():
                 "headless": None,
                 "chrome_user_data_dir": None,
                 "sources_panel_pause_seconds": 0,
+                "force_rerun": False,
+                "llm_model_filter": "gpt",
             },
         },
         "prompt-output-processing": {

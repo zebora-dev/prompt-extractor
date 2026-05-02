@@ -1,0 +1,452 @@
+from __future__ import annotations
+
+import logging
+from dataclasses import asdict, dataclass, fields
+from typing import Any
+
+from supabase import Client, create_client
+
+
+LOGGER = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class BatchRow:
+    id: str
+    name: str | None = None
+    brand_id: str | None = None
+    batch_type: str | None = None
+    batch_metadata: Any = None
+    config: Any = None
+    dashboard_type: str | None = None
+    dashboard_version: str | None = None
+    description: str | None = None
+    status: str | None = None
+    started_at: str | None = None
+    completed_at: str | None = None
+    date: str | None = None
+    created_by: str | None = None
+    is_active: bool | None = None
+    is_approved: str | None = None
+    multi_llm: bool | None = None
+    brand: Any = None
+
+
+@dataclass(frozen=True)
+class PromptRow:
+    id: str
+    brand_id: str
+    text: str
+    active: bool | None = None
+    approved: bool | None = None
+    category: str | None = None
+    created_at: str | None = None
+    flag: bool | None = None
+    measurements: Any = None
+    metadata: Any = None
+    tags: Any = None
+    updated_at: str | None = None
+    brand: Any = None
+
+
+@dataclass(frozen=True)
+class PromptOutputRow:
+    batch_id: str
+    brand_id: str
+    prompt_id: str
+    id: int | None = None
+    response: str | None = None
+    markdown: str | None = None
+    raw_html: str | None = None
+    sources: Any = None
+    llm_model: str | None = None
+    config: Any = None
+    metadata: Any = None
+    version_info: Any = None
+    run_at: str | None = None
+
+
+@dataclass(frozen=True)
+class PromptOutputProductRow:
+    output_id: int
+    brand_id: str
+    batch_id: str
+    prompt_id: str
+    id: int | None = None
+    raw_html: str | None = None
+    markdown: str | None = None
+    links: Any = None
+    images: Any = None
+    html_length: int | None = None
+    image_count: int | None = None
+    text_length: int | None = None
+    button_index: int | None = None
+    capture_method: str | None = None
+    created_at: str | None = None
+
+
+BatchDict = dict[str, Any]
+PromptDict = dict[str, Any]
+PromptOutputDict = dict[str, Any]
+PromptOutputProductDict = dict[str, Any]
+
+BATCH_COLUMNS = tuple(field.name for field in fields(BatchRow) if field.name != "brand")
+PROMPT_COLUMNS = tuple(field.name for field in fields(PromptRow) if field.name != "brand")
+PROMPT_OUTPUT_COLUMNS = tuple(field.name for field in fields(PromptOutputRow))
+PROMPT_OUTPUT_INSERT_COLUMNS = tuple(column for column in PROMPT_OUTPUT_COLUMNS if column != "id")
+PROMPT_OUTPUT_UPDATE_COLUMNS = tuple(
+    column for column in PROMPT_OUTPUT_COLUMNS if column not in {"id", "batch_id", "brand_id", "prompt_id"}
+)
+PROMPT_OUTPUT_PRODUCT_COLUMNS = tuple(field.name for field in fields(PromptOutputProductRow))
+PROMPT_OUTPUT_PRODUCT_INSERT_COLUMNS = tuple(column for column in PROMPT_OUTPUT_PRODUCT_COLUMNS if column != "id")
+
+
+@dataclass(frozen=True)
+class SupabasePromptOutputRepository:
+    supabase_url: str
+    anon_key: str
+    table_name: str = "prompts_outputs"
+    product_table_name: str = "prompts_outputs_products"
+
+    def __post_init__(self) -> None:
+        if not self.supabase_url:
+            raise RuntimeError("Missing Supabase URL for prompt output repository")
+        if not self.anon_key:
+            raise RuntimeError("Missing Supabase anon key for prompt output repository")
+
+    @property
+    def client(self) -> Client:
+        if not hasattr(self, "_client"):
+            object.__setattr__(self, "_client", create_client(self.supabase_url, self.anon_key))
+        return getattr(self, "_client")
+
+    def get_batches(self) -> list[BatchDict]:
+        response = (
+            self.client.table("batches")
+            .select("*, brand:brands(name, description)")
+            .order("started_at", desc=True)
+            .execute()
+        )
+        return [row_to_batch(row) for row in response.data or [] if isinstance(row, dict)]
+
+    def get_batch(self, batch_id: str) -> BatchDict:
+        response = (
+            self.client.table("batches")
+            .select("*, brand:brands(name, description)")
+            .eq("id", batch_id)
+            .limit(1)
+            .execute()
+        )
+        if response.data:
+            return row_to_batch(response.data[0])
+        raise RuntimeError(f"Batch not found: {batch_id}")
+
+    def get_prompts(
+        self,
+        batch_id: str,
+        brand_id: str,
+        limit: int = 10000,
+        *,
+        only_remaining: bool = True,
+        llm_model_filter: str | None = "gpt",
+    ) -> list[PromptDict]:
+        response = (
+            self.client.table("prompts")
+            .select("*, brand:brands(name, description)")
+            .eq("brand_id", brand_id)
+            .eq("active", True)
+            .order("created_at", desc=True)
+            .limit(max(1, limit))
+            .execute()
+        )
+        prompts = [row_to_prompt(row, batch_id=batch_id, brand_id=brand_id) for row in response.data or [] if isinstance(row, dict)]
+        if not only_remaining:
+            LOGGER.info("Loaded %s active prompt(s) for brand_id=%s without remaining filter.", len(prompts), brand_id)
+            return prompts
+
+        completed_prompt_ids = self.completed_prompt_ids(
+            batch_id=batch_id,
+            brand_id=brand_id,
+            llm_model_filter=llm_model_filter,
+        )
+        remaining = [prompt for prompt in prompts if prompt.get("id") not in completed_prompt_ids]
+        LOGGER.info(
+            "Remaining prompts analysis. total_prompts=%s completed_count=%s remaining_count=%s batch_id=%s brand_id=%s llm_model_filter=%s",
+            len(prompts),
+            len(completed_prompt_ids),
+            len(remaining),
+            batch_id,
+            brand_id,
+            llm_model_filter or "any",
+        )
+        return remaining
+
+    def completed_prompt_ids(self, *, batch_id: str, brand_id: str, llm_model_filter: str | None = "gpt") -> set[str]:
+        query = (
+            self.client.table(self.table_name)
+            .select("prompt_id")
+            .eq("batch_id", batch_id)
+            .eq("brand_id", brand_id)
+        )
+        if llm_model_filter:
+            query = query.ilike("llm_model", f"%{llm_model_filter}%")
+
+        response = query.execute()
+        return {str(row.get("prompt_id")) for row in response.data or [] if isinstance(row, dict) and row.get("prompt_id")}
+
+    def prompt_output_exists(
+        self,
+        prompt_id: str,
+        brand_id: str,
+        batch_id: str | None,
+        *,
+        llm_model_filter: str | None = "gpt",
+    ) -> bool:
+        return self.find_existing_prompt_output(prompt_id, brand_id, batch_id, llm_model_filter=llm_model_filter) is not None
+
+    def find_existing_prompt_output(
+        self,
+        prompt_id: str,
+        brand_id: str,
+        batch_id: str | None,
+        *,
+        llm_model_filter: str | None = "gpt",
+    ) -> dict[str, Any] | None:
+        if not prompt_id or not brand_id or not batch_id:
+            return None
+
+        query = (
+            self.client.table(self.table_name)
+            .select("id,prompt_id,brand_id,batch_id,llm_model,run_at")
+            .eq("prompt_id", prompt_id)
+            .eq("brand_id", brand_id)
+            .eq("batch_id", batch_id)
+        )
+        if llm_model_filter:
+            query = query.ilike("llm_model", f"%{llm_model_filter}%")
+
+        response = query.order("id", desc=True).limit(1).execute()
+        if not response.data:
+            return None
+        return row_to_output(response.data[0])
+
+    def save_prompt_output(self, output: dict[str, Any]) -> dict[str, Any] | None:
+        row = output_to_row(output, include_id=False)
+        LOGGER.info("Saving prompt output directly to Supabase. table=%s prompt_id=%s", self.table_name, row.get("prompt_id"))
+        response = self.client.table(self.table_name).insert(row).execute()
+        if not response.data:
+            return None
+        return row_to_output(response.data[0])
+
+    def save_prompt_output_products(self, products: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        rows = [product_to_row(product, include_id=False) for product in products]
+        rows = [row for row in rows if row.get("output_id") and row.get("prompt_id") and row.get("brand_id")]
+        if not rows:
+            return []
+
+        LOGGER.info("Saving prompt output product rows directly to Supabase. table=%s count=%s", self.product_table_name, len(rows))
+        response = self.client.table(self.product_table_name).insert(rows).execute()
+        return [row_to_product(row) for row in response.data or [] if isinstance(row, dict)]
+
+    def get_prompt_output(self, output_id: int | str) -> dict[str, Any] | None:
+        outputs = self.get_prompt_outputs(output_id=output_id, limit=1)
+        return outputs[0] if outputs else None
+
+    def get_prompt_outputs(
+        self,
+        *,
+        output_id: int | str | None = None,
+        batch_id: str | None = None,
+        brand_id: str | None = None,
+        prompt_id: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        query = self.client.table(self.table_name).select(",".join(PROMPT_OUTPUT_COLUMNS))
+        if output_id:
+            query = query.eq("id", output_id)
+        if batch_id:
+            query = query.eq("batch_id", batch_id)
+        if brand_id:
+            query = query.eq("brand_id", brand_id)
+        if prompt_id:
+            query = query.eq("prompt_id", prompt_id)
+
+        response = query.order("id", desc=True).limit(max(1, limit)).execute()
+        rows = response.data or []
+        return [row_to_output(row) for row in rows if isinstance(row, dict)]
+
+    def update_prompt_output(self, output: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any] | None:
+        row_patch = patch_to_row(patch)
+        if not row_patch:
+            return None
+
+        output_id = output.get("id") or output.get("output_id") or output.get("prompt_output_id")
+        if output_id:
+            response = self.client.table(self.table_name).update(row_patch).eq("id", output_id).execute()
+        else:
+            prompt_id = output.get("prompt_id")
+            brand_id = output.get("brand_id")
+            batch_id = output.get("batch_id")
+            if not prompt_id or not brand_id or not batch_id:
+                raise RuntimeError("Cannot update prompt output without id or prompt_id/brand_id/batch_id")
+            response = (
+                self.client.table(self.table_name)
+                .update(row_patch)
+                .eq("prompt_id", prompt_id)
+                .eq("brand_id", brand_id)
+                .eq("batch_id", batch_id)
+                .execute()
+            )
+
+        if not response.data:
+            return None
+        return row_to_output(response.data[0])
+
+
+def output_to_row(output: dict[str, Any], *, include_id: bool) -> dict[str, Any]:
+    row = {
+        "id": output.get("id") or output.get("output_id") or output.get("prompt_output_id"),
+        "prompt_id": output.get("prompt_id"),
+        "brand_id": output.get("brand_id"),
+        "batch_id": output.get("batch_id"),
+        "response": output.get("response"),
+        "markdown": output.get("markdown"),
+        "raw_html": output.get("raw_html"),
+        "sources": output.get("sources"),
+        "llm_model": output.get("llm_model"),
+        "config": output.get("config"),
+        "metadata": output.get("output_metadata", output.get("metadata")),
+        "version_info": output.get("version_info"),
+        "run_at": output.get("run_at"),
+    }
+    allowed_columns = PROMPT_OUTPUT_COLUMNS if include_id else PROMPT_OUTPUT_INSERT_COLUMNS
+    return compact_row(row, allowed_columns)
+
+
+def patch_to_row(patch: dict[str, Any]) -> dict[str, Any]:
+    row = {
+        "response": patch.get("response"),
+        "markdown": patch.get("markdown"),
+        "raw_html": patch.get("raw_html"),
+        "sources": patch.get("sources"),
+        "llm_model": patch.get("llm_model"),
+        "config": patch.get("config"),
+        "metadata": patch.get("output_metadata", patch.get("metadata")),
+        "version_info": patch.get("version_info"),
+        "run_at": patch.get("run_at"),
+    }
+    return compact_row(row, PROMPT_OUTPUT_UPDATE_COLUMNS)
+
+
+def product_to_row(product: dict[str, Any], *, include_id: bool) -> dict[str, Any]:
+    row = {
+        "id": product.get("id"),
+        "output_id": product.get("output_id"),
+        "prompt_id": product.get("prompt_id"),
+        "brand_id": product.get("brand_id"),
+        "batch_id": product.get("batch_id"),
+        "raw_html": product.get("raw_html"),
+        "markdown": product.get("markdown"),
+        "links": product.get("links"),
+        "images": product.get("images"),
+        "html_length": product.get("html_length"),
+        "image_count": product.get("image_count"),
+        "text_length": product.get("text_length"),
+        "button_index": product.get("button_index"),
+        "capture_method": product.get("capture_method"),
+        "created_at": product.get("created_at"),
+    }
+    allowed_columns = PROMPT_OUTPUT_PRODUCT_COLUMNS if include_id else PROMPT_OUTPUT_PRODUCT_INSERT_COLUMNS
+    return compact_row(row, allowed_columns)
+
+
+def compact_row(row: dict[str, Any], allowed_columns: tuple[str, ...]) -> dict[str, Any]:
+    return {key: value for key, value in row.items() if key in allowed_columns and value is not None}
+
+
+def row_to_batch(row: dict[str, Any]) -> BatchDict:
+    typed_row = BatchRow(
+        id=str(row.get("id") or ""),
+        name=row.get("name"),
+        brand_id=row.get("brand_id"),
+        batch_type=row.get("batch_type"),
+        batch_metadata=row.get("batch_metadata"),
+        config=row.get("config"),
+        dashboard_type=row.get("dashboard_type"),
+        dashboard_version=row.get("dashboard_version"),
+        description=row.get("description"),
+        status=row.get("status"),
+        started_at=row.get("started_at"),
+        completed_at=row.get("completed_at"),
+        date=row.get("date"),
+        created_by=row.get("created_by"),
+        is_active=row.get("is_active"),
+        is_approved=row.get("is_approved"),
+        multi_llm=row.get("multi_llm"),
+        brand=row.get("brand"),
+    )
+    return asdict(typed_row)
+
+
+def row_to_prompt(row: dict[str, Any], *, batch_id: str, brand_id: str) -> PromptDict:
+    typed_row = PromptRow(
+        id=str(row.get("id") or ""),
+        brand_id=str(row.get("brand_id") or brand_id),
+        text=str(row.get("text") or ""),
+        active=row.get("active"),
+        approved=row.get("approved"),
+        category=row.get("category"),
+        created_at=row.get("created_at"),
+        flag=row.get("flag"),
+        measurements=row.get("measurements"),
+        metadata=row.get("metadata"),
+        tags=row.get("tags"),
+        updated_at=row.get("updated_at"),
+        brand=row.get("brand"),
+    )
+    prompt = asdict(typed_row)
+    prompt["batch_id"] = batch_id
+    return prompt
+
+
+def row_to_output(row: dict[str, Any]) -> PromptOutputDict:
+    typed_row = PromptOutputRow(
+        id=row.get("id"),
+        prompt_id=str(row.get("prompt_id") or ""),
+        brand_id=str(row.get("brand_id") or ""),
+        batch_id=str(row.get("batch_id") or ""),
+        response=row.get("response"),
+        markdown=row.get("markdown"),
+        raw_html=row.get("raw_html"),
+        sources=row.get("sources"),
+        llm_model=row.get("llm_model"),
+        config=row.get("config"),
+        metadata=row.get("metadata"),
+        version_info=row.get("version_info"),
+        run_at=row.get("run_at"),
+    )
+    payload = asdict(typed_row)
+    payload["output_id"] = typed_row.id
+    payload["output_metadata"] = typed_row.metadata if isinstance(typed_row.metadata, dict) else typed_row.metadata or {}
+    return payload
+
+
+def row_to_product(row: dict[str, Any]) -> PromptOutputProductDict:
+    typed_row = PromptOutputProductRow(
+        id=row.get("id"),
+        output_id=int(row.get("output_id") or 0),
+        prompt_id=str(row.get("prompt_id") or ""),
+        brand_id=str(row.get("brand_id") or ""),
+        batch_id=str(row.get("batch_id") or ""),
+        raw_html=row.get("raw_html"),
+        markdown=row.get("markdown"),
+        links=row.get("links"),
+        images=row.get("images"),
+        html_length=row.get("html_length"),
+        image_count=row.get("image_count"),
+        text_length=row.get("text_length"),
+        button_index=row.get("button_index"),
+        capture_method=row.get("capture_method"),
+        created_at=row.get("created_at"),
+    )
+    return asdict(typed_row)

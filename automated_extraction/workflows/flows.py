@@ -5,7 +5,7 @@ from typing import Any
 from prefect import flow
 from prefect.logging import get_run_logger
 
-from automated_extraction.workflows.tasks import extract_chatgpt_batch_task, prompt_output_process_task
+from automated_extraction.workflows.tasks import extract_chatgpt_batch_task, product_output_process_task, prompt_output_process_task
 
 
 @flow(
@@ -23,6 +23,8 @@ def prompt_extraction_flow(
     headless: bool | None = None,
     chrome_user_data_dir: str | None = None,
     sources_panel_pause_seconds: int = 0,
+    force_rerun: bool = False,
+    llm_model_filter: str | None = "gpt",
 ) -> dict[str, Any]:
     """
     Orchestrate a ChatGPT prompt extraction run.
@@ -35,12 +37,14 @@ def prompt_extraction_flow(
         raise ValueError("one of batch_id or prompts_file is required")
 
     flow_logger.info(
-        "Starting prompt extraction flow. batch_id=%s prompts_file=%s brand_id=%s limit=%s skip=%s",
+        "Starting prompt extraction flow. batch_id=%s prompts_file=%s brand_id=%s limit=%s skip=%s force_rerun=%s llm_model_filter=%s",
         batch_id,
         prompts_file,
         brand_id,
         limit,
         skip,
+        force_rerun,
+        llm_model_filter or "any",
     )
     result = extract_chatgpt_batch_task(
         batch_id=batch_id,
@@ -52,7 +56,17 @@ def prompt_extraction_flow(
         headless=headless,
         chrome_user_data_dir=chrome_user_data_dir,
         sources_panel_pause_seconds=sources_panel_pause_seconds,
+        force_rerun=force_rerun,
+        llm_model_filter=llm_model_filter,
     )
+    product_output_refs = result.pop("product_outputs", []) or []
+
+    product_processing_result: dict[str, Any] | None = None
+    if not dry_run and product_output_refs:
+        product_processing_result = product_output_process_task(product_output_refs=product_output_refs)
+    else:
+        flow_logger.info("Skipping product output processing because no product flyouts were captured.")
+
     processing_result: dict[str, Any] | None = None
     if not dry_run and result.get("saved_count", 0) > 0:
         processing_result = prompt_output_process_task(
@@ -66,6 +80,7 @@ def prompt_extraction_flow(
 
     combined_result = {
         **result,
+        "product_output_processing": product_processing_result,
         "prompt_output_processing": processing_result,
     }
     flow_logger.info("Prompt extraction flow finished: %s", combined_result)

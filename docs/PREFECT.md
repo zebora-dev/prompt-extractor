@@ -2,6 +2,8 @@
 
 This app can run the existing ChatGPT extraction process as a Prefect flow. Prefect gives us observable runs, parameters, logs, duration, state, retry hooks, and a UI for triggering and inspecting work.
 
+Batch, prompt, and prompt-output create/read/update/exists operations go directly through the Python Supabase client.
+
 The flow is:
 
 ```text
@@ -17,6 +19,17 @@ extract-chatgpt-batch
 The task wraps one full extraction run so a single logged-in Chrome profile can process a batch without reopening the browser for every prompt.
 
 After outputs are saved, the flow runs a second task:
+
+```text
+product-output-process
+```
+
+This task persists captured product flyouts into `prompts_outputs_products`.
+Each row includes identifiers for the prompt output, brand, batch, and prompt,
+plus `raw_html`, generated `markdown`, `links`, `images`, counts, button index,
+and capture method.
+
+The flow then runs:
 
 ```text
 prompt-output-process
@@ -71,6 +84,16 @@ Required:
 ```text
 BRANDSIGHT_SUPABASE_ANON_KEY=...
 ```
+
+Prompt-output storage:
+
+```text
+BRANDSIGHT_SUPABASE_URL=https://hmwgplzdzffivawkflci.supabase.co
+BRANDSIGHT_PROMPT_OUTPUTS_TABLE=prompts_outputs
+BRANDSIGHT_PROMPT_OUTPUT_PRODUCTS_TABLE=prompts_outputs_products
+```
+
+`BRANDSIGHT_SUPABASE_URL` is optional when `BRANDSIGHT_API_BASE_URL` is set to the project functions URL; the app derives the project URL automatically. `BRANDSIGHT_API_BASE_URL` is retained as a legacy compatibility setting.
 
 Recommended local Prefect settings:
 
@@ -137,7 +160,9 @@ You should see the `prompt-extraction/prompt-extraction` deployment in the Prefe
   "dry_run": false,
   "headless": null,
   "chrome_user_data_dir": null,
-  "sources_panel_pause_seconds": 0
+  "sources_panel_pause_seconds": 0,
+  "force_rerun": false,
+  "llm_model_filter": "gpt"
 }
 ```
 
@@ -147,6 +172,29 @@ You should see the `prompt-extraction/prompt-extraction` deployment in the Prefe
 prefect deployment run 'prompt-extraction/prompt-extraction' \
   --param batch_id=b4cfbc28-a046-497f-8944-65fcf10d59fe \
   --param limit=2
+```
+
+The extraction flow filters prompts before applying `limit`. By default it only
+treats a prompt as completed when an existing `prompts_outputs.llm_model`
+contains `gpt`:
+
+```bash
+prefect deployment run 'prompt-extraction/prompt-extraction' \
+  --param batch_id=b4cfbc28-a046-497f-8944-65fcf10d59fe \
+  --param limit=2 \
+  --param llm_model_filter=gpt
+```
+
+Use an empty `llm_model_filter` to treat any existing model as completed.
+
+To run a prompt even when an output already exists for the same batch, brand,
+and prompt:
+
+```bash
+prefect deployment run 'prompt-extraction/prompt-extraction' \
+  --param batch_id=b4cfbc28-a046-497f-8944-65fcf10d59fe \
+  --param limit=1 \
+  --param force_rerun=true
 ```
 
 To re-process existing saved prompt outputs without running ChatGPT extraction:
