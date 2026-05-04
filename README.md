@@ -24,6 +24,83 @@ The current extension key value is in:
 chromeApp/extension-shared/background.js
 ```
 
+## Easier Linux Deploy With Docker
+
+On a Linux server, the quickest path is Docker. This avoids installing Python,
+Chrome, ChromeDriver, Prefect, and browser support packages directly on the host.
+
+Install Docker, clone the repo, and create `.env`:
+
+```bash
+git clone git@github.com:zebora-dev/prompt-extractor.git
+cd prompt-extractor
+cp .env.example .env
+```
+
+Edit `.env` and set at least:
+
+```text
+BRANDSIGHT_SUPABASE_URL=https://hmwgplzdzffivawkflci.supabase.co
+BRANDSIGHT_SUPABASE_ANON_KEY=<your-key>
+BRANDSIGHT_SCORE_WORKFLOW_URL=https://workflow.zebora.io/api/workflows/score-single-output
+WORKFLOW_API_KEY=<optional-workflow-key>
+```
+
+Build the image:
+
+```bash
+docker compose build extractor
+```
+
+Create the ChatGPT login profile once. This starts a temporary browser session
+that you can view in noVNC:
+
+```bash
+docker compose --profile tools up login-vnc
+```
+
+Open this from your laptop:
+
+```text
+http://<server-ip>:6080/vnc.html
+```
+
+Log in to ChatGPT in that browser. Once the prompt box is visible, the login
+container exits and the shared Docker `chrome-profile` volume is ready for
+future headless/virtual-display runs.
+
+Run an extraction directly:
+
+```bash
+docker compose --profile tools run --rm extractor \
+  python -m automated_extraction \
+  --batch-id <batch-uuid> \
+  --limit 1
+```
+
+Optional: run with Prefect:
+
+```bash
+docker compose up -d prefect-server
+docker compose --profile prefect run --rm prefect-deploy
+docker compose --profile prefect up -d prefect-worker
+```
+
+Trigger the deployment:
+
+```bash
+docker compose --profile tools run --rm extractor \
+  python -m prefect deployment run 'prompt-extraction/prompt-extraction' \
+  --param batch_id=<batch-uuid> \
+  --param limit=1
+```
+
+The Prefect UI is available at:
+
+```text
+http://<server-ip>:4200
+```
+
 ## Login Session
 
 By default, the automation stores a dedicated logged-in browser profile at:
