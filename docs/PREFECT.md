@@ -64,7 +64,10 @@ trigger-score-workflow
 
 It posts each newly saved `prompts_outputs.id` to
 `BRANDSIGHT_SCORE_WORKFLOW_URL` with
-`{batch_id, output_id, force:false, force_run:false, scorer_types:[]}`.
+`{batch_id, output_id, force:false, force_run:false}`.
+
+`output_id` is sent as a string for single-output scoring. `scorer_types` is omitted unless
+`BRANDSIGHT_SCORE_WORKFLOW_SCORER_TYPES` is configured with one or more comma-separated values.
 
 ## 1. Install Dependencies
 

@@ -238,12 +238,14 @@ Payload:
 ```json
 {
   "batch_id": "<batch-id>",
-  "output_id": 5797,
+  "output_id": "5797",
   "force": false,
-  "force_run": false,
-  "scorer_types": []
+  "force_run": false
 }
 ```
+
+`output_id` is sent as a string for single-output scoring. `scorer_types` is only included when
+`BRANDSIGHT_SCORE_WORKFLOW_SCORER_TYPES` is configured with one or more comma-separated values.
 
 Configure the endpoint and optional API key with:
 

@@ -60,7 +60,7 @@ def trigger_score_workflows(
                 workflow_url=settings.score_workflow_url,
                 workflow_api_key=settings.workflow_api_key,
                 batch_id=str(batch_id),
-                output_id=parsed_output_id,
+                output_id=str(parsed_output_id),
                 force=force,
                 force_run=settings.score_workflow_force_run if force_run is None else force_run,
                 scorer_types=settings.score_workflow_scorer_types if scorer_types is None else scorer_types,
@@ -92,7 +92,7 @@ def trigger_single_score_workflow(
     workflow_url: str,
     workflow_api_key: str | None,
     batch_id: str,
-    output_id: int,
+    output_id: str,
     force: bool,
     force_run: bool,
     scorer_types: list[str],
@@ -107,8 +107,9 @@ def trigger_single_score_workflow(
         "output_id": output_id,
         "force": force,
         "force_run": force_run,
-        "scorer_types": scorer_types,
     }
+    if scorer_types:
+        payload["scorer_types"] = scorer_types
     for attempt in range(max_retries + 1):
         response = requests.post(workflow_url, headers=headers, json=payload, timeout=60)
         if response.status_code >= 500 and attempt < max_retries:
