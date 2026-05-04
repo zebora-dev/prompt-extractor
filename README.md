@@ -238,8 +238,10 @@ Payload:
 ```json
 {
   "batch_id": "<batch-id>",
-  "output_id": "<prompt-output-id>",
-  "force": false
+  "output_id": 5797,
+  "force": false,
+  "force_run": false,
+  "scorer_types": []
 }
 ```
 
@@ -248,6 +250,8 @@ Configure the endpoint and optional API key with:
 ```text
 BRANDSIGHT_SCORE_WORKFLOW_URL=https://workflow.zebora.io/api/workflows/score-single-output
 WORKFLOW_API_KEY=
+BRANDSIGHT_SCORE_WORKFLOW_FORCE_RUN=false
+BRANDSIGHT_SCORE_WORKFLOW_SCORER_TYPES=
 ```
 
 ## Notes

@@ -28,6 +28,8 @@ def trigger_score_workflows(
     settings: Settings,
     saved_outputs: list[dict[str, Any]] | None = None,
     force: bool = False,
+    force_run: bool | None = None,
+    scorer_types: list[str] | None = None,
     max_retries: int = 2,
 ) -> ScoreWorkflowTriggerResult:
     outputs = saved_outputs or []
@@ -53,16 +55,19 @@ def trigger_score_workflows(
 
         attempted_count += 1
         try:
+            parsed_output_id = parse_output_id(output_id)
             trigger_single_score_workflow(
                 workflow_url=settings.score_workflow_url,
                 workflow_api_key=settings.workflow_api_key,
                 batch_id=str(batch_id),
-                output_id=str(output_id),
+                output_id=parsed_output_id,
                 force=force,
+                force_run=settings.score_workflow_force_run if force_run is None else force_run,
+                scorer_types=settings.score_workflow_scorer_types if scorer_types is None else scorer_types,
                 max_retries=max_retries,
             )
             triggered_count += 1
-            LOGGER.info("Triggered score workflow. batch_id=%s output_id=%s force=%s", batch_id, output_id, force)
+            LOGGER.info("Triggered score workflow. batch_id=%s output_id=%s force=%s", batch_id, parsed_output_id, force)
         except Exception as exc:
             failed_count += 1
             failure = {"batch_id": batch_id, "output_id": output_id, "prompt_id": prompt_id, "error": str(exc)}
@@ -87,15 +92,23 @@ def trigger_single_score_workflow(
     workflow_url: str,
     workflow_api_key: str | None,
     batch_id: str,
-    output_id: str,
+    output_id: int,
     force: bool,
+    force_run: bool,
+    scorer_types: list[str],
     max_retries: int,
 ) -> dict[str, Any]:
     headers = {"Content-Type": "application/json"}
     if workflow_api_key:
         headers["X-API-Key"] = workflow_api_key
 
-    payload = {"batch_id": batch_id, "output_id": output_id, "force": force}
+    payload = {
+        "batch_id": batch_id,
+        "output_id": output_id,
+        "force": force,
+        "force_run": force_run,
+        "scorer_types": scorer_types,
+    }
     for attempt in range(max_retries + 1):
         response = requests.post(workflow_url, headers=headers, json=payload, timeout=60)
         if response.status_code >= 500 and attempt < max_retries:
@@ -117,6 +130,13 @@ def trigger_single_score_workflow(
         return data if isinstance(data, dict) else {"data": data}
 
     raise RuntimeError("Score workflow trigger failed after retries")
+
+
+def parse_output_id(output_id: Any) -> int:
+    try:
+        return int(output_id)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(f"Invalid prompt output id for score workflow trigger: {output_id!r}") from exc
 
 
 def retry_after_seconds(response: requests.Response) -> int | None:

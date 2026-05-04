@@ -31,6 +31,8 @@ class Settings:
     sources_panel_pause_seconds: int
     score_workflow_url: str
     workflow_api_key: str | None
+    score_workflow_force_run: bool
+    score_workflow_scorer_types: list[str]
 
     @classmethod
     def from_env(cls, *, require_api_key: bool = True) -> "Settings":
@@ -68,6 +70,8 @@ class Settings:
             score_workflow_url=os.getenv("BRANDSIGHT_SCORE_WORKFLOW_URL", DEFAULT_SCORE_WORKFLOW_URL).strip()
             or DEFAULT_SCORE_WORKFLOW_URL,
             workflow_api_key=os.getenv("WORKFLOW_API_KEY", "").strip() or None,
+            score_workflow_force_run=parse_bool(os.getenv("BRANDSIGHT_SCORE_WORKFLOW_FORCE_RUN"), default=False),
+            score_workflow_scorer_types=parse_csv(os.getenv("BRANDSIGHT_SCORE_WORKFLOW_SCORER_TYPES")),
         )
 
 
@@ -105,3 +109,9 @@ def parse_int(value: str | None, default: int) -> int:
         return int(value)
     except ValueError:
         return default
+
+
+def parse_csv(value: str | None) -> list[str]:
+    if not value:
+        return []
+    return [item.strip() for item in value.split(",") if item.strip()]
