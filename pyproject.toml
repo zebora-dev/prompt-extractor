@@ -20,6 +20,9 @@ dependencies = [
 line-length = 120
 target-version = "py312"
 
+[tool.setuptools.packages.find]
+include = ["automated_extraction*"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
