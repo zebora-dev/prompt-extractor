@@ -341,10 +341,12 @@ def build_prompt_output(
         "output_metadata": {
             "brand_name": (prompt.get("brand") or {}).get("name") if isinstance(prompt.get("brand"), dict) else None,
             "brand_description": (prompt.get("brand") or {}).get("description") if isinstance(prompt.get("brand"), dict) else None,
+            "llm_model": llm_model or "chatgpt",
             "approved": prompt.get("approved"),
             "active": prompt.get("active"),
             "created_at": prompt.get("created_at"),
             "original_metadata": {
+                "llm_model": llm_model or "chatgpt",
                 "main_response_capture_method": capture_method,
                 "copy_validation_status": "validated" if capture_method.startswith("copy_button") else "fallback",
                 "raw_html_capture_method": raw_html_capture_method,
