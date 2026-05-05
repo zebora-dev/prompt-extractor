@@ -6,8 +6,10 @@ from dataclasses import asdict
 from pathlib import Path
 
 from .config import Settings
+from .entity_output_processor import process_entity_outputs
 from .extraction import run_extraction_job
 from .product_output_processor import process_product_outputs
+from .workflow_trigger import trigger_score_workflows
 
 
 LOGGER = logging.getLogger(__name__)
@@ -59,14 +61,27 @@ def main(argv: list[str] | None = None) -> int:
     )
     payload = asdict(result)
     product_output_refs = payload.pop("product_outputs", []) or []
+    entity_output_refs = payload.pop("entity_outputs", []) or []
     product_processing_result = None
     if not args.dry_run and product_output_refs:
         product_processing_result = process_product_outputs(settings=settings, product_output_refs=product_output_refs)
+    entity_processing_result = None
+    if not args.dry_run and entity_output_refs:
+        entity_processing_result = process_entity_outputs(settings=settings, entity_output_refs=entity_output_refs)
+    score_workflow_result = None
+    if not args.dry_run and payload.get("saved_outputs"):
+        score_workflow_result = trigger_score_workflows(settings=settings, saved_outputs=payload.get("saved_outputs") or [])
 
     payload["product_output_processing"] = asdict(product_processing_result) if product_processing_result else None
+    payload["entity_output_processing"] = asdict(entity_processing_result) if entity_processing_result else None
+    payload["score_workflow_trigger"] = asdict(score_workflow_result) if score_workflow_result else None
     payload["product_outputs_summary"] = {
         "output_ref_count": len(product_output_refs),
         "product_count": sum(len(ref.get("products") or []) for ref in product_output_refs if isinstance(ref, dict)),
+    }
+    payload["entity_outputs_summary"] = {
+        "output_ref_count": len(entity_output_refs),
+        "entity_count": sum(len(ref.get("entities") or []) for ref in entity_output_refs if isinstance(ref, dict)),
     }
     LOGGER.info("Extraction run finished: %s", payload)
     if result.failed_count:

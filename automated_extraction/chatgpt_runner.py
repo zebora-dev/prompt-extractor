@@ -89,6 +89,8 @@ class ChatGPTCapture:
     source_capture_method: str
     products: list[dict[str, Any]]
     product_capture_method: str
+    entities: list[dict[str, Any]]
+    entity_capture_method: str
 
 
 class ChatGPTRunner:
@@ -230,6 +232,9 @@ class ChatGPTRunner:
         products = self.capture_product_flyouts()
         product_capture_method = "product_flyouts" if products else "none"
         LOGGER.info("Captured %s product flyout(s) using %s", len(products), product_capture_method)
+        entities = self.capture_entity_flyouts()
+        entity_capture_method = "entity_flyouts" if entities else "none"
+        LOGGER.info("Captured %s entity flyout(s) using %s", len(entities), entity_capture_method)
         return ChatGPTCapture(
             response=response.strip(),
             capture_method="copy_button_markdown",
@@ -241,6 +246,8 @@ class ChatGPTRunner:
             source_capture_method=source_capture_method,
             products=products,
             product_capture_method=product_capture_method,
+            entities=entities,
+            entity_capture_method=entity_capture_method,
         )
 
     def wait_for_login(self) -> None:
@@ -1348,6 +1355,353 @@ class ChatGPTRunner:
               productHeaderCount: document.querySelectorAll('[data-testid="bar-product-header"]').length,
               productSectionCount: document.querySelectorAll('section[aria-label="Product details"]').length,
               selectProductButtonCount: document.querySelectorAll('button[aria-label="Select product"]').length,
+              textPreview: root ? (root.innerText || '').slice(0, 500) : ''
+            };
+            """
+        )
+        return str(result)
+
+    def capture_entity_flyouts(self) -> list[dict[str, Any]]:
+        latest_response = self.latest_response_element()
+        if not latest_response:
+            LOGGER.info("Skipping entity capture: no latest assistant response element found.")
+            return []
+
+        scope = self.latest_response_turn_element(latest_response) or latest_response
+        entity_count = self.count_entity_openers(scope)
+        if entity_count <= 0:
+            LOGGER.info("No entity underline elements found for latest ChatGPT response.")
+            return []
+
+        LOGGER.info("Found %s entity element(s); opening entity flyouts. %s", entity_count, self.entity_button_diagnostics(scope))
+        entities: list[dict[str, Any]] = []
+        for index in range(entity_count):
+            self.close_entity_flyout()
+            LOGGER.info("Opening entity flyout. entity_index=%s/%s", index + 1, entity_count)
+            if not self.click_entity_by_index(scope, index):
+                LOGGER.warning("Could not click entity element. entity_index=%s/%s", index + 1, entity_count)
+                entities.append(
+                    {
+                        "index": index + 1,
+                        "entity_index": index + 1,
+                        "capture_method": "entity_click_failed",
+                        "raw_html": "",
+                        "html_length": 0,
+                        "title": "",
+                        "entity_text": "",
+                    }
+                )
+                continue
+
+            if not self.wait_for_entity_flyout_root(timeout=10):
+                LOGGER.warning(
+                    "Entity flyout did not appear. entity_index=%s/%s %s",
+                    index + 1,
+                    entity_count,
+                    self.entity_flyout_diagnostics(),
+                )
+                entities.append(
+                    {
+                        "index": index + 1,
+                        "entity_index": index + 1,
+                        "capture_method": "entity_flyout_not_found",
+                        "raw_html": "",
+                        "html_length": 0,
+                        "title": "",
+                        "entity_text": "",
+                    }
+                )
+                continue
+
+            if not self.wait_for_entity_flyout_content(timeout=30):
+                LOGGER.warning(
+                    "Entity flyout opened but content did not stabilize. entity_index=%s/%s %s",
+                    index + 1,
+                    entity_count,
+                    self.entity_flyout_diagnostics(),
+                )
+
+            entity = self.extract_entity_flyout(index + 1)
+            LOGGER.info(
+                "Entity flyout captured. entity_index=%s/%s entity_text=%r title=%r html_length=%s",
+                index + 1,
+                entity_count,
+                entity.get("entity_text") or "",
+                entity.get("title") or "",
+                entity.get("html_length") or 0,
+            )
+            entities.append(entity)
+            self.close_entity_flyout()
+
+        return entities
+
+    def count_entity_openers(self, scope: WebElement) -> int:
+        self.install_entity_flyout_helpers()
+        try:
+            count = self.require_driver().execute_script(
+                """
+                return window.__brandsightCollectEntityOpeners?.(arguments[0]).length || 0;
+                """,
+                scope,
+            )
+            return int(count or 0)
+        except (WebDriverException, ValueError, TypeError):
+            return 0
+
+    def click_entity_by_index(self, scope: WebElement, index: int) -> bool:
+        self.install_entity_flyout_helpers()
+        try:
+            return bool(
+                self.require_driver().execute_script(
+                    """
+                    return window.__brandsightClickEntityOpener?.(arguments[0], arguments[1]) || false;
+                    """,
+                    scope,
+                    index,
+                )
+            )
+        except WebDriverException:
+            return False
+
+    def wait_for_entity_flyout_root(self, timeout: int = 10) -> bool:
+        self.install_entity_flyout_helpers()
+        try:
+            WebDriverWait(self.require_driver(), timeout).until(
+                lambda driver: driver.execute_script(
+                    """
+                    return Boolean(window.__brandsightFindEntityFlyout?.());
+                    """
+                )
+            )
+            return True
+        except TimeoutException:
+            return False
+
+    def wait_for_entity_flyout_content(self, timeout: int = 30) -> bool:
+        self.install_entity_flyout_helpers()
+        deadline = time.time() + timeout
+        last_signature = ""
+        stable_checks = 0
+        while time.time() < deadline:
+            state = self.require_driver().execute_script(
+                """
+                const root = window.__brandsightFindEntityFlyout?.();
+                if (!root) return {ready: false, signature: '', textLength: 0, imageCount: 0, linkCount: 0, textPreview: ''};
+                const text = (root.innerText || '').trim();
+                const normalized = text.toLowerCase();
+                const imageCount = root.querySelectorAll('img[src]').length;
+                const linkCount = root.querySelectorAll('a[href]').length;
+                const loading = normalized.includes('looking up') || normalized.includes('loading');
+                const ready = !loading && text.length >= 30;
+                return {
+                  ready,
+                  signature: `${text.length}:${imageCount}:${linkCount}:${text.slice(0, 120)}`,
+                  textLength: text.length,
+                  imageCount,
+                  linkCount,
+                  textPreview: text.slice(0, 160)
+                };
+                """
+            )
+            if not isinstance(state, dict):
+                state = {}
+            signature = str(state.get("signature") or "")
+            if state.get("ready") and signature and signature == last_signature:
+                stable_checks += 1
+            elif state.get("ready") and signature:
+                stable_checks = 0
+                last_signature = signature
+            else:
+                stable_checks = 0
+                last_signature = signature
+            if stable_checks >= 2:
+                return True
+            time.sleep(0.5)
+        return False
+
+    def extract_entity_flyout(self, index: int) -> dict[str, Any]:
+        self.install_entity_flyout_helpers()
+        raw = self.require_driver().execute_script(
+            """
+            const root = window.__brandsightFindEntityFlyout?.();
+            const candidate = window.__brandsightLastEntityCandidate || {};
+            if (!root) return null;
+            const section = root.querySelector('[data-testid="screen-threadFlyOut"], section') || root;
+            const title = (
+              section.querySelector('h1,h2,h3,[data-testid*="title"]')?.innerText ||
+              section.querySelector('[data-testid*="header"]')?.innerText ||
+              candidate.text ||
+              ''
+            ).trim();
+            const links = [...section.querySelectorAll('a[href]')].map((link, linkIndex) => ({
+              index: linkIndex + 1,
+              url: link.href,
+              text: (link.innerText || '').trim()
+            }));
+            const images = [...section.querySelectorAll('img[src]')].map((image, imageIndex) => ({
+              index: imageIndex + 1,
+              src: image.src,
+              alt: image.alt || ''
+            }));
+            return {
+              raw_html: root.outerHTML || '',
+              title,
+              entity_text: candidate.text || '',
+              text_length: (section.innerText || '').trim().length,
+              link_count: links.length,
+              image_count: images.length,
+              links,
+              images
+            };
+            """
+        )
+        if not isinstance(raw, dict):
+            return {
+                "index": index,
+                "entity_index": index,
+                "capture_method": "entity_flyout_outer_html",
+                "raw_html": "",
+                "html_length": 0,
+                "title": "",
+                "entity_text": "",
+                "text_length": 0,
+                "link_count": 0,
+                "image_count": 0,
+                "links": [],
+                "images": [],
+            }
+
+        html = str(raw.get("raw_html") or "")
+        return {
+            "index": index,
+            "entity_index": index,
+            "capture_method": "entity_flyout_outer_html",
+            "raw_html": html,
+            "html_length": len(html),
+            "title": clean_text(raw.get("title")),
+            "entity_text": clean_text(raw.get("entity_text")),
+            "text_length": int(raw.get("text_length") or 0),
+            "link_count": int(raw.get("link_count") or 0),
+            "image_count": int(raw.get("image_count") or 0),
+            "links": raw.get("links") if isinstance(raw.get("links"), list) else [],
+            "images": raw.get("images") if isinstance(raw.get("images"), list) else [],
+        }
+
+    def close_entity_flyout(self) -> None:
+        driver = self.require_driver()
+        self.install_entity_flyout_helpers()
+        try:
+            closed = driver.execute_script(
+                """
+                const root = window.__brandsightFindEntityFlyout?.();
+                const closeButton = root?.querySelector('button[aria-label="Close"]');
+                if (!closeButton) return false;
+                closeButton.click();
+                return true;
+                """
+            )
+            if closed:
+                time.sleep(0.4)
+                return
+        except WebDriverException:
+            pass
+
+        try:
+            if driver.execute_script("return Boolean(window.__brandsightFindEntityFlyout?.());"):
+                driver.switch_to.active_element.send_keys(Keys.ESCAPE)
+                time.sleep(0.4)
+        except WebDriverException:
+            pass
+
+    def install_entity_flyout_helpers(self) -> None:
+        self.require_driver().execute_script(
+            """
+            window.__brandsightCollectEntityOpeners = function (root) {
+              const scope = root || document;
+              const entities = [...scope.querySelectorAll('.entity-underline')]
+                .filter((entity) => entity.isConnected && entity.getClientRects().length > 0);
+              return entities.map((entity, index) => {
+                const target = entity.closest('button,[role="button"],span,div') || entity;
+                const text = (entity.innerText || entity.textContent || target.innerText || '').trim();
+                return {index, entity, target, text, targetTag: target.tagName, targetTextPreview: (target.innerText || '').trim().slice(0, 120)};
+              });
+            };
+
+            window.__brandsightDispatchEntityClick = function (target) {
+              target.scrollIntoView({block: 'center', inline: 'center'});
+              const rect = target.getBoundingClientRect();
+              const options = {
+                bubbles: true,
+                cancelable: true,
+                view: window,
+                clientX: rect.left + Math.max(1, rect.width / 2),
+                clientY: rect.top + Math.max(1, rect.height / 2),
+                pointerType: 'mouse'
+              };
+              target.dispatchEvent(new PointerEvent('pointerover', options));
+              target.dispatchEvent(new MouseEvent('mouseover', options));
+              target.dispatchEvent(new PointerEvent('pointerdown', options));
+              target.dispatchEvent(new MouseEvent('mousedown', options));
+              target.dispatchEvent(new PointerEvent('pointerup', options));
+              target.dispatchEvent(new MouseEvent('mouseup', options));
+              target.dispatchEvent(new MouseEvent('click', options));
+              return true;
+            };
+
+            window.__brandsightClickEntityOpener = function (root, index) {
+              const candidate = window.__brandsightCollectEntityOpeners(root)[index];
+              if (!candidate?.target) return false;
+              window.__brandsightLastEntityCandidate = {index: candidate.index, text: candidate.text};
+              return window.__brandsightDispatchEntityClick(candidate.target);
+            };
+
+            window.__brandsightFindEntityFlyout = function () {
+              const flyouts = [
+                ...document.querySelectorAll('[data-testid="stage-thread-flyout"], [data-testid="screen-threadFlyOut"]')
+              ];
+              return flyouts.find((flyout) => {
+                if (flyout.querySelector('[data-testid="bar-product-header"], section[aria-label="Product details"], section[aria-label="Sources"]')) {
+                  return false;
+                }
+                const text = (flyout.innerText || '').trim();
+                return text.length > 0 && flyout.querySelector('button[aria-label="Close"]');
+              }) || null;
+            };
+            """
+        )
+
+    def entity_button_diagnostics(self, scope: WebElement) -> str:
+        self.install_entity_flyout_helpers()
+        try:
+            result = self.require_driver().execute_script(
+                """
+                const candidates = window.__brandsightCollectEntityOpeners?.(arguments[0]) || [];
+                return {
+                  candidateCount: candidates.length,
+                  candidates: candidates.slice(0, 20).map((candidate) => ({
+                    index: candidate.index + 1,
+                    text: candidate.text,
+                    targetTag: candidate.targetTag,
+                    targetTextPreview: candidate.targetTextPreview
+                  }))
+                };
+                """,
+                scope,
+            )
+            return str(result)
+        except WebDriverException:
+            return "No entity diagnostics available."
+
+    def entity_flyout_diagnostics(self) -> str:
+        self.install_entity_flyout_helpers()
+        result = self.require_driver().execute_script(
+            """
+            const root = window.__brandsightFindEntityFlyout?.() || null;
+            return {
+              found: Boolean(root),
+              stageThreadFlyoutCount: document.querySelectorAll('[data-testid="stage-thread-flyout"]').length,
+              screenThreadFlyoutCount: document.querySelectorAll('[data-testid="screen-threadFlyOut"]').length,
+              entityUnderlineCount: document.querySelectorAll('.entity-underline').length,
               textPreview: root ? (root.innerText || '').slice(0, 500) : ''
             };
             """

@@ -42,6 +42,7 @@ def process_prompt_outputs(
         supabase_url=settings.supabase_url,
         prompt_outputs_table=settings.prompt_outputs_table,
         prompt_output_products_table=settings.prompt_output_products_table,
+        prompt_output_entities_table=settings.prompt_output_entities_table,
     )
     LOGGER.info(
         "Loading prompt outputs for processing. saved_output_refs=%s output_id=%s batch_id=%s brand_id=%s prompt_id=%s limit=%s",

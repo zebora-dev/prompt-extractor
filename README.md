@@ -24,6 +24,83 @@ The current extension key value is in:
 chromeApp/extension-shared/background.js
 ```
 
+## Easier Linux Deploy With Docker
+
+On a Linux server, the quickest path is Docker. This avoids installing Python,
+Chrome, ChromeDriver, Prefect, and browser support packages directly on the host.
+
+Install Docker, clone the repo, and create `.env`:
+
+```bash
+git clone git@github.com:zebora-dev/prompt-extractor.git
+cd prompt-extractor
+cp .env.example .env
+```
+
+Edit `.env` and set at least:
+
+```text
+BRANDSIGHT_SUPABASE_URL=https://hmwgplzdzffivawkflci.supabase.co
+BRANDSIGHT_SUPABASE_ANON_KEY=<your-key>
+BRANDSIGHT_SCORE_WORKFLOW_URL=https://workflow.zebora.io/api/workflows/score-single-output
+WORKFLOW_API_KEY=<optional-workflow-key>
+```
+
+Build the image:
+
+```bash
+docker compose build extractor
+```
+
+Create the ChatGPT login profile once. This starts a temporary browser session
+that you can view in noVNC:
+
+```bash
+docker compose --profile tools up login-vnc
+```
+
+Open this from your laptop:
+
+```text
+http://<server-ip>:6080/vnc.html
+```
+
+Log in to ChatGPT in that browser. Once the prompt box is visible, the login
+container exits and the shared Docker `chrome-profile` volume is ready for
+future headless/virtual-display runs.
+
+Run an extraction directly:
+
+```bash
+docker compose --profile tools run --rm extractor \
+  python -m automated_extraction \
+  --batch-id <batch-uuid> \
+  --limit 1
+```
+
+Optional: run with Prefect:
+
+```bash
+docker compose up -d prefect-server
+docker compose --profile prefect run --rm prefect-deploy
+docker compose --profile prefect up -d prefect-worker
+```
+
+Trigger the deployment:
+
+```bash
+docker compose --profile tools run --rm extractor \
+  python -m prefect deployment run 'prompt-extraction/prompt-extraction' \
+  --param batch_id=<batch-uuid> \
+  --param limit=1
+```
+
+The Prefect UI is available at:
+
+```text
+http://<server-ip>:4200
+```
+
 ## Login Session
 
 By default, the automation stores a dedicated logged-in browser profile at:
@@ -158,12 +235,14 @@ docs/PREFECT.md
 5. Creates a fresh chat for each prompt where possible.
 6. Sends the prompt and waits for the response to finish.
 7. Clicks the latest assistant response copy button.
-8. Captures copied markdown, rendered raw HTML, source links, product flyout HTML, and model slug.
+8. Captures copied markdown, rendered raw HTML, source links, product flyout HTML, entity flyout HTML, and model slug.
 9. Saves the output directly to Supabase table `prompts_outputs`.
 10. Converts each product flyout `raw_html` into markdown and saves product rows to `prompts_outputs_products`. In Prefect runs this is the observable `product-output-process` task.
-11. Runs the `prompt-output-process` Prefect task, which converts `raw_html` into markdown, compares it with the copied markdown, and updates `response`/`markdown` with missing assets such as images and links.
+11. Converts each entity flyout `raw_html` into markdown and saves entity rows to `prompts_outputs_entities`. In Prefect runs this is the observable `entity-output-process` task.
+12. Runs the `prompt-output-process` Prefect task, which converts `raw_html` into markdown, compares it with the copied markdown, and updates `response`/`markdown` with missing assets such as images and links.
+13. Triggers the downstream score workflow for each saved `prompts_outputs.id` by posting to `BRANDSIGHT_SCORE_WORKFLOW_URL`.
 
-The saved payload includes top-level `response`, `markdown`, `raw_html`, and `sources` fields. Metadata keeps capture method details, `source_count`, `product_count`, and a product extraction summary under `output_metadata.original_metadata.product_extraction`. Individual product flyouts are saved as rows in `prompts_outputs_products`. The Supabase layer maps app field `output_metadata` to database column `metadata`.
+The saved payload includes top-level `response`, `markdown`, `raw_html`, and `sources` fields. Metadata keeps capture method details, `source_count`, `product_count`, `entity_count`, and extraction summaries under `output_metadata.original_metadata.product_extraction` and `output_metadata.original_metadata.entity_extraction`. Individual product and entity flyouts are saved as rows in `prompts_outputs_products` and `prompts_outputs_entities`. The Supabase layer maps app field `output_metadata` to database column `metadata`.
 
 ## Product Table
 
@@ -191,6 +270,67 @@ create table if not exists prompts_outputs_products (
 create index if not exists prompts_outputs_products_output_id_idx on prompts_outputs_products(output_id);
 create index if not exists prompts_outputs_products_batch_id_idx on prompts_outputs_products(batch_id);
 create index if not exists prompts_outputs_products_prompt_id_idx on prompts_outputs_products(prompt_id);
+```
+
+## Entity Table
+
+Create a Supabase table for captured entity flyouts:
+
+```sql
+create table if not exists prompts_outputs_entities (
+  id bigserial primary key,
+  output_id bigint not null references prompts_outputs(id) on delete cascade,
+  brand_id uuid not null,
+  batch_id uuid not null,
+  prompt_id uuid not null,
+  entity_text text,
+  title text,
+  raw_html text,
+  markdown text,
+  links jsonb not null default '[]'::jsonb,
+  images jsonb not null default '[]'::jsonb,
+  html_length integer,
+  image_count integer,
+  text_length integer,
+  entity_index integer,
+  capture_method text,
+  created_at timestamptz not null default now()
+);
+
+create index if not exists prompts_outputs_entities_output_id_idx on prompts_outputs_entities(output_id);
+create index if not exists prompts_outputs_entities_batch_id_idx on prompts_outputs_entities(batch_id);
+create index if not exists prompts_outputs_entities_prompt_id_idx on prompts_outputs_entities(prompt_id);
+```
+
+## Downstream Scoring Workflow
+
+After extraction and post-processing complete, each saved prompt output triggers:
+
+```text
+POST https://workflow.zebora.io/api/workflows/score-single-output
+```
+
+Payload:
+
+```json
+{
+  "batch_id": "<batch-id>",
+  "output_id": "5797",
+  "force": false,
+  "force_run": false
+}
+```
+
+`output_id` is sent as a string for single-output scoring. `scorer_types` is only included when
+`BRANDSIGHT_SCORE_WORKFLOW_SCORER_TYPES` is configured with one or more comma-separated values.
+
+Configure the endpoint and optional API key with:
+
+```text
+BRANDSIGHT_SCORE_WORKFLOW_URL=https://workflow.zebora.io/api/workflows/score-single-output
+WORKFLOW_API_KEY=
+BRANDSIGHT_SCORE_WORKFLOW_FORCE_RUN=false
+BRANDSIGHT_SCORE_WORKFLOW_SCORER_TYPES=
 ```
 
 ## Notes

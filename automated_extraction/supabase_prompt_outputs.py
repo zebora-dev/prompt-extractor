@@ -85,10 +85,32 @@ class PromptOutputProductRow:
     created_at: str | None = None
 
 
+@dataclass(frozen=True)
+class PromptOutputEntityRow:
+    output_id: int
+    brand_id: str
+    batch_id: str
+    prompt_id: str
+    id: int | None = None
+    entity_text: str | None = None
+    title: str | None = None
+    raw_html: str | None = None
+    markdown: str | None = None
+    links: Any = None
+    images: Any = None
+    html_length: int | None = None
+    image_count: int | None = None
+    text_length: int | None = None
+    entity_index: int | None = None
+    capture_method: str | None = None
+    created_at: str | None = None
+
+
 BatchDict = dict[str, Any]
 PromptDict = dict[str, Any]
 PromptOutputDict = dict[str, Any]
 PromptOutputProductDict = dict[str, Any]
+PromptOutputEntityDict = dict[str, Any]
 
 BATCH_COLUMNS = tuple(field.name for field in fields(BatchRow) if field.name != "brand")
 PROMPT_COLUMNS = tuple(field.name for field in fields(PromptRow) if field.name != "brand")
@@ -99,6 +121,8 @@ PROMPT_OUTPUT_UPDATE_COLUMNS = tuple(
 )
 PROMPT_OUTPUT_PRODUCT_COLUMNS = tuple(field.name for field in fields(PromptOutputProductRow))
 PROMPT_OUTPUT_PRODUCT_INSERT_COLUMNS = tuple(column for column in PROMPT_OUTPUT_PRODUCT_COLUMNS if column != "id")
+PROMPT_OUTPUT_ENTITY_COLUMNS = tuple(field.name for field in fields(PromptOutputEntityRow))
+PROMPT_OUTPUT_ENTITY_INSERT_COLUMNS = tuple(column for column in PROMPT_OUTPUT_ENTITY_COLUMNS if column != "id")
 
 
 @dataclass(frozen=True)
@@ -107,6 +131,7 @@ class SupabasePromptOutputRepository:
     anon_key: str
     table_name: str = "prompts_outputs"
     product_table_name: str = "prompts_outputs_products"
+    entity_table_name: str = "prompts_outputs_entities"
 
     def __post_init__(self) -> None:
         if not self.supabase_url:
@@ -248,6 +273,16 @@ class SupabasePromptOutputRepository:
         response = self.client.table(self.product_table_name).insert(rows).execute()
         return [row_to_product(row) for row in response.data or [] if isinstance(row, dict)]
 
+    def save_prompt_output_entities(self, entities: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        rows = [entity_to_row(entity, include_id=False) for entity in entities]
+        rows = [row for row in rows if row.get("output_id") and row.get("prompt_id") and row.get("brand_id")]
+        if not rows:
+            return []
+
+        LOGGER.info("Saving prompt output entity rows directly to Supabase. table=%s count=%s", self.entity_table_name, len(rows))
+        response = self.client.table(self.entity_table_name).insert(rows).execute()
+        return [row_to_entity(row) for row in response.data or [] if isinstance(row, dict)]
+
     def get_prompt_output(self, output_id: int | str) -> dict[str, Any] | None:
         outputs = self.get_prompt_outputs(output_id=output_id, limit=1)
         return outputs[0] if outputs else None
@@ -360,6 +395,30 @@ def product_to_row(product: dict[str, Any], *, include_id: bool) -> dict[str, An
     return compact_row(row, allowed_columns)
 
 
+def entity_to_row(entity: dict[str, Any], *, include_id: bool) -> dict[str, Any]:
+    row = {
+        "id": entity.get("id"),
+        "output_id": entity.get("output_id"),
+        "prompt_id": entity.get("prompt_id"),
+        "brand_id": entity.get("brand_id"),
+        "batch_id": entity.get("batch_id"),
+        "entity_text": entity.get("entity_text"),
+        "title": entity.get("title"),
+        "raw_html": entity.get("raw_html"),
+        "markdown": entity.get("markdown"),
+        "links": entity.get("links"),
+        "images": entity.get("images"),
+        "html_length": entity.get("html_length"),
+        "image_count": entity.get("image_count"),
+        "text_length": entity.get("text_length"),
+        "entity_index": entity.get("entity_index"),
+        "capture_method": entity.get("capture_method"),
+        "created_at": entity.get("created_at"),
+    }
+    allowed_columns = PROMPT_OUTPUT_ENTITY_COLUMNS if include_id else PROMPT_OUTPUT_ENTITY_INSERT_COLUMNS
+    return compact_row(row, allowed_columns)
+
+
 def compact_row(row: dict[str, Any], allowed_columns: tuple[str, ...]) -> dict[str, Any]:
     return {key: value for key, value in row.items() if key in allowed_columns and value is not None}
 
@@ -446,6 +505,29 @@ def row_to_product(row: dict[str, Any]) -> PromptOutputProductDict:
         image_count=row.get("image_count"),
         text_length=row.get("text_length"),
         button_index=row.get("button_index"),
+        capture_method=row.get("capture_method"),
+        created_at=row.get("created_at"),
+    )
+    return asdict(typed_row)
+
+
+def row_to_entity(row: dict[str, Any]) -> PromptOutputEntityDict:
+    typed_row = PromptOutputEntityRow(
+        id=row.get("id"),
+        output_id=int(row.get("output_id") or 0),
+        prompt_id=str(row.get("prompt_id") or ""),
+        brand_id=str(row.get("brand_id") or ""),
+        batch_id=str(row.get("batch_id") or ""),
+        entity_text=row.get("entity_text"),
+        title=row.get("title"),
+        raw_html=row.get("raw_html"),
+        markdown=row.get("markdown"),
+        links=row.get("links"),
+        images=row.get("images"),
+        html_length=row.get("html_length"),
+        image_count=row.get("image_count"),
+        text_length=row.get("text_length"),
+        entity_index=row.get("entity_index"),
         capture_method=row.get("capture_method"),
         created_at=row.get("created_at"),
     )

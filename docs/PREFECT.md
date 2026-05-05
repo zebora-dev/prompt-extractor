@@ -32,6 +32,17 @@ and capture method.
 The flow then runs:
 
 ```text
+entity-output-process
+```
+
+This task persists captured ChatGPT entity flyouts into
+`prompts_outputs_entities`. Each row includes identifiers for the prompt output,
+brand, batch, and prompt, plus `entity_text`, `raw_html`, generated `markdown`,
+`links`, `images`, counts, entity index, and capture method.
+
+The flow then runs:
+
+```text
 prompt-output-process
 ```
 
@@ -44,6 +55,19 @@ You can also run that processor without re-running ChatGPT extraction via:
 ```text
 prompt-output-processing
 ```
+
+The final extraction-flow task is:
+
+```text
+trigger-score-workflow
+```
+
+It posts each newly saved `prompts_outputs.id` to
+`BRANDSIGHT_SCORE_WORKFLOW_URL` with
+`{batch_id, output_id, force:false, force_run:false}`.
+
+`output_id` is sent as a string for single-output scoring. `scorer_types` is omitted unless
+`BRANDSIGHT_SCORE_WORKFLOW_SCORER_TYPES` is configured with one or more comma-separated values.
 
 ## 1. Install Dependencies
 
@@ -91,6 +115,11 @@ Prompt-output storage:
 BRANDSIGHT_SUPABASE_URL=https://hmwgplzdzffivawkflci.supabase.co
 BRANDSIGHT_PROMPT_OUTPUTS_TABLE=prompts_outputs
 BRANDSIGHT_PROMPT_OUTPUT_PRODUCTS_TABLE=prompts_outputs_products
+BRANDSIGHT_PROMPT_OUTPUT_ENTITIES_TABLE=prompts_outputs_entities
+BRANDSIGHT_SCORE_WORKFLOW_URL=https://workflow.zebora.io/api/workflows/score-single-output
+WORKFLOW_API_KEY=
+BRANDSIGHT_SCORE_WORKFLOW_FORCE_RUN=false
+BRANDSIGHT_SCORE_WORKFLOW_SCORER_TYPES=
 ```
 
 `BRANDSIGHT_SUPABASE_URL` is optional when `BRANDSIGHT_API_BASE_URL` is set to the project functions URL; the app derives the project URL automatically. `BRANDSIGHT_API_BASE_URL` is retained as a legacy compatibility setting.

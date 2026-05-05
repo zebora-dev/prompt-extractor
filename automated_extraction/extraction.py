@@ -28,6 +28,7 @@ class ExtractionRunResult:
     failures: list[dict[str, Any]]
     saved_outputs: list[dict[str, Any]]
     product_outputs: list[dict[str, Any]]
+    entity_outputs: list[dict[str, Any]]
 
 
 def run_extraction_job(
@@ -54,6 +55,7 @@ def run_extraction_job(
         supabase_url=settings.supabase_url,
         prompt_outputs_table=settings.prompt_outputs_table,
         prompt_output_products_table=settings.prompt_output_products_table,
+        prompt_output_entities_table=settings.prompt_output_entities_table,
     )
     prompts, resolved_batch_id, resolved_brand_id = load_prompt_work(
         api=api,
@@ -97,6 +99,7 @@ def run_extraction_job(
             failures=[],
             saved_outputs=[],
             product_outputs=[],
+            entity_outputs=[],
         )
 
     saved_count = 0
@@ -105,6 +108,7 @@ def run_extraction_job(
     failures: list[dict[str, Any]] = []
     saved_outputs: list[dict[str, Any]] = []
     product_outputs: list[dict[str, Any]] = []
+    entity_outputs: list[dict[str, Any]] = []
 
     with ChatGPTRunner(
         settings.chatgpt_url,
@@ -164,9 +168,11 @@ def run_extraction_job(
                     capture.source_capture_method,
                     capture.products,
                     capture.product_capture_method,
+                    capture.entities,
+                    capture.entity_capture_method,
                 )
                 LOGGER.info(
-                    "[%s/%s] Capture summary for prompt %s: markdown_length=%s raw_html_length=%s llm_model=%s source_count=%s source_method=%s product_count=%s product_method=%s",
+                    "[%s/%s] Capture summary for prompt %s: markdown_length=%s raw_html_length=%s llm_model=%s source_count=%s source_method=%s product_count=%s product_method=%s entity_count=%s entity_method=%s",
                     index,
                     len(prompts),
                     prompt_id,
@@ -177,6 +183,8 @@ def run_extraction_job(
                     capture.source_capture_method,
                     len(capture.products or []),
                     capture.product_capture_method,
+                    len(capture.entities or []),
+                    capture.entity_capture_method,
                 )
                 saved = api.save_prompt_output(output)
                 saved_count += 1
@@ -187,6 +195,13 @@ def run_extraction_job(
                         {
                             **saved_output,
                             "products": capture.products,
+                        }
+                    )
+                if capture.entities:
+                    entity_outputs.append(
+                        {
+                            **saved_output,
+                            "entities": capture.entities,
                         }
                     )
                 LOGGER.info(
@@ -216,6 +231,7 @@ def run_extraction_job(
         failures=failures,
         saved_outputs=saved_outputs,
         product_outputs=product_outputs,
+        entity_outputs=entity_outputs,
     )
 
 
@@ -303,6 +319,8 @@ def build_prompt_output(
     source_capture_method: str = "none",
     products: list[dict[str, Any]] | None = None,
     product_capture_method: str = "none",
+    entities: list[dict[str, Any]] | None = None,
+    entity_capture_method: str = "none",
 ) -> dict[str, Any]:
     now = datetime.now(timezone.utc).isoformat()
     return {
@@ -340,6 +358,13 @@ def build_prompt_output(
                     "process_name": "product_extraction",
                     "product_count": len(products or []),
                     "capture_method": product_capture_method,
+                },
+                "entity_count": len(entities or []),
+                "entity_capture_method": entity_capture_method,
+                "entity_extraction": {
+                    "process_name": "entity_extraction",
+                    "entity_count": len(entities or []),
+                    "capture_method": entity_capture_method,
                 },
             },
             "site_used": "OpenAI",
