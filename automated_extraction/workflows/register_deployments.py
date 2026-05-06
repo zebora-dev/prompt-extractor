@@ -37,6 +37,8 @@ def get_flows():
                 "sources_panel_pause_seconds": 0,
                 "force_rerun": False,
                 "llm_model_filter": "gpt",
+                "auto_login": False,
+                "login_email": None,
             },
         },
         "prompt-output-processing": {

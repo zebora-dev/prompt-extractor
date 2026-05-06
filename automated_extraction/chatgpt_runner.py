@@ -103,6 +103,9 @@ class ChatGPTRunner:
         login_wait_seconds: int = 180,
         response_timeout_seconds: int = 300,
         sources_panel_pause_seconds: int = 0,
+        auto_login: bool = False,
+        accounts: dict[str, dict[str, Any]] | None = None,
+        login_email: str | None = None,
     ) -> None:
         self.chatgpt_url = chatgpt_url
         self.headless = headless
@@ -110,6 +113,9 @@ class ChatGPTRunner:
         self.login_wait_seconds = login_wait_seconds
         self.response_timeout_seconds = response_timeout_seconds
         self.sources_panel_pause_seconds = max(0, sources_panel_pause_seconds)
+        self.auto_login = auto_login
+        self.accounts = accounts or {}
+        self.login_email = login_email
         self.driver: Chrome | None = None
 
     def __enter__(self) -> "ChatGPTRunner":
@@ -142,7 +148,30 @@ class ChatGPTRunner:
         self.driver = self.create_driver(options)
         self.driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
         self.driver.get(self.chatgpt_url)
+        self.recover_chrome_error_page(context="initial_chatgpt_load")
+        if self.auto_login:
+            self.run_automated_login()
         self.wait_for_login()
+
+    def run_automated_login(self) -> None:
+        from .chatgpt_auth import AutomatedLoginError, perform_automated_login
+
+        if not self.login_email:
+            raise RuntimeError("auto_login=True but no login_email was provided to ChatGPTRunner.")
+        if not self.accounts:
+            raise RuntimeError(
+                "auto_login=True but no accounts were provided to ChatGPTRunner. "
+                "Set CHATGPT_ACCOUNTS_B64 or pass accounts= when constructing the runner."
+            )
+        try:
+            perform_automated_login(
+                self.require_driver(),
+                accounts=self.accounts,
+                email=self.login_email,
+                login_wait_seconds=self.login_wait_seconds,
+            )
+        except AutomatedLoginError as error:
+            raise RuntimeError(f"Automated ChatGPT login failed: {error}") from error
 
     def create_driver(self, options: Options) -> Chrome:
         try:
@@ -253,12 +282,84 @@ class ChatGPTRunner:
     def wait_for_login(self) -> None:
         deadline = time.time() + self.login_wait_seconds
         while time.time() < deadline:
+            self.recover_chrome_error_page(context="wait_for_login")
             if self.find_first(CHAT_INPUT_SELECTORS):
                 return
             time.sleep(1)
         raise TimeoutError(
             "Timed out waiting for ChatGPT prompt input. Log in in the opened browser or set CHATGPT_CHROME_USER_DATA_DIR to a logged-in profile."
         )
+
+    def recover_chrome_error_page(self, *, context: str, max_attempts: int = 2) -> bool:
+        """
+        Chrome can occasionally render its own HTTP error interstitial for chatgpt.com.
+        If the visible page has Chrome's Reload button, click it and let the normal
+        ChatGPT waits continue.
+        """
+        driver = self.require_driver()
+        recovered = False
+        for attempt in range(1, max_attempts + 1):
+            state = self.chrome_error_page_state()
+            if not state.get("is_error"):
+                return recovered
+
+            LOGGER.warning(
+                "Detected Chrome error page during %s. attempt=%s/%s error_code=%s heading=%r current_url=%s",
+                context,
+                attempt,
+                max_attempts,
+                state.get("error_code") or "<unknown>",
+                state.get("heading") or "",
+                driver.current_url,
+            )
+
+            reload_button = self.find_first(["#reload-button", "button[data-url]", "button"])
+            if reload_button and self.click_if_visible(reload_button):
+                LOGGER.info("Clicked Chrome error page reload button during %s.", context)
+            else:
+                reload_url = str(state.get("reload_url") or "").strip()
+                if reload_url:
+                    LOGGER.info("Navigating to Chrome error page reload URL during %s: %s", context, reload_url)
+                    driver.get(reload_url)
+                else:
+                    LOGGER.info("Refreshing Chrome error page during %s.", context)
+                    driver.refresh()
+
+            recovered = True
+            time.sleep(3)
+
+        return recovered
+
+    def chrome_error_page_state(self) -> dict[str, Any]:
+        try:
+            result = self.require_driver().execute_script(
+                """
+                const body = document.body;
+                const mainFrameError = document.querySelector('#main-frame-error');
+                const errorCode = (document.querySelector('.error-code')?.innerText || '').trim();
+                const heading = (document.querySelector('#main-message h1, h1')?.innerText || '').trim();
+                const reloadButton = document.querySelector('#reload-button, button[data-url]');
+                const bodyClass = body?.className || '';
+                const isChromeNetError = Boolean(
+                  mainFrameError ||
+                  bodyClass.includes('neterror') ||
+                  window.loadTimeDataRaw?.errorCode ||
+                  /^HTTP ERROR \\d+/i.test(errorCode)
+                );
+                const isChatgptError = /chatgpt\\.com/i.test(document.title || location.href || '');
+                return {
+                  is_error: Boolean(isChromeNetError && isChatgptError),
+                  error_code: errorCode || window.loadTimeDataRaw?.errorCode || '',
+                  heading,
+                  reload_url: reloadButton?.dataset?.url || window.loadTimeDataRaw?.reloadButton?.reloadUrl || '',
+                  has_reload_button: Boolean(reloadButton),
+                  body_class: bodyClass
+                };
+                """
+            )
+            return result if isinstance(result, dict) else {"is_error": False}
+        except WebDriverException:
+            return {"is_error": False}
 
     def create_fresh_chat(self) -> None:
         driver = self.require_driver()
@@ -272,6 +373,7 @@ class ChatGPTRunner:
                 except WebDriverException:
                     LOGGER.debug("Could not click new chat selector: %s", selector)
         driver.get(self.chatgpt_url)
+        self.recover_chrome_error_page(context="create_fresh_chat")
         time.sleep(random.uniform(2.0, 4.0))
 
     def wait_for_input(self) -> WebElement:

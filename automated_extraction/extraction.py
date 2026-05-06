@@ -45,6 +45,8 @@ def run_extraction_job(
     sources_panel_pause_seconds: int = 0,
     force_rerun: bool = False,
     llm_model_filter: str | None = "gpt",
+    auto_login: bool | None = None,
+    login_email: str | None = None,
 ) -> ExtractionRunResult:
     if not batch_id and not prompts_file:
         raise ValueError("one of batch_id or prompts_file is required")
@@ -110,13 +112,27 @@ def run_extraction_job(
     product_outputs: list[dict[str, Any]] = []
     entity_outputs: list[dict[str, Any]] = []
 
+    resolved_auto_login = settings.auto_login if auto_login is None else auto_login
+    resolved_login_email = login_email or settings.login_email
+    resolved_chrome_user_data_dir = chrome_user_data_dir or settings.chrome_user_data_dir
+    LOGGER.info(
+        "Starting ChatGPT browser session. chrome_user_data_dir=%s headless=%s auto_login=%s login_email=%s",
+        resolved_chrome_user_data_dir,
+        headless if headless is not None else settings.headless,
+        resolved_auto_login,
+        resolved_login_email or "<unset>",
+    )
+
     with ChatGPTRunner(
         settings.chatgpt_url,
         headless=headless if headless is not None else settings.headless,
-        chrome_user_data_dir=chrome_user_data_dir or settings.chrome_user_data_dir,
+        chrome_user_data_dir=resolved_chrome_user_data_dir,
         login_wait_seconds=settings.login_wait_seconds,
         response_timeout_seconds=settings.response_timeout_seconds,
         sources_panel_pause_seconds=sources_panel_pause_seconds,
+        auto_login=resolved_auto_login,
+        accounts=settings.accounts,
+        login_email=resolved_login_email,
     ) as runner:
         for index, prompt in enumerate(prompts, start=1):
             prompt_id = str(prompt.get("id") or "")

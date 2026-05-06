@@ -24,13 +24,27 @@ def main(argv: list[str] | None = None) -> int:
     )
     quiet_third_party_http_logs()
 
-    settings = Settings.from_env(require_api_key=not args.login_only)
+    auto_login_override = args.auto_login
+    settings = Settings.from_env(
+        require_api_key=not args.login_only,
+        # When --auto-login is explicitly set, enforce credentials even for
+        # --login-only so misconfiguration fails fast. Otherwise let the env
+        # default decide.
+        require_auto_login_credentials=(auto_login_override is True) or (not args.login_only),
+    )
+    auto_login = auto_login_override if auto_login_override is not None else settings.auto_login
+    login_email = args.login_email or settings.login_email
 
     if args.login_only:
         from .chatgpt_runner import ChatGPTRunner
 
         profile_dir = args.chrome_user_data_dir or settings.chrome_user_data_dir
-        LOGGER.info("Opening ChatGPT login session with profile: %s", profile_dir)
+        LOGGER.info(
+            "Opening ChatGPT login session with profile: %s (auto_login=%s, email=%s)",
+            profile_dir,
+            auto_login,
+            login_email or "<unset>",
+        )
         with ChatGPTRunner(
             settings.chatgpt_url,
             headless=False,
@@ -38,6 +52,9 @@ def main(argv: list[str] | None = None) -> int:
             login_wait_seconds=settings.login_wait_seconds,
             response_timeout_seconds=settings.response_timeout_seconds,
             sources_panel_pause_seconds=args.sources_panel_pause_seconds,
+            auto_login=auto_login,
+            accounts=settings.accounts,
+            login_email=login_email,
         ):
             LOGGER.info("ChatGPT login is ready and stored in the profile.")
         return 0
@@ -58,6 +75,8 @@ def main(argv: list[str] | None = None) -> int:
         sources_panel_pause_seconds=args.sources_panel_pause_seconds,
         force_rerun=args.force_rerun,
         llm_model_filter=args.llm_model_filter,
+        auto_login=auto_login,
+        login_email=login_email,
     )
     payload = asdict(result)
     product_output_refs = payload.pop("product_outputs", []) or []
@@ -108,6 +127,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--headless", action=argparse.BooleanOptionalAction, default=None, help="Override CHATGPT_HEADLESS.")
     parser.add_argument("--chrome-user-data-dir", help="Chrome profile directory to reuse for ChatGPT login.")
+    parser.add_argument(
+        "--auto-login",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Override CHATGPT_AUTO_LOGIN. When true, runs the BasicLogin/GoogleLogin flow using CHATGPT_ACCOUNTS_B64.",
+    )
+    parser.add_argument(
+        "--login-email",
+        help="Override CHATGPT_LOGIN_EMAIL. Selects which account from CHATGPT_ACCOUNTS_B64 to use.",
+    )
     parser.add_argument(
         "--sources-panel-pause-seconds",
         type=int,

@@ -31,6 +31,8 @@ def prompt_extraction_flow(
     sources_panel_pause_seconds: int = 0,
     force_rerun: bool = False,
     llm_model_filter: str | None = "gpt",
+    auto_login: bool | None = None,
+    login_email: str | None = None,
 ) -> dict[str, Any]:
     """
     Orchestrate a ChatGPT prompt extraction run.
@@ -43,7 +45,7 @@ def prompt_extraction_flow(
         raise ValueError("one of batch_id or prompts_file is required")
 
     flow_logger.info(
-        "Starting prompt extraction flow. batch_id=%s prompts_file=%s brand_id=%s limit=%s skip=%s force_rerun=%s llm_model_filter=%s",
+        "Starting prompt extraction flow. batch_id=%s prompts_file=%s brand_id=%s limit=%s skip=%s force_rerun=%s llm_model_filter=%s auto_login=%s login_email=%s",
         batch_id,
         prompts_file,
         brand_id,
@@ -51,6 +53,8 @@ def prompt_extraction_flow(
         skip,
         force_rerun,
         llm_model_filter or "any",
+        auto_login,
+        login_email or "<env>",
     )
     result = extract_chatgpt_batch_task(
         batch_id=batch_id,
@@ -64,6 +68,8 @@ def prompt_extraction_flow(
         sources_panel_pause_seconds=sources_panel_pause_seconds,
         force_rerun=force_rerun,
         llm_model_filter=llm_model_filter,
+        auto_login=auto_login,
+        login_email=login_email,
     )
     product_output_refs = result.pop("product_outputs", []) or []
     entity_output_refs = result.pop("entity_outputs", []) or []
