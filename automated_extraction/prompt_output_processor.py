@@ -231,7 +231,9 @@ def build_processed_output_patch(output: dict[str, Any]) -> dict[str, Any] | Non
     output_id = output.get("id") or output.get("output_id") or output.get("prompt_output_id")
     prompt_id = output.get("prompt_id")
     raw_html = str(output.get("raw_html") or "")
-    original_markdown = str(output.get("markdown") or output.get("response") or "")
+    captured_markdown = str(output.get("markdown") or "")
+    response_text = str(output.get("response") or "")
+    original_markdown = captured_markdown or response_text
     if not raw_html.strip():
         LOGGER.info("Prompt output comparison skipped: missing raw_html. output_id=%s prompt_id=%s", output_id, prompt_id)
         return None
@@ -245,7 +247,18 @@ def build_processed_output_patch(output: dict[str, Any]) -> dict[str, Any] | Non
         return None
 
     raw_html_markdown = html_to_markdown(raw_html)
-    enriched_markdown, enrichments = enrich_markdown(original_markdown, raw_html_markdown)
+    original_was_suspicious = bool(captured_markdown) and looks_like_source_list_capture(captured_markdown, raw_html_markdown)
+    if original_was_suspicious:
+        LOGGER.warning(
+            "Original markdown looks like a source-list miscapture; using raw_html markdown as the enrichment base. output_id=%s prompt_id=%s original_preview=%r",
+            output_id,
+            prompt_id,
+            original_markdown[:200],
+        )
+        enriched_markdown = raw_html_markdown
+        enrichments = ["replaced_suspicious_source_list_markdown_with_raw_html_markdown"]
+    else:
+        enriched_markdown, enrichments = enrich_markdown(original_markdown, raw_html_markdown)
     changed = normalize_markdown(enriched_markdown) != normalize_markdown(original_markdown)
     LOGGER.info(
         "Compared prompt output markdown. output_id=%s prompt_id=%s raw_html_length=%s raw_html_markdown_length=%s original_markdown_length=%s enriched_markdown_length=%s enrichment_count=%s changed=%s",
@@ -278,6 +291,7 @@ def build_processed_output_patch(output: dict[str, Any]) -> dict[str, Any] | Non
             # full parsed body makes output_metadata too large for normal runs.
             # "raw_html_markdown": raw_html_markdown,
             "raw_html_markdown_length": len(raw_html_markdown),
+            "original_markdown_suspicious": original_was_suspicious,
             "markdown_enrichment_count": len(enrichments),
             "markdown_enrichments": enrichments[:50],
             "prompt_output_processed_at": processed_at,
@@ -301,11 +315,15 @@ def build_processed_output_patch(output: dict[str, Any]) -> dict[str, Any] | Non
         )
         return {"output_metadata": updated_metadata}
 
-    return {
+    patch = {
         "response": enriched_markdown,
-        "markdown": enriched_markdown,
         "output_metadata": updated_metadata,
     }
+    if captured_markdown and not original_was_suspicious:
+        patch["markdown"] = enriched_markdown
+    elif original_was_suspicious:
+        patch["markdown"] = ""
+    return patch
 
 
 def enrich_markdown(original_markdown: str, raw_html_markdown: str) -> tuple[str, list[str]]:
@@ -783,6 +801,27 @@ def normalize_plain_text(markdown: str) -> str:
 
 def remove_empty_headings(markdown: str) -> str:
     return re.sub(r"(?m)^#{1,6}\s*$\n?", "", markdown)
+
+
+def looks_like_source_list_capture(original_markdown: str, raw_html_markdown: str) -> bool:
+    original_lines = [line.strip() for line in original_markdown.splitlines() if line.strip()]
+    if len(original_lines) < 6:
+        return False
+
+    raw_plain = normalize_plain_text(raw_html_markdown)
+    original_plain = normalize_plain_text(original_markdown)
+    if len(raw_plain) < max(300, len(original_plain) * 2):
+        return False
+
+    sourceish_lines = 0
+    for line in original_lines:
+        plain = strip_markdown_markup(line)
+        words = re.findall(r"[A-Za-z0-9][A-Za-z0-9+.'-]*", plain)
+        if plain.startswith("+") or len(words) <= 3:
+            sourceish_lines += 1
+
+    sourceish_ratio = sourceish_lines / max(1, len(original_lines))
+    return sourceish_ratio >= 0.75
 
 
 def strip_generated_enrichment_sections(markdown: str) -> str:

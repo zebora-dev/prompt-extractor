@@ -80,7 +80,9 @@ DISMISS_BUTTON_TEXT = {
 @dataclass
 class ChatGPTCapture:
     response: str
+    markdown: str
     capture_method: str
+    markdown_capture_method: str
     raw_html: str
     raw_html_capture_method: str
     llm_model: str
@@ -240,13 +242,16 @@ class ChatGPTRunner:
         initial_response_count = len(self.response_elements())
         self.click_send(input_element)
         self.wait_for_response_completion(initial_response_count)
-        response = self.capture_latest_response()
+        response, markdown, markdown_capture_method = self.capture_latest_response()
         if not response or response.strip() == prompt_text.strip():
             time.sleep(2)
-            response = self.capture_latest_response()
+            response, markdown, markdown_capture_method = self.capture_latest_response()
         if not response or len(response.strip()) < 20:
             raise RuntimeError("Captured response was empty or too short")
-        LOGGER.info("Markdown copied from ChatGPT response. length=%s method=%s", len(response.strip()), "copy_button_markdown")
+        if markdown:
+            LOGGER.info("Markdown copied from ChatGPT response. length=%s method=%s", len(markdown.strip()), markdown_capture_method)
+        else:
+            LOGGER.warning("Markdown copy did not produce a valid clipboard result; markdown field will be empty. response_length=%s method=%s", len(response.strip()), markdown_capture_method)
         raw_html, raw_html_capture_method = self.capture_latest_response_html()
         LOGGER.info("Raw HTML extracted from ChatGPT response. length=%s method=%s", len(raw_html or ""), raw_html_capture_method)
         llm_model = self.capture_latest_response_model_slug() or "chatgpt"
@@ -258,25 +263,21 @@ class ChatGPTRunner:
             sources = extract_sources_from_markdown(response)
             source_capture_method = "markdown_references" if sources else "none"
         LOGGER.info("Captured %s source(s) using %s", len(sources), source_capture_method)
-        products = self.capture_product_flyouts()
-        product_capture_method = "product_flyouts" if products else "none"
-        LOGGER.info("Captured %s product flyout(s) using %s", len(products), product_capture_method)
-        entities = self.capture_entity_flyouts()
-        entity_capture_method = "entity_flyouts" if entities else "none"
-        LOGGER.info("Captured %s entity flyout(s) using %s", len(entities), entity_capture_method)
         return ChatGPTCapture(
             response=response.strip(),
-            capture_method="copy_button_markdown",
+            markdown=markdown.strip(),
+            capture_method="visible_text_fallback" if not markdown else "copy_button_markdown",
+            markdown_capture_method=markdown_capture_method,
             raw_html=raw_html,
             raw_html_capture_method=raw_html_capture_method,
             llm_model=llm_model,
             url=driver.current_url,
             sources=sources,
             source_capture_method=source_capture_method,
-            products=products,
-            product_capture_method=product_capture_method,
-            entities=entities,
-            entity_capture_method=entity_capture_method,
+            products=[],
+            product_capture_method="deferred",
+            entities=[],
+            entity_capture_method="deferred",
         )
 
     def wait_for_login(self) -> None:
@@ -570,26 +571,62 @@ class ChatGPTRunner:
             return f"Visible page signals: {', '.join(matches)}"
         return "No obvious blocking page text detected."
 
-    def capture_latest_response(self) -> str:
+    def capture_latest_response(self) -> tuple[str, str, str]:
         latest_response = self.latest_response_element()
         if not latest_response:
-            return ""
+            return "", "", "no_response_element"
 
-        parent = self.response_action_container(latest_response)
-        if parent:
-            copy_button = self.find_copy_button(parent)
-            if copy_button:
+        visible_text = latest_response.text or ""
+        parent = self.latest_response_turn_element(latest_response) or self.response_action_container(latest_response)
+        copy_button = self.find_copy_button(parent) if parent else None
+        if not copy_button:
+            return visible_text, "", "copy_button_not_found"
+
+        for attempt in range(1, 4):
+            try:
                 marker = f"__brandsight_capture_marker_{time.time_ns()}__"
                 pyperclip.copy(marker)
                 self.click_element(copy_button)
-                deadline = time.time() + 3
+                deadline = time.time() + 5
                 while time.time() < deadline:
                     copied = pyperclip.paste()
                     if copied and copied != marker:
-                        return copied
+                        if self.is_suspicious_copied_response(copied, visible_text):
+                            LOGGER.warning(
+                                "Ignoring suspicious copied markdown. attempt=%s copied_length=%s visible_text_length=%s copied_preview=%r",
+                                attempt,
+                                len(copied),
+                                len(visible_text),
+                                copied[:200],
+                            )
+                            break
+                        return visible_text, copied, f"copy_button_markdown_attempt_{attempt}"
                     time.sleep(0.2)
+                LOGGER.info("Markdown copy attempt did not produce a valid clipboard payload. attempt=%s/3", attempt)
+                time.sleep(1)
+            except WebDriverException as exc:
+                LOGGER.warning("Markdown copy attempt failed. attempt=%s/3 error=%s", attempt, first_line(str(exc)))
+                time.sleep(1)
 
-        return latest_response.text or ""
+        return visible_text, "", "copy_button_markdown_failed_after_retries"
+
+    def is_suspicious_copied_response(self, copied: str, visible_text: str) -> bool:
+        copied_lines = [line.strip() for line in copied.splitlines() if line.strip()]
+        if len(copied_lines) < 6:
+            return False
+
+        sourceish_lines = 0
+        for line in copied_lines:
+            words = re.findall(r"[A-Za-z0-9][A-Za-z0-9+.'-]*", line)
+            if line.startswith("+") or len(words) <= 3:
+                sourceish_lines += 1
+
+        sourceish_ratio = sourceish_lines / max(1, len(copied_lines))
+        visible_words = set(normalize_words(visible_text))
+        copied_words = set(normalize_words(copied))
+        overlap_ratio = len(visible_words & copied_words) / max(1, min(len(visible_words), len(copied_words)))
+
+        return sourceish_ratio >= 0.75 and overlap_ratio < 0.45
 
     def capture_latest_response_html(self) -> tuple[str, str]:
         latest_response = self.latest_response_element()
@@ -1848,6 +1885,8 @@ class ChatGPTRunner:
                     ],
                 )
             ).lower()
+            if "sources" in label or "select product" in label:
+                continue
             html = button.get_attribute("outerHTML") or ""
             if "copy" in label or "clip-rule" in html and "M7 5a3 3" in html:
                 if button.is_displayed() and button.is_enabled():
@@ -1903,6 +1942,10 @@ def first_line(value: str) -> str:
 
 def clean_text(value: Any) -> str:
     return re.sub(r"\s+", " ", str(value or "")).strip()
+
+
+def normalize_words(value: str) -> list[str]:
+    return [word.lower() for word in re.findall(r"[A-Za-z0-9][A-Za-z0-9+.'-]*", value or "") if len(word) > 2]
 
 
 def clean_chatgpt_source_url(url: str) -> str:

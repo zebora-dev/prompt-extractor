@@ -174,7 +174,9 @@ def run_extraction_job(
                 output = build_prompt_output(
                     prompt,
                     capture.response,
+                    capture.markdown,
                     capture.capture_method,
+                    capture.markdown_capture_method,
                     capture.raw_html,
                     capture.raw_html_capture_method,
                     capture.llm_model,
@@ -182,51 +184,103 @@ def run_extraction_job(
                     resolved_batch_id,
                     capture.sources,
                     capture.source_capture_method,
-                    capture.products,
-                    capture.product_capture_method,
-                    capture.entities,
-                    capture.entity_capture_method,
                 )
                 LOGGER.info(
-                    "[%s/%s] Capture summary for prompt %s: markdown_length=%s raw_html_length=%s llm_model=%s source_count=%s source_method=%s product_count=%s product_method=%s entity_count=%s entity_method=%s",
+                    "[%s/%s] Core capture summary for prompt %s: response_length=%s markdown_length=%s markdown_method=%s raw_html_length=%s llm_model=%s source_count=%s source_method=%s",
                     index,
                     len(prompts),
                     prompt_id,
                     len(capture.response or ""),
+                    len(capture.markdown or ""),
+                    capture.markdown_capture_method,
                     len(capture.raw_html or ""),
                     capture.llm_model,
                     len(capture.sources or []),
                     capture.source_capture_method,
-                    len(capture.products or []),
-                    capture.product_capture_method,
-                    len(capture.entities or []),
-                    capture.entity_capture_method,
                 )
                 saved = api.save_prompt_output(output)
                 saved_count += 1
                 saved_output = normalize_saved_output(saved, output)
                 saved_outputs.append(saved_output)
-                if capture.products:
-                    product_outputs.append(
-                        {
-                            **saved_output,
-                            "products": capture.products,
-                        }
-                    )
-                if capture.entities:
-                    entity_outputs.append(
-                        {
-                            **saved_output,
-                            "entities": capture.entities,
-                        }
-                    )
+
                 LOGGER.info(
-                    "[%s/%s] Saved prompt %s: output_id=%s response=%s",
+                    "[%s/%s] Saved core prompt output for prompt %s before flyout extraction. output_id=%s response=%s",
                     index,
                     len(prompts),
                     prompt_id,
                     saved_output.get("output_id"),
                     saved or "ok",
+                )
+
+                products = runner.capture_product_flyouts()
+                product_capture_method = "product_flyouts" if products else "none"
+                LOGGER.info(
+                    "[%s/%s] Captured %s product flyout(s) for prompt %s using %s",
+                    index,
+                    len(prompts),
+                    len(products),
+                    prompt_id,
+                    product_capture_method,
+                )
+                if products:
+                    product_outputs.append(
+                        {
+                            **saved_output,
+                            "products": products,
+                        }
+                    )
+
+                entities = runner.capture_entity_flyouts()
+                entity_capture_method = "entity_flyouts" if entities else "none"
+                LOGGER.info(
+                    "[%s/%s] Captured %s entity flyout(s) for prompt %s using %s",
+                    index,
+                    len(prompts),
+                    len(entities),
+                    prompt_id,
+                    entity_capture_method,
+                )
+                if entities:
+                    entity_outputs.append(
+                        {
+                            **saved_output,
+                            "entities": entities,
+                        }
+                    )
+                try:
+                    summary_patch = build_flyout_summary_patch(
+                        output,
+                        products,
+                        product_capture_method,
+                        entities,
+                        entity_capture_method,
+                    )
+                    api.update_prompt_output(saved_output, summary_patch)
+                    LOGGER.info(
+                        "[%s/%s] Updated prompt output flyout summary metadata. output_id=%s product_count=%s entity_count=%s",
+                        index,
+                        len(prompts),
+                        saved_output.get("output_id"),
+                        len(products),
+                        len(entities),
+                    )
+                except Exception as summary_exc:
+                    LOGGER.warning(
+                        "[%s/%s] Could not update flyout summary metadata for prompt %s output_id=%s: %s",
+                        index,
+                        len(prompts),
+                        prompt_id,
+                        saved_output.get("output_id"),
+                        summary_exc,
+                    )
+                LOGGER.info(
+                    "[%s/%s] Completed prompt %s extraction bundle. output_id=%s product_count=%s entity_count=%s",
+                    index,
+                    len(prompts),
+                    prompt_id,
+                    saved_output.get("output_id"),
+                    len(products),
+                    len(entities),
                 )
             except Exception as exc:
                 failed_count += 1
@@ -325,7 +379,9 @@ def normalize_saved_output(saved: dict[str, Any] | None, original_output: dict[s
 def build_prompt_output(
     prompt: dict[str, Any],
     response: str,
+    markdown: str,
     capture_method: str,
+    markdown_capture_method: str,
     raw_html: str,
     raw_html_capture_method: str,
     llm_model: str,
@@ -343,7 +399,7 @@ def build_prompt_output(
         "prompt_id": prompt.get("id"),
         "brand_id": prompt.get("brand_id"),
         "response": response,
-        "markdown": response,
+        "markdown": markdown or None,
         "raw_html": raw_html,
         "sources": sources or [],
         "batch_id": batch_id or prompt.get("batch_id"),
@@ -364,6 +420,8 @@ def build_prompt_output(
             "original_metadata": {
                 "llm_model": llm_model or "chatgpt",
                 "main_response_capture_method": capture_method,
+                "markdown_capture_method": markdown_capture_method,
+                "markdown_length": len(markdown or ""),
                 "copy_validation_status": "validated" if capture_method.startswith("copy_button") else "fallback",
                 "raw_html_capture_method": raw_html_capture_method,
                 "raw_html_length": len(raw_html or ""),
@@ -395,3 +453,35 @@ def build_prompt_output(
             "prompt_source": "batch" if batch_id else "local",
         },
     }
+
+
+def build_flyout_summary_patch(
+    output: dict[str, Any],
+    products: list[dict[str, Any]],
+    product_capture_method: str,
+    entities: list[dict[str, Any]],
+    entity_capture_method: str,
+) -> dict[str, Any]:
+    metadata = output.get("output_metadata") if isinstance(output.get("output_metadata"), dict) else {}
+    original_metadata = metadata.get("original_metadata") if isinstance(metadata.get("original_metadata"), dict) else {}
+    updated_metadata = {
+        **metadata,
+        "original_metadata": {
+            **original_metadata,
+            "product_count": len(products or []),
+            "product_capture_method": product_capture_method,
+            "product_extraction": {
+                "process_name": "product_extraction",
+                "product_count": len(products or []),
+                "capture_method": product_capture_method,
+            },
+            "entity_count": len(entities or []),
+            "entity_capture_method": entity_capture_method,
+            "entity_extraction": {
+                "process_name": "entity_extraction",
+                "entity_count": len(entities or []),
+                "capture_method": entity_capture_method,
+            },
+        },
+    }
+    return {"output_metadata": updated_metadata}
