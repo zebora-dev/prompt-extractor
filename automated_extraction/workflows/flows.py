@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import math
 from typing import Any
 
 from prefect import flow
 from prefect.logging import get_run_logger
 
+from automated_extraction.api_client import ApiClient
+from automated_extraction.config import Settings
 from automated_extraction.workflows.tasks import (
     entity_output_process_task,
     extract_chatgpt_batch_task,
@@ -12,6 +15,112 @@ from automated_extraction.workflows.tasks import (
     prompt_output_process_task,
     score_workflow_trigger_task,
 )
+
+
+@flow(
+    name="promt-extraction-batch",
+    flow_run_name="promt-extraction-batch-{batch_id}",
+    log_prints=True,
+)
+def prompt_extraction_batch_flow(
+    batch_id: str | None = None,
+    model_filter: str | None = "gpt",
+    limit: int = 10,
+    auto_login: bool | None = False,
+) -> dict[str, Any]:
+    """
+    Sequentially run prompt-extraction until the currently remaining prompt set
+    has been chunked into `limit` sized runs.
+    """
+    flow_logger = get_run_logger()
+    if not batch_id:
+        raise ValueError("batch_id is required")
+    if limit <= 0:
+        raise ValueError("limit must be greater than 0")
+
+    settings = Settings.from_env(require_api_key=True, require_auto_login_credentials=False)
+    api = ApiClient(
+        settings.api_base_url,
+        settings.anon_key,
+        supabase_url=settings.supabase_url,
+        prompt_outputs_table=settings.prompt_outputs_table,
+        prompt_output_products_table=settings.prompt_output_products_table,
+        prompt_output_entities_table=settings.prompt_output_entities_table,
+    )
+
+    batch = api.get_batch(batch_id)
+    brand_id = batch.get("brand_id")
+    if not brand_id:
+        raise RuntimeError(f"Batch {batch_id} does not include brand_id")
+
+    remaining_prompts = api.get_prompts(
+        batch_id,
+        str(brand_id),
+        only_remaining=True,
+        llm_model_filter=model_filter,
+    )
+    remaining_count = len(remaining_prompts)
+    run_count = math.ceil(remaining_count / limit) if remaining_count else 0
+    flow_logger.info(
+        "Starting sequential prompt extraction batch. batch_id=%s brand_id=%s model_filter=%s remaining_count=%s limit_per_run=%s planned_runs=%s auto_login=%s",
+        batch_id,
+        brand_id,
+        model_filter or "any",
+        remaining_count,
+        limit,
+        run_count,
+        auto_login,
+    )
+
+    run_results: list[dict[str, Any]] = []
+    for run_index in range(1, run_count + 1):
+        flow_logger.info(
+            "Starting sequential prompt-extraction run %s/%s. batch_id=%s limit=%s model_filter=%s auto_login=%s",
+            run_index,
+            run_count,
+            batch_id,
+            limit,
+            model_filter or "any",
+            auto_login,
+        )
+        result = prompt_extraction_flow(
+            batch_id=batch_id,
+            limit=limit,
+            llm_model_filter=model_filter,
+            auto_login=auto_login,
+            force_rerun=False,
+        )
+        run_results.append(result)
+        flow_logger.info(
+            "Finished sequential prompt-extraction run %s/%s. saved_count=%s skipped_count=%s failed_count=%s",
+            run_index,
+            run_count,
+            result.get("saved_count", 0),
+            result.get("skipped_count", 0),
+            result.get("failed_count", 0),
+        )
+
+    saved_count = sum(int(result.get("saved_count") or 0) for result in run_results)
+    failed_count = sum(int(result.get("failed_count") or 0) for result in run_results)
+    skipped_count = sum(int(result.get("skipped_count") or 0) for result in run_results)
+    status = "completed" if failed_count == 0 else "completed_with_failures"
+    summary = {
+        "status": status,
+        "batch_id": batch_id,
+        "brand_id": str(brand_id),
+        "model_filter": model_filter,
+        "auto_login": auto_login,
+        "initial_remaining_count": remaining_count,
+        "limit_per_run": limit,
+        "planned_runs": run_count,
+        "completed_runs": len(run_results),
+        "saved_count": saved_count,
+        "skipped_count": skipped_count,
+        "failed_count": failed_count,
+        "runs": run_results,
+    }
+    flow_logger.info("Sequential prompt extraction batch finished: %s", summary)
+    return summary
 
 
 @flow(
