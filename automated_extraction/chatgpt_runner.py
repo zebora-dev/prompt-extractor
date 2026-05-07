@@ -389,60 +389,49 @@ class ChatGPTRunner:
 
     def type_prompt(self, input_element: WebElement, prompt_text: str) -> None:
         self.focus_input(input_element)
-        driver = self.require_driver()
         select_modifier = Keys.COMMAND if platform.system() == "Darwin" else Keys.CONTROL
         input_element.send_keys(select_modifier, "a")
         input_element.send_keys(Keys.BACKSPACE)
 
-        filled = self._js_fill(input_element, prompt_text)
-        if filled:
-            # Single no-op keypress so React sees focus is still active and enables the send button.
-            input_element.send_keys(Keys.SHIFT)
-            time.sleep(0.15)
-            return
+        # Type the first word character-by-character to trigger React's input detection,
+        # then insert the remainder instantly to avoid the per-character VNC overhead.
+        words = prompt_text.split(" ", 1)
+        first_word = words[0]
+        remainder = (" " + words[1]) if len(words) > 1 else ""
 
-        # Fallback: character-by-character (slow but always works).
-        LOGGER.warning("Fast JS fill failed; falling back to character-by-character typing.")
-        time.sleep(random.uniform(0.2, 0.5))
-        for char in prompt_text:
+        for char in first_word:
             if char == "\n":
                 input_element.send_keys(Keys.SHIFT, Keys.ENTER)
             else:
                 input_element.send_keys(char)
-            time.sleep(random.uniform(0.05, 0.2))
+            time.sleep(random.uniform(0.05, 0.12))
 
-    def _js_fill(self, input_element: WebElement, text: str) -> bool:
-        """Fill input instantly via JavaScript, returning True on success.
+        if remainder:
+            if not self._js_insert_at_cursor(input_element, remainder):
+                LOGGER.warning("Fast JS insert failed; falling back to character-by-character for remainder.")
+                for char in remainder:
+                    if char == "\n":
+                        input_element.send_keys(Keys.SHIFT, Keys.ENTER)
+                    else:
+                        input_element.send_keys(char)
+                    time.sleep(random.uniform(0.05, 0.15))
 
-        For contenteditable divs (ChatGPT's main prompt), execCommand('insertText')
-        fires the native InputEvent that React's synthetic event system picks up.
-        For textareas, we use the React-compatible native value setter trick.
+        time.sleep(0.15)
+
+    def _js_insert_at_cursor(self, input_element: WebElement, text: str) -> bool:
+        """Insert text at the current cursor position using execCommand.
+
+        execCommand('insertText') works for both contenteditable divs and textareas
+        in Chrome, fires the correct InputEvent that React picks up, and respects
+        the current cursor position so previously-typed characters are preserved.
         """
         try:
             result = self.require_driver().execute_script(
                 """
                 const el = arguments[0];
                 const text = arguments[1];
-
                 el.focus();
-
-                if (el.getAttribute('contenteditable') === 'true') {
-                    document.execCommand('selectAll', false, null);
-                    return document.execCommand('insertText', false, text);
-                }
-
-                // textarea: use React's native value setter so onChange fires correctly.
-                const proto = Object.getPrototypeOf(el);
-                const descriptor = Object.getOwnPropertyDescriptor(proto, 'value') ||
-                                   Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value');
-                if (descriptor && descriptor.set) {
-                    descriptor.set.call(el, text);
-                    el.dispatchEvent(new Event('input', {bubbles: true}));
-                    el.dispatchEvent(new Event('change', {bubbles: true}));
-                    return true;
-                }
-
-                return false;
+                return document.execCommand('insertText', false, text);
                 """,
                 input_element,
                 text,
