@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -459,6 +460,7 @@ def build_prompt_output(
             "app_version": "1.0.0",
             "extension_version": None,
             "prompt_source": "batch" if batch_id else "local",
+            "worker_name": os.getenv("FLY_APP_NAME"),
         },
     }
 
