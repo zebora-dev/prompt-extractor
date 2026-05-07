@@ -12,7 +12,7 @@ from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import pyperclip
-from selenium.common.exceptions import ElementClickInterceptedException, JavascriptException, NoSuchElementException, SessionNotCreatedException, TimeoutException, WebDriverException
+from selenium.common.exceptions import ElementClickInterceptedException, JavascriptException, NoSuchElementException, SessionNotCreatedException, StaleElementReferenceException, TimeoutException, WebDriverException
 from selenium import webdriver
 from selenium.webdriver import Chrome
 from selenium.webdriver import ActionChains
@@ -579,10 +579,18 @@ class ChatGPTRunner:
         return False
 
     def wait_for_stop_button_to_disappear(self, timeout: int) -> bool:
+        def all_stop_buttons_gone(driver) -> bool:
+            for selector in STOP_BUTTON_SELECTORS:
+                try:
+                    elements = driver.find_elements(By.CSS_SELECTOR, selector)
+                    if any(el.is_displayed() for el in elements):
+                        return False
+                except WebDriverException:
+                    pass
+            return True
+
         try:
-            WebDriverWait(self.require_driver(), timeout).until(
-                EC.invisibility_of_element_located((By.CSS_SELECTOR, STOP_BUTTON_SELECTOR))
-            )
+            WebDriverWait(self.require_driver(), timeout).until(all_stop_buttons_gone)
             return True
         except TimeoutException:
             return False
@@ -1891,8 +1899,14 @@ class ChatGPTRunner:
         return element.text.strip() if element else ""
 
     def latest_response_element(self) -> WebElement | None:
-        responses = self.response_elements()
-        return responses[-1] if responses else None
+        for attempt in range(3):
+            try:
+                responses = self.response_elements()
+                return responses[-1] if responses else None
+            except StaleElementReferenceException:
+                if attempt < 2:
+                    time.sleep(0.5)
+        return None
 
     def response_elements(self) -> list[WebElement]:
         return self.require_driver().find_elements(By.CSS_SELECTOR, ASSISTANT_RESPONSE_SELECTOR)
