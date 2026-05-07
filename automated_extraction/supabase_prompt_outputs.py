@@ -212,6 +212,7 @@ class SupabasePromptOutputRepository:
             .select("prompt_id")
             .eq("batch_id", batch_id)
             .eq("brand_id", brand_id)
+            .eq("active", True)
         )
         if llm_model_filter:
             query = query.ilike("llm_model", f"%{llm_model_filter}%")
@@ -246,6 +247,7 @@ class SupabasePromptOutputRepository:
             .eq("prompt_id", prompt_id)
             .eq("brand_id", brand_id)
             .eq("batch_id", batch_id)
+            .eq("active", True)
         )
         if llm_model_filter:
             query = query.ilike("llm_model", f"%{llm_model_filter}%")
