@@ -389,17 +389,67 @@ class ChatGPTRunner:
 
     def type_prompt(self, input_element: WebElement, prompt_text: str) -> None:
         self.focus_input(input_element)
+        driver = self.require_driver()
         select_modifier = Keys.COMMAND if platform.system() == "Darwin" else Keys.CONTROL
         input_element.send_keys(select_modifier, "a")
         input_element.send_keys(Keys.BACKSPACE)
-        time.sleep(random.uniform(0.2, 0.5))
 
+        filled = self._js_fill(input_element, prompt_text)
+        if filled:
+            # Single no-op keypress so React sees focus is still active and enables the send button.
+            input_element.send_keys(Keys.SHIFT)
+            time.sleep(0.15)
+            return
+
+        # Fallback: character-by-character (slow but always works).
+        LOGGER.warning("Fast JS fill failed; falling back to character-by-character typing.")
+        time.sleep(random.uniform(0.2, 0.5))
         for char in prompt_text:
             if char == "\n":
                 input_element.send_keys(Keys.SHIFT, Keys.ENTER)
             else:
                 input_element.send_keys(char)
             time.sleep(random.uniform(0.05, 0.2))
+
+    def _js_fill(self, input_element: WebElement, text: str) -> bool:
+        """Fill input instantly via JavaScript, returning True on success.
+
+        For contenteditable divs (ChatGPT's main prompt), execCommand('insertText')
+        fires the native InputEvent that React's synthetic event system picks up.
+        For textareas, we use the React-compatible native value setter trick.
+        """
+        try:
+            result = self.require_driver().execute_script(
+                """
+                const el = arguments[0];
+                const text = arguments[1];
+
+                el.focus();
+
+                if (el.getAttribute('contenteditable') === 'true') {
+                    document.execCommand('selectAll', false, null);
+                    return document.execCommand('insertText', false, text);
+                }
+
+                // textarea: use React's native value setter so onChange fires correctly.
+                const proto = Object.getPrototypeOf(el);
+                const descriptor = Object.getOwnPropertyDescriptor(proto, 'value') ||
+                                   Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value');
+                if (descriptor && descriptor.set) {
+                    descriptor.set.call(el, text);
+                    el.dispatchEvent(new Event('input', {bubbles: true}));
+                    el.dispatchEvent(new Event('change', {bubbles: true}));
+                    return true;
+                }
+
+                return false;
+                """,
+                input_element,
+                text,
+            )
+            return bool(result)
+        except (WebDriverException, JavascriptException):
+            return False
 
     def click_send(self, input_element: WebElement) -> None:
         self.dismiss_blocking_dialogs()
