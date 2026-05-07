@@ -46,12 +46,25 @@ def perform_automated_login(
     accounts: Mapping[str, dict[str, Any]],
     email: str,
     login_wait_seconds: int = 180,
+    pre_login_pause_seconds: int = 0,
 ) -> bool:
     """Run the automated login flow for `email`.
 
     Returns True on success. Raises `AutomatedLoginError` on misconfiguration
     or when the chosen login method reports failure.
     """
+    import os
+    machine_id = os.getenv("FLY_MACHINE_ID", "local")
+    LOGGER.info(
+        "AUTO-LOGIN starting on machine=%s for email=%s — "
+        "connect VNC now at https://prompt-extractor-us.fly.dev/vnc.html "
+        "(set cookie fly_instance_id=%s)",
+        machine_id, email, machine_id,
+    )
+    if pre_login_pause_seconds > 0:
+        LOGGER.info("Pausing %ds before login to allow VNC connection", pre_login_pause_seconds)
+        time.sleep(pre_login_pause_seconds)
+
     if not accounts:
         raise AutomatedLoginError(
             "Automated login requested but no accounts are configured. "
