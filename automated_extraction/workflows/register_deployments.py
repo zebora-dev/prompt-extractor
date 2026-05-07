@@ -15,6 +15,10 @@ LOGGER = logging.getLogger(__name__)
 
 WORK_POOL_NAME = os.getenv("PREFECT_WORK_POOL", "prompt-extraction-pool")
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+# On the Fly.io worker the app lives at /app; PREFECT_WORKING_DIR is set in
+# the machine env. When registering from a local machine against the remote
+# API, pass PREFECT_WORKING_DIR=/app explicitly so the worker finds the code.
+WORK_DIR = os.getenv("PREFECT_WORKING_DIR") or str(PROJECT_ROOT)
 
 
 def get_flows():
@@ -99,9 +103,9 @@ async def deploy_with_local_storage() -> None:
                 name=name,
                 work_pool_name=WORK_POOL_NAME,
                 job_variables={
-                    "working_dir": str(PROJECT_ROOT),
+                    "working_dir": WORK_DIR,
                     "env": {
-                        "PYTHONPATH": str(PROJECT_ROOT),
+                        "PYTHONPATH": WORK_DIR,
                     },
                 },
                 tags=config["tags"],
