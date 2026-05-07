@@ -21,16 +21,11 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 WORK_DIR = os.getenv("PREFECT_WORKING_DIR") or str(PROJECT_ROOT)
 
 
-def _deployment_name(base: str) -> str:
-    """Append the work pool name as a suffix so each worker gets a unique deployment."""
-    return f"{base}-{WORK_POOL_NAME}"
-
-
 def get_flows():
     from automated_extraction.workflows.flows import prompt_extraction_batch_flow, prompt_extraction_flow, prompt_output_processing_flow
 
     return {
-        _deployment_name("prompt-extraction-batch"): {
+        "prompt-extraction-batch": {
             "flow": prompt_extraction_batch_flow,
             "tags": ["chatgpt", "extraction", "browser", "batch"],
             "description": "Sequentially run prompt-extraction in chunks until remaining prompts for a batch are covered.",
@@ -45,7 +40,7 @@ def get_flows():
                 "delay_seconds": 120,
             },
         },
-        _deployment_name("prompt-extraction"): {
+        "prompt-extraction": {
             "flow": prompt_extraction_flow,
             "tags": ["chatgpt", "extraction", "browser"],
             "description": "Run BrandSight prompts through ChatGPT and save markdown, raw HTML, and sources.",
@@ -67,7 +62,7 @@ def get_flows():
                 "capture_entities": False,
             },
         },
-        _deployment_name("prompt-output-processing"): {
+        "prompt-output-processing": {
             "flow": prompt_output_processing_flow,
             "tags": ["prompt-output", "post-process", "markdown"],
             "description": "Re-process saved prompt outputs from raw HTML without running ChatGPT extraction.",
