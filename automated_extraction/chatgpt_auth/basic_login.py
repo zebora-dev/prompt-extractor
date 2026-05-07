@@ -31,14 +31,14 @@ class BasicLogin(LoginMethod):
         if not self.extract_account_info(email, account):
             return False
 
-        LOGGER.info("BasicLogin: entering email for %s", email)
+        LOGGER.info("BasicLogin: entering email for %s. %s", email, self.page_diagnostics())
         if not self.enter_email(self.email or "", EMAIL_INPUT_SELECTOR, CONTINUE_BUTTON_SELECTOR):
-            LOGGER.error("BasicLogin: failed to submit email")
+            LOGGER.error("BasicLogin: failed to submit email. %s", self.page_diagnostics())
             return False
 
-        LOGGER.info("BasicLogin: entering password")
+        LOGGER.info("BasicLogin: entering password. %s", self.page_diagnostics())
         if not self.enter_password(self.password or "", PASSWORD_INPUT_SELECTOR, SUBMIT_BUTTON_SELECTOR):
-            LOGGER.error("BasicLogin: failed to submit password")
+            LOGGER.error("BasicLogin: failed to submit password. %s", self.page_diagnostics())
             return False
 
         chatgpt_otp = self.otp_auth.get(Providers.CHATGPT.value)
