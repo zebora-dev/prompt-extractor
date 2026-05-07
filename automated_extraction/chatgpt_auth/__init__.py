@@ -13,11 +13,6 @@ Public surface:
 from __future__ import annotations
 
 from .accounts import AccountsDeserializer
-from .basic_login import BasicLogin
-from .google_login import GoogleLogin
-from .login_method import LoginMethod
-from .otp import OTPAuth, Providers, generate_otp
-from .runner import AutomatedLoginError, perform_automated_login
 
 
 __all__ = [
@@ -31,3 +26,34 @@ __all__ = [
     "generate_otp",
     "perform_automated_login",
 ]
+
+
+def __getattr__(name: str):
+    if name == "BasicLogin":
+        from .basic_login import BasicLogin
+
+        return BasicLogin
+    if name == "GoogleLogin":
+        from .google_login import GoogleLogin
+
+        return GoogleLogin
+    if name == "LoginMethod":
+        from .login_method import LoginMethod
+
+        return LoginMethod
+    if name in {"OTPAuth", "Providers", "generate_otp"}:
+        from .otp import OTPAuth, Providers, generate_otp
+
+        return {
+            "OTPAuth": OTPAuth,
+            "Providers": Providers,
+            "generate_otp": generate_otp,
+        }[name]
+    if name in {"AutomatedLoginError", "perform_automated_login"}:
+        from .runner import AutomatedLoginError, perform_automated_login
+
+        return {
+            "AutomatedLoginError": AutomatedLoginError,
+            "perform_automated_login": perform_automated_login,
+        }[name]
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

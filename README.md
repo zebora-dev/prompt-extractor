@@ -214,6 +214,35 @@ python -m automated_extraction --prompts-file ../chromeApp/extension-shared/prom
 python -m automated_extraction --batch-id <batch-uuid> --dry-run
 ```
 
+## Run Google AI Mode Extraction
+
+The same prompt loading and Supabase output flow can target Google AI Mode instead of ChatGPT:
+
+```bash
+python -m automated_extraction --provider google-ai-mode --batch-id <batch-uuid> --limit 1 --verbose
+```
+
+Useful Google-specific environment variables:
+
+```text
+GOOGLE_CHROME_USER_DATA_DIR=/absolute/path/to/google/profile
+GOOGLE_SEARCH_COUNTRY=US
+GOOGLE_SEARCH_LANGUAGE=en
+GOOGLE_AI_MODE_USE_UDM_50=true
+GOOGLE_AI_MODE_USE_ARV_1=true
+```
+
+The Google runner saves rows to the same `prompts_outputs` table with
+`llm_model=google-ai-mode`, `config.site=Google`, raw AI Mode HTML,
+markdown-ish extracted text, citation links, and capture metadata describing
+whether an AI Mode response was captured.
+
+For Prefect, serve or deploy the `google-ai-mode-extraction` flow:
+
+```bash
+python -m automated_extraction.workflows.register_deployments --serve
+```
+
 ## What It Does
 
 1. Loads the batch and brand from `GET /batches`.
@@ -230,4 +259,3 @@ python -m automated_extraction --batch-id <batch-uuid> --dry-run
 - The baseline library referenced by the team, `daily-coding-problem/chatgpt-scraper-lib`, is Selenium-based and uses the same core pattern: browser session, prompt textbox, send button, wait for stop button to disappear, then prefer the copy button over DOM text.
 - This local implementation keeps those ideas but uses the BrandSight API payloads directly, so it can run without the extension.
 - ChatGPT UI selectors can change. If capture breaks, update `automated_extraction/chatgpt_runner.py`.
-

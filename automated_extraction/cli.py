@@ -7,7 +7,7 @@ from pathlib import Path
 
 from .config import Settings
 from .entity_output_processor import process_entity_outputs
-from .extraction import run_extraction_job
+from .extraction import run_extraction_job, run_google_ai_mode_extraction_job
 from .product_output_processor import process_product_outputs
 from .workflow_trigger import trigger_score_workflows
 
@@ -24,18 +24,33 @@ def main(argv: list[str] | None = None) -> int:
     )
     quiet_third_party_http_logs()
 
+    if args.provider == "google-ai-overview":
+        LOGGER.warning("--provider google-ai-overview is deprecated; using google-ai-mode.")
+        args.provider = "google-ai-mode"
+
+    if args.llm_model_filter is None:
+        args.llm_model_filter = "google-ai-mode" if args.provider == "google-ai-mode" else "gpt"
+
     auto_login_override = args.auto_login
     settings = Settings.from_env(
         require_api_key=not args.login_only,
         # When --auto-login is explicitly set, enforce credentials even for
         # --login-only so misconfiguration fails fast. Otherwise let the env
         # default decide.
-        require_auto_login_credentials=(auto_login_override is True) or (not args.login_only),
+        require_auto_login_credentials=False
+        if args.provider == "google-ai-mode"
+        else (auto_login_override is True) or (not args.login_only),
     )
     auto_login = auto_login_override if auto_login_override is not None else settings.auto_login
     login_email = args.login_email or settings.login_email
 
     if args.login_only:
+        if args.provider == "google-ai-mode":
+            LOGGER.info(
+                "--login-only is ChatGPT-specific. For Google AI Mode, run Chrome once with "
+                "--provider google-ai-mode or use GOOGLE_CHROME_USER_DATA_DIR."
+            )
+            return 0
         from .chatgpt_runner import ChatGPTRunner
 
         profile_dir = args.chrome_user_data_dir or settings.chrome_user_data_dir
@@ -62,22 +77,39 @@ def main(argv: list[str] | None = None) -> int:
     if not args.batch_id and not args.prompts_file:
         parser.error("one of --batch-id or --prompts-file is required unless --login-only is used")
 
-    result = run_extraction_job(
-        settings=settings,
-        batch_id=args.batch_id,
-        prompts_file=args.prompts_file,
-        brand_id=args.brand_id,
-        limit=args.limit,
-        skip=args.skip,
-        dry_run=args.dry_run,
-        headless=args.headless if args.headless is not None else settings.headless,
-        chrome_user_data_dir=args.chrome_user_data_dir,
-        sources_panel_pause_seconds=args.sources_panel_pause_seconds,
-        force_rerun=args.force_rerun,
-        llm_model_filter=args.llm_model_filter,
-        auto_login=auto_login,
-        login_email=login_email,
-    )
+    if args.provider == "google-ai-mode":
+        result = run_google_ai_mode_extraction_job(
+            settings=settings,
+            batch_id=args.batch_id,
+            prompts_file=args.prompts_file,
+            brand_id=args.brand_id,
+            limit=args.limit,
+            skip=args.skip,
+            dry_run=args.dry_run,
+            headless=args.headless if args.headless is not None else settings.headless,
+            chrome_user_data_dir=args.chrome_user_data_dir,
+            force_rerun=args.force_rerun,
+            llm_model_filter=args.llm_model_filter,
+            country=args.google_country,
+            language=args.google_language,
+        )
+    else:
+        result = run_extraction_job(
+            settings=settings,
+            batch_id=args.batch_id,
+            prompts_file=args.prompts_file,
+            brand_id=args.brand_id,
+            limit=args.limit,
+            skip=args.skip,
+            dry_run=args.dry_run,
+            headless=args.headless if args.headless is not None else settings.headless,
+            chrome_user_data_dir=args.chrome_user_data_dir,
+            sources_panel_pause_seconds=args.sources_panel_pause_seconds,
+            force_rerun=args.force_rerun,
+            llm_model_filter=args.llm_model_filter,
+            auto_login=auto_login,
+            login_email=login_email,
+        )
     payload = asdict(result)
     product_output_refs = payload.pop("product_outputs", []) or []
     entity_output_refs = payload.pop("entity_outputs", []) or []
@@ -111,6 +143,12 @@ def main(argv: list[str] | None = None) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run BrandSight prompts through ChatGPT and save outputs.")
+    parser.add_argument(
+        "--provider",
+        choices=["chatgpt", "google-ai-mode", "google-ai-overview"],
+        default="chatgpt",
+        help="Extraction provider to run. Defaults to chatgpt.",
+    )
     source = parser.add_mutually_exclusive_group()
     source.add_argument("--batch-id", help="BrandSight batch UUID to load prompts from.")
     source.add_argument("--prompts-file", type=Path, help="Local prompts JSON file, e.g. chromeApp/extension-shared/prompts.json.")
@@ -122,8 +160,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--force-rerun", action="store_true", help="Run prompts even when an output already exists for the same batch, brand, and prompt.")
     parser.add_argument(
         "--llm-model-filter",
-        default="gpt",
-        help="Only treat prompt outputs whose llm_model contains this value as completed. Defaults to 'gpt'. Use an empty string to match any model.",
+        default=None,
+        help=(
+            "Only treat prompt outputs whose llm_model contains this value as completed. Defaults to "
+            "'gpt' for ChatGPT and 'google-ai-mode' for Google AI Mode. Use an empty string to match any model."
+        ),
     )
     parser.add_argument("--headless", action=argparse.BooleanOptionalAction, default=None, help="Override CHATGPT_HEADLESS.")
     parser.add_argument("--chrome-user-data-dir", help="Chrome profile directory to reuse for ChatGPT login.")
@@ -143,6 +184,8 @@ def build_parser() -> argparse.ArgumentParser:
         default=0,
         help="Debug pause after opening the ChatGPT Sources panel. Defaults to 0; set e.g. 180 to inspect/copy DOM.",
     )
+    parser.add_argument("--google-country", help="Google Search country code override, e.g. US or GB.")
+    parser.add_argument("--google-language", help="Google Search language code override, e.g. en.")
     parser.add_argument("--verbose", action="store_true", help="Enable debug logging.")
     return parser
 

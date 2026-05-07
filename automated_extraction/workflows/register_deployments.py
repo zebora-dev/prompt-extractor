@@ -18,7 +18,11 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 def get_flows():
-    from automated_extraction.workflows.flows import prompt_extraction_flow, prompt_output_processing_flow
+    from automated_extraction.workflows.flows import (
+        google_ai_mode_extraction_flow,
+        prompt_extraction_flow,
+        prompt_output_processing_flow,
+    )
 
     return {
         "prompt-extraction": {
@@ -51,6 +55,25 @@ def get_flows():
                 "brand_id": None,
                 "prompt_id": None,
                 "limit": 50,
+            },
+        },
+        "google-ai-mode-extraction": {
+            "flow": google_ai_mode_extraction_flow,
+            "tags": ["google", "ai-mode", "extraction", "browser"],
+            "description": "Run BrandSight prompts through Google Search and save AI Mode markdown, raw HTML, and citations.",
+            "parameters": {
+                "batch_id": None,
+                "prompts_file": None,
+                "brand_id": None,
+                "limit": None,
+                "skip": 0,
+                "dry_run": False,
+                "headless": None,
+                "chrome_user_data_dir": None,
+                "force_rerun": False,
+                "llm_model_filter": "google-ai-mode",
+                "country": None,
+                "language": None,
             },
         },
     }

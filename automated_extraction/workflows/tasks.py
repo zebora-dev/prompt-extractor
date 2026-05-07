@@ -10,7 +10,7 @@ from prefect.logging import get_run_logger
 
 from automated_extraction.config import Settings
 from automated_extraction.entity_output_processor import process_entity_outputs
-from automated_extraction.extraction import run_extraction_job
+from automated_extraction.extraction import run_extraction_job, run_google_ai_mode_extraction_job
 from automated_extraction.product_output_processor import process_product_outputs
 from automated_extraction.prompt_output_processor import process_prompt_outputs
 from automated_extraction.workflow_trigger import trigger_score_workflows
@@ -98,6 +98,80 @@ def extract_chatgpt_batch_task(
     task_logger.info("Finished ChatGPT extraction task: %s", summarize_extraction_payload(payload))
     if result.failed_count:
         task_logger.warning("Extraction completed with %s failed prompt(s).", result.failed_count)
+    return payload
+
+
+def _extract_google_ai_mode_batch_task_run_name() -> str:
+    try:
+        from prefect.runtime import task_run
+
+        params = getattr(task_run, "parameters", None) or {}
+        batch_id = params.get("batch_id") or "local-prompts"
+        return f"extract-google-ai-mode-{batch_id}"
+    except Exception as exc:
+        LOGGER.debug("Prefect runtime not available: %s", exc)
+        return "extract-google-ai-mode-batch"
+
+
+@task(
+    name="extract-google-ai-mode-batch",
+    task_run_name=_extract_google_ai_mode_batch_task_run_name,
+    retries=0,
+    timeout_seconds=None,
+    tags=["google", "ai-mode", "extraction", "browser"],
+    cache_result_in_memory=False,
+)
+def extract_google_ai_mode_batch_task(
+    *,
+    batch_id: str | None = None,
+    prompts_file: str | None = None,
+    brand_id: str | None = None,
+    limit: int | None = None,
+    skip: int = 0,
+    dry_run: bool = False,
+    headless: bool | None = None,
+    chrome_user_data_dir: str | None = None,
+    force_rerun: bool = False,
+    llm_model_filter: str | None = "google-ai-mode",
+    country: str | None = None,
+    language: str | None = None,
+) -> dict[str, Any]:
+    """
+    Run BrandSight prompts through Google Search and capture AI Mode output.
+    """
+    task_logger = get_run_logger()
+    task_logger.info(
+        "Starting Google AI Mode extraction task. batch_id=%s prompts_file=%s limit=%s skip=%s dry_run=%s force_rerun=%s llm_model_filter=%s country=%s language=%s",
+        batch_id,
+        prompts_file,
+        limit,
+        skip,
+        dry_run,
+        force_rerun,
+        llm_model_filter or "any",
+        country or "<env>",
+        language or "<env>",
+    )
+    settings = Settings.from_env(require_api_key=True, require_auto_login_credentials=False)
+    result = run_google_ai_mode_extraction_job(
+        settings=settings,
+        batch_id=batch_id,
+        prompts_file=Path(prompts_file) if prompts_file else None,
+        brand_id=brand_id,
+        limit=limit,
+        skip=skip,
+        dry_run=dry_run,
+        headless=headless,
+        chrome_user_data_dir=chrome_user_data_dir,
+        force_rerun=force_rerun,
+        llm_model_filter=llm_model_filter,
+        country=country,
+        language=language,
+    )
+    payload = asdict(result)
+    task_logger.info("Finished Google AI Mode extraction task: %s", summarize_extraction_payload(payload))
+    if result.failed_count:
+        task_logger.warning("Google AI Mode extraction completed with %s failed prompt(s).", result.failed_count)
     return payload
 
 

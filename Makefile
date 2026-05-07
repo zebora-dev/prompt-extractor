@@ -1,4 +1,4 @@
-.PHONY: help install login run-batch dry-run check-prefect prefect-server prefect-serve prefect-pool prefect-deploy prefect-worker prefect-list validate clean
+.PHONY: help install login run-batch run-google-ai-mode run-google-aio dry-run check-prefect prefect-server prefect-serve prefect-pool prefect-deploy prefect-worker prefect-list validate clean
 
 PREFECT_WORK_POOL ?= prompt-extraction-pool
 
@@ -19,6 +19,7 @@ help:
 	@echo ""
 	@echo "Extraction:"
 	@echo "  run-batch       Run a batch with BATCH_ID=<uuid>"
+	@echo "  run-google-ai-mode  Run a batch through Google AI Mode with BATCH_ID=<uuid>"
 	@echo "  dry-run         Load prompts without opening ChatGPT"
 	@echo ""
 	@echo "Prefect:"
@@ -43,6 +44,12 @@ login:
 run-batch:
 	@test -n "$(BATCH_ID)" || (echo "Set BATCH_ID=<uuid>" && exit 1)
 	$(PYTHON) -m automated_extraction --batch-id "$(BATCH_ID)"
+
+run-google-ai-mode:
+	@test -n "$(BATCH_ID)" || (echo "Set BATCH_ID=<uuid>" && exit 1)
+	$(PYTHON) -m automated_extraction --provider google-ai-mode --batch-id "$(BATCH_ID)"
+
+run-google-aio: run-google-ai-mode
 
 dry-run:
 	@test -n "$(BATCH_ID)" || (echo "Set BATCH_ID=<uuid>" && exit 1)

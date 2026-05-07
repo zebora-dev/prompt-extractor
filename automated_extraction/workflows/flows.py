@@ -8,6 +8,7 @@ from prefect.logging import get_run_logger
 from automated_extraction.workflows.tasks import (
     entity_output_process_task,
     extract_chatgpt_batch_task,
+    extract_google_ai_mode_batch_task,
     product_output_process_task,
     prompt_output_process_task,
     score_workflow_trigger_task,
@@ -111,6 +112,85 @@ def prompt_extraction_flow(
         "score_workflow_trigger": score_workflow_result,
     }
     flow_logger.info("Prompt extraction flow finished: %s", combined_result)
+    return combined_result
+
+
+@flow(
+    name="google-ai-mode-extraction",
+    flow_run_name="google-ai-mode-extraction-{batch_id}",
+    log_prints=True,
+)
+def google_ai_mode_extraction_flow(
+    batch_id: str | None = None,
+    prompts_file: str | None = None,
+    brand_id: str | None = None,
+    limit: int | None = None,
+    skip: int = 0,
+    dry_run: bool = False,
+    headless: bool | None = None,
+    chrome_user_data_dir: str | None = None,
+    force_rerun: bool = False,
+    llm_model_filter: str | None = "google-ai-mode",
+    country: str | None = None,
+    language: str | None = None,
+) -> dict[str, Any]:
+    """
+    Orchestrate a Google AI Mode prompt extraction run.
+    """
+    flow_logger = get_run_logger()
+    if not batch_id and not prompts_file:
+        raise ValueError("one of batch_id or prompts_file is required")
+
+    flow_logger.info(
+        "Starting Google AI Mode extraction flow. batch_id=%s prompts_file=%s brand_id=%s limit=%s skip=%s force_rerun=%s llm_model_filter=%s country=%s language=%s",
+        batch_id,
+        prompts_file,
+        brand_id,
+        limit,
+        skip,
+        force_rerun,
+        llm_model_filter or "any",
+        country or "<env>",
+        language or "<env>",
+    )
+    result = extract_google_ai_mode_batch_task(
+        batch_id=batch_id,
+        prompts_file=prompts_file,
+        brand_id=brand_id,
+        limit=limit,
+        skip=skip,
+        dry_run=dry_run,
+        headless=headless,
+        chrome_user_data_dir=chrome_user_data_dir,
+        force_rerun=force_rerun,
+        llm_model_filter=llm_model_filter,
+        country=country,
+        language=language,
+    )
+
+    processing_result: dict[str, Any] | None = None
+    if not dry_run and result.get("saved_count", 0) > 0:
+        processing_result = prompt_output_process_task(
+            saved_outputs=result.get("saved_outputs") or [],
+            batch_id=result.get("batch_id") or batch_id,
+            brand_id=result.get("brand_id") or brand_id,
+            limit=result.get("saved_count") or limit or 50,
+        )
+    else:
+        flow_logger.info("Skipping prompt output processing because no Google AI Mode outputs were saved.")
+
+    score_workflow_result: dict[str, Any] | None = None
+    if not dry_run and result.get("saved_outputs"):
+        score_workflow_result = score_workflow_trigger_task(saved_outputs=result.get("saved_outputs") or [], force=False)
+    else:
+        flow_logger.info("Skipping score workflow trigger because no Google AI Mode outputs were saved.")
+
+    combined_result = {
+        **result,
+        "prompt_output_processing": processing_result,
+        "score_workflow_trigger": score_workflow_result,
+    }
+    flow_logger.info("Google AI Mode extraction flow finished: %s", combined_result)
     return combined_result
 
 
