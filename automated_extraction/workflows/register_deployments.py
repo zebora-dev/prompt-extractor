@@ -18,27 +18,9 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 def get_flows():
-    from automated_extraction.workflows.flows import batch_extraction_flow, prompt_extraction_flow, prompt_output_processing_flow
+    from automated_extraction.workflows.flows import prompt_extraction_flow, prompt_output_processing_flow
 
     return {
-        "batch-extraction": {
-            "flow": batch_extraction_flow,
-            "tags": ["chatgpt", "extraction", "browser", "batch"],
-            "description": "Run prompt-extraction sequentially for multiple batch IDs with a delay between each.",
-            "parameters": {
-                "batch_ids": [],
-                "limit": None,
-                "skip": 0,
-                "dry_run": False,
-                "force_rerun": False,
-                "llm_model_filter": "gpt",
-                "auto_login": False,
-                "login_email": None,
-                "capture_products": False,
-                "capture_entities": False,
-                "delay_seconds": 120,
-            },
-        },
         "prompt-extraction": {
             "flow": prompt_extraction_flow,
             "tags": ["chatgpt", "extraction", "browser"],
