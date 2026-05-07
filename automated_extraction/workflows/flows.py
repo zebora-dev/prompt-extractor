@@ -19,8 +19,8 @@ from automated_extraction.workflows.tasks import (
 
 
 @flow(
-    name="promt-extraction-batch",
-    flow_run_name="promt-extraction-batch-{batch_id}",
+    name="prompt-extraction-batch",
+    flow_run_name="prompt-extraction-batch-{batch_id}",
     log_prints=True,
 )
 def prompt_extraction_batch_flow(

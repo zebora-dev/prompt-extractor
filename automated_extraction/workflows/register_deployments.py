@@ -21,7 +21,7 @@ def get_flows():
     from automated_extraction.workflows.flows import prompt_extraction_batch_flow, prompt_extraction_flow, prompt_output_processing_flow
 
     return {
-        "promt-extraction-batch": {
+        "prompt-extraction-batch": {
             "flow": prompt_extraction_batch_flow,
             "tags": ["chatgpt", "extraction", "browser", "batch"],
             "description": "Sequentially run prompt-extraction in chunks until remaining prompts for a batch are covered.",
