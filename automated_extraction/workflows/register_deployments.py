@@ -39,6 +39,8 @@ def get_flows():
                 "llm_model_filter": "gpt",
                 "auto_login": False,
                 "login_email": None,
+                "capture_products": False,
+                "capture_entities": False,
             },
         },
         "prompt-output-processing": {

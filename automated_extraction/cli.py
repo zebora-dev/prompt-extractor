@@ -77,6 +77,8 @@ def main(argv: list[str] | None = None) -> int:
         llm_model_filter=args.llm_model_filter,
         auto_login=auto_login,
         login_email=login_email,
+        capture_products=args.capture_products,
+        capture_entities=args.capture_entities,
     )
     payload = asdict(result)
     product_output_refs = payload.pop("product_outputs", []) or []
@@ -142,6 +144,18 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=0,
         help="Debug pause after opening the ChatGPT Sources panel. Defaults to 0; set e.g. 180 to inspect/copy DOM.",
+    )
+    parser.add_argument(
+        "--capture-products",
+        action="store_true",
+        default=False,
+        help="Enable product flyout capture after each response. Disabled by default.",
+    )
+    parser.add_argument(
+        "--capture-entities",
+        action="store_true",
+        default=False,
+        help="Enable entity flyout capture after each response. Disabled by default.",
     )
     parser.add_argument("--verbose", action="store_true", help="Enable debug logging.")
     return parser

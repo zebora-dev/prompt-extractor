@@ -47,6 +47,8 @@ def run_extraction_job(
     llm_model_filter: str | None = "gpt",
     auto_login: bool | None = None,
     login_email: str | None = None,
+    capture_products: bool = False,
+    capture_entities: bool = False,
 ) -> ExtractionRunResult:
     if not batch_id and not prompts_file:
         raise ValueError("one of batch_id or prompts_file is required")
@@ -212,14 +214,17 @@ def run_extraction_job(
                     saved or "ok",
                 )
 
-                products = runner.capture_product_flyouts()
-                product_capture_method = "product_flyouts" if products else "none"
+                products = []
+                if capture_products:
+                    products = runner.capture_product_flyouts()
+                product_capture_method = "product_flyouts" if products else ("skipped" if not capture_products else "none")
                 LOGGER.info(
-                    "[%s/%s] Captured %s product flyout(s) for prompt %s using %s",
+                    "[%s/%s] Product capture for prompt %s: enabled=%s count=%s method=%s",
                     index,
                     len(prompts),
-                    len(products),
                     prompt_id,
+                    capture_products,
+                    len(products),
                     product_capture_method,
                 )
                 if products:
@@ -230,14 +235,17 @@ def run_extraction_job(
                         }
                     )
 
-                entities = runner.capture_entity_flyouts()
-                entity_capture_method = "entity_flyouts" if entities else "none"
+                entities = []
+                if capture_entities:
+                    entities = runner.capture_entity_flyouts()
+                entity_capture_method = "entity_flyouts" if entities else ("skipped" if not capture_entities else "none")
                 LOGGER.info(
-                    "[%s/%s] Captured %s entity flyout(s) for prompt %s using %s",
+                    "[%s/%s] Entity capture for prompt %s: enabled=%s count=%s method=%s",
                     index,
                     len(prompts),
-                    len(entities),
                     prompt_id,
+                    capture_entities,
+                    len(entities),
                     entity_capture_method,
                 )
                 if entities:

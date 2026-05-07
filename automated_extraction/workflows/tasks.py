@@ -54,6 +54,8 @@ def extract_chatgpt_batch_task(
     llm_model_filter: str | None = "gpt",
     auto_login: bool | None = None,
     login_email: str | None = None,
+    capture_products: bool = False,
+    capture_entities: bool = False,
 ) -> dict[str, Any]:
     """
     Run the current CLI extraction process as one observable Prefect task.
@@ -63,7 +65,7 @@ def extract_chatgpt_batch_task(
     """
     task_logger = get_run_logger()
     task_logger.info(
-        "Starting ChatGPT extraction task. batch_id=%s prompts_file=%s limit=%s skip=%s dry_run=%s force_rerun=%s llm_model_filter=%s auto_login=%s login_email=%s",
+        "Starting ChatGPT extraction task. batch_id=%s prompts_file=%s limit=%s skip=%s dry_run=%s force_rerun=%s llm_model_filter=%s auto_login=%s login_email=%s capture_products=%s capture_entities=%s",
         batch_id,
         prompts_file,
         limit,
@@ -73,6 +75,8 @@ def extract_chatgpt_batch_task(
         llm_model_filter or "any",
         auto_login,
         login_email or "<env>",
+        capture_products,
+        capture_entities,
     )
     settings = Settings.from_env(
         require_api_key=True,
@@ -93,6 +97,8 @@ def extract_chatgpt_batch_task(
         llm_model_filter=llm_model_filter,
         auto_login=auto_login,
         login_email=login_email,
+        capture_products=capture_products,
+        capture_entities=capture_entities,
     )
     payload = asdict(result)
     task_logger.info("Finished ChatGPT extraction task: %s", summarize_extraction_payload(payload))
