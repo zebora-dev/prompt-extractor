@@ -33,6 +33,7 @@ def get_flows():
                 "batch_id": None,
                 "model_filter": "gpt",
                 "limit": 10,
+                "skip": 0,
                 "auto_login": False,
                 "login_email": None,
                 "capture_products": False,

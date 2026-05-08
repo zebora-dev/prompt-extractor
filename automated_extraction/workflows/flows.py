@@ -28,6 +28,7 @@ def prompt_extraction_batch_flow(
     batch_id: str | None = None,
     model_filter: str | None = "gpt",
     limit: int = 10,
+    skip: int = 0,
     auto_login: bool | None = False,
     login_email: str | None = None,
     capture_products: bool = False,
@@ -67,14 +68,15 @@ def prompt_extraction_batch_flow(
         only_remaining=True,
         llm_model_filter=model_filter,
     )
-    remaining_count = len(remaining_prompts)
+    remaining_count = max(0, len(remaining_prompts) - skip)
     run_count = math.ceil(remaining_count / limit) if remaining_count else 0
     flow_logger.info(
-        "Starting sequential prompt extraction batch. batch_id=%s brand_id=%s model_filter=%s remaining_count=%s limit_per_run=%s planned_runs=%s auto_login=%s capture_products=%s capture_entities=%s delay_seconds=%s",
+        "Starting sequential prompt extraction batch. batch_id=%s brand_id=%s model_filter=%s remaining_count=%s skip=%s limit_per_run=%s planned_runs=%s auto_login=%s capture_products=%s capture_entities=%s delay_seconds=%s",
         batch_id,
         brand_id,
         model_filter or "any",
         remaining_count,
+        skip,
         limit,
         run_count,
         auto_login,
@@ -86,15 +88,17 @@ def prompt_extraction_batch_flow(
     run_results: list[dict[str, Any]] = []
     for run_index in range(1, run_count + 1):
         flow_logger.info(
-            "Starting sequential prompt-extraction run %s/%s. batch_id=%s limit=%s",
+            "Starting sequential prompt-extraction run %s/%s. batch_id=%s limit=%s skip=%s",
             run_index,
             run_count,
             batch_id,
             limit,
+            skip if run_index == 1 else 0,
         )
         result = prompt_extraction_flow(
             batch_id=batch_id,
             limit=limit,
+            skip=skip if run_index == 1 else 0,
             llm_model_filter=model_filter,
             auto_login=auto_login,
             login_email=login_email,
@@ -125,6 +129,7 @@ def prompt_extraction_batch_flow(
         "batch_id": batch_id,
         "brand_id": str(brand_id),
         "model_filter": model_filter,
+        "skip": skip,
         "auto_login": auto_login,
         "capture_products": capture_products,
         "capture_entities": capture_entities,
