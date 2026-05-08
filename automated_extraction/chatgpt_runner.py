@@ -147,13 +147,12 @@ class ChatGPTRunner:
             options.add_argument(f"--user-data-dir={self.chrome_user_data_dir}")
         if self.headless:
             options.add_argument("--headless=new")
-        else:
-            # Match Chrome window to the VNC display size. VNC_SCREEN is e.g. "1280x720x24".
-            vnc_screen = os.getenv("VNC_SCREEN", "1280x720x24")
-            w, h = vnc_screen.split("x")[:2]
-            options.add_argument(f"--window-size={w},{h}")
 
         self.driver = self.create_driver(options)
+        if not self.headless:
+            vnc_screen = os.getenv("VNC_SCREEN", "1280x720x24")
+            w, h = vnc_screen.split("x")[:2]
+            self.driver.set_window_size(int(w), int(h))
         self.driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
         self.driver.get(self.chatgpt_url)
         self.recover_chrome_error_page(context="initial_chatgpt_load")
