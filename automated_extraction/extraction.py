@@ -454,13 +454,10 @@ def build_prompt_output(
             },
             "site_used": "OpenAI",
             "timestamp": now,
-        },
-        "version_info": {
             "app_type": "automated_extraction",
             "app_version": "1.0.0",
-            "extension_version": None,
             "prompt_source": "batch" if batch_id else "local",
-            "worker_name": os.getenv("FLY_APP_NAME"),
+            "worker_name": os.getenv("FLY_MACHINE_ID") or os.getenv("FLY_APP_NAME"),
         },
     }
 
