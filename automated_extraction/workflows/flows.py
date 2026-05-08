@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import os
 import time
 from typing import Any
 
@@ -39,6 +40,7 @@ def prompt_extraction_batch_flow(
     each run. Sources are always captured; products and entities are opt-in.
     """
     flow_logger = get_run_logger()
+    flow_logger.info("WORKER machine_id=%s", os.getenv("FLY_MACHINE_ID", "local"))
     if not batch_id:
         raise ValueError("batch_id is required")
     if limit <= 0:
@@ -169,6 +171,7 @@ def prompt_extraction_flow(
     single task so one Chrome session can process many prompts.
     """
     flow_logger = get_run_logger()
+    flow_logger.info("WORKER machine_id=%s", os.getenv("FLY_MACHINE_ID", "local"))
     if not batch_id and not prompts_file:
         raise ValueError("one of batch_id or prompts_file is required")
 
@@ -262,6 +265,7 @@ def prompt_output_processing_flow(
     Re-process existing saved prompt outputs without running ChatGPT extraction.
     """
     flow_logger = get_run_logger()
+    flow_logger.info("WORKER machine_id=%s", os.getenv("FLY_MACHINE_ID", "local"))
     if not output_id and not batch_id and not prompt_id:
         raise ValueError("one of output_id, batch_id, or prompt_id is required")
 
