@@ -201,6 +201,29 @@ def run_extraction_job(
                     len(capture.sources or []),
                     capture.source_capture_method,
                 )
+                # Re-check immediately before saving — another worker may have saved
+                # this prompt while Chrome was running it.
+                concurrent_output = (
+                    None
+                    if force_rerun
+                    else api.find_existing_prompt_output(
+                        prompt_id,
+                        prompt_brand_id,
+                        resolved_batch_id,
+                        llm_model_filter=llm_model_filter,
+                    )
+                )
+                if concurrent_output:
+                    skipped_count += 1
+                    LOGGER.warning(
+                        "[%s/%s] Concurrent worker already saved prompt %s — discarding our result. output_id=%s",
+                        index,
+                        len(prompts),
+                        prompt_id,
+                        concurrent_output.get("output_id") or concurrent_output.get("id"),
+                    )
+                    continue
+
                 saved = api.save_prompt_output(output)
                 saved_count += 1
                 saved_output = normalize_saved_output(saved, output)

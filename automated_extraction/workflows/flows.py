@@ -87,18 +87,19 @@ def prompt_extraction_batch_flow(
 
     run_results: list[dict[str, Any]] = []
     for run_index in range(1, run_count + 1):
+        run_skip = skip + (run_index - 1) * limit
         flow_logger.info(
             "Starting sequential prompt-extraction run %s/%s. batch_id=%s limit=%s skip=%s",
             run_index,
             run_count,
             batch_id,
             limit,
-            skip if run_index == 1 else 0,
+            run_skip,
         )
         result = prompt_extraction_flow(
             batch_id=batch_id,
             limit=limit,
-            skip=skip if run_index == 1 else 0,
+            skip=run_skip,
             llm_model_filter=model_filter,
             auto_login=auto_login,
             login_email=login_email,
