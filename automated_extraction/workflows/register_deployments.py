@@ -9,7 +9,6 @@ from pathlib import Path
 
 from prefect.types.entrypoint import EntrypointType
 
-
 logging.basicConfig(level=logging.INFO)
 LOGGER = logging.getLogger(__name__)
 
@@ -22,7 +21,11 @@ WORK_DIR = os.getenv("PREFECT_WORKING_DIR") or str(PROJECT_ROOT)
 
 
 def get_flows():
-    from automated_extraction.workflows.flows import prompt_extraction_batch_flow, prompt_extraction_flow, prompt_output_processing_flow
+    from automated_extraction.workflows.flows import (
+        prompt_extraction_batch_flow,
+        prompt_extraction_flow,
+        prompt_output_processing_flow,
+    )
 
     return {
         "prompt-extraction-batch": {

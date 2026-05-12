@@ -2,13 +2,12 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from .api_client import ApiClient
 from .config import Settings
 from .prompt_output_processor import html_to_markdown
-
 
 LOGGER = logging.getLogger(__name__)
 
@@ -72,7 +71,11 @@ def process_product_outputs(
                 continue
 
             try:
-                rows.append(build_product_row(product, output_id=output_id, prompt_id=prompt_id, brand_id=brand_id, batch_id=batch_id))
+                rows.append(
+                    build_product_row(
+                        product, output_id=output_id, prompt_id=prompt_id, brand_id=brand_id, batch_id=batch_id
+                    )
+                )
             except Exception as exc:
                 failed_count += 1
                 failure = {
@@ -107,7 +110,9 @@ def process_product_outputs(
             failed_count += len(rows)
             failure = {"output_id": output_id, "prompt_id": prompt_id, "error": str(exc)}
             failures.append(failure)
-            LOGGER.exception("Failed to save product output rows. output_id=%s prompt_id=%s: %s", output_id, prompt_id, exc)
+            LOGGER.exception(
+                "Failed to save product output rows. output_id=%s prompt_id=%s: %s", output_id, prompt_id, exc
+            )
 
     status = "completed" if failed_count == 0 else "completed_with_failures"
     return ProductOutputProcessResult(
@@ -150,5 +155,5 @@ def build_product_row(
         "text_length": int(text_length or 0),
         "button_index": int(product.get("button_index") or product.get("index") or 0),
         "capture_method": str(product.get("capture_method") or "unknown"),
-        "created_at": datetime.now(timezone.utc).isoformat(),
+        "created_at": datetime.now(UTC).isoformat(),
     }

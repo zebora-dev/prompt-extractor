@@ -8,7 +8,6 @@ from urllib.parse import urlsplit, urlunsplit
 
 from .chatgpt_auth import AccountsDeserializer
 
-
 DEFAULT_API_BASE_URL = "https://hmwgplzdzffivawkflci.supabase.co/functions/v1/api"
 DEFAULT_PROMPT_OUTPUTS_TABLE = "prompts_outputs"
 DEFAULT_PROMPT_OUTPUT_PRODUCTS_TABLE = "prompts_outputs_products"
@@ -43,7 +42,7 @@ class Settings:
     accounts: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     @classmethod
-    def from_env(cls, *, require_api_key: bool = True, require_auto_login_credentials: bool | None = None) -> "Settings":
+    def from_env(cls, *, require_api_key: bool = True, require_auto_login_credentials: bool | None = None) -> Settings:
         load_dotenv_if_available()
 
         anon_key = os.getenv("BRANDSIGHT_SUPABASE_ANON_KEY", "").strip()
@@ -64,13 +63,9 @@ class Settings:
             require_auto_login_credentials = require_api_key
         if auto_login and require_auto_login_credentials:
             if not login_email:
-                raise RuntimeError(
-                    "CHATGPT_AUTO_LOGIN=true but CHATGPT_LOGIN_EMAIL is not set."
-                )
+                raise RuntimeError("CHATGPT_AUTO_LOGIN=true but CHATGPT_LOGIN_EMAIL is not set.")
             if not accounts:
-                raise RuntimeError(
-                    "CHATGPT_AUTO_LOGIN=true but CHATGPT_ACCOUNTS_B64 is empty or not set."
-                )
+                raise RuntimeError("CHATGPT_AUTO_LOGIN=true but CHATGPT_ACCOUNTS_B64 is empty or not set.")
             if login_email not in accounts:
                 raise RuntimeError(
                     f"CHATGPT_LOGIN_EMAIL={login_email!r} is not present in CHATGPT_ACCOUNTS_B64. "
@@ -96,8 +91,7 @@ class Settings:
             or DEFAULT_PROMPT_OUTPUT_ENTITIES_TABLE,
             chatgpt_url=os.getenv("CHATGPT_URL", "https://chatgpt.com").strip(),
             chrome_user_data_dir=os.getenv("CHATGPT_CHROME_USER_DATA_DIR") or str(DEFAULT_CHROME_USER_DATA_DIR),
-            logged_in_accounts_dir=os.getenv("CHATGPT_LOGGED_IN_ACCOUNTS_DIR")
-            or str(DEFAULT_LOGGED_IN_ACCOUNTS_DIR),
+            logged_in_accounts_dir=os.getenv("CHATGPT_LOGGED_IN_ACCOUNTS_DIR") or str(DEFAULT_LOGGED_IN_ACCOUNTS_DIR),
             headless=parse_bool(os.getenv("CHATGPT_HEADLESS"), default=False),
             login_wait_seconds=parse_int(os.getenv("CHATGPT_LOGIN_WAIT_SECONDS"), default=180),
             response_timeout_seconds=parse_int(os.getenv("CHATGPT_RESPONSE_TIMEOUT_SECONDS"), default=300),

@@ -27,7 +27,6 @@ import logging
 import os
 from typing import Any
 
-
 LOGGER = logging.getLogger(__name__)
 
 ENV_VAR = "CHATGPT_ACCOUNTS_B64"
@@ -49,14 +48,10 @@ class AccountsDeserializer:
             decoded_string = decoded_bytes.decode("utf-8")
             payload = json.loads(decoded_string)
         except (binascii.Error, UnicodeDecodeError, json.JSONDecodeError) as error:
-            raise ValueError(
-                f"Invalid {ENV_VAR}. Expected base64-encoded JSON: {error}"
-            ) from error
+            raise ValueError(f"Invalid {ENV_VAR}. Expected base64-encoded JSON: {error}") from error
 
         if not isinstance(payload, dict):
-            raise ValueError(
-                f"Invalid {ENV_VAR}. Top-level JSON must be an object keyed by email."
-            )
+            raise ValueError(f"Invalid {ENV_VAR}. Top-level JSON must be an object keyed by email.")
 
         accounts: dict[str, dict[str, Any]] = {}
         for email, account in payload.items():

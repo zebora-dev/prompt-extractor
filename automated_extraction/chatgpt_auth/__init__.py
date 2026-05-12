@@ -19,7 +19,6 @@ from .login_method import LoginMethod
 from .otp import OTPAuth, Providers, generate_otp
 from .runner import AutomatedLoginError, perform_automated_login
 
-
 __all__ = [
     "AccountsDeserializer",
     "AutomatedLoginError",

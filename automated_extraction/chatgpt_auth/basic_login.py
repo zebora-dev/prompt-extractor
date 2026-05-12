@@ -14,7 +14,6 @@ from typing import Any
 from .login_method import LoginMethod
 from .otp import Providers, generate_otp
 
-
 LOGGER = logging.getLogger(__name__)
 
 EMAIL_INPUT_SELECTOR = "input[id='email-input'], input[name='email'], input[type='email']"

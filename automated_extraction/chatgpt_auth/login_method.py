@@ -32,7 +32,6 @@ from selenium.webdriver.support.ui import WebDriverWait
 
 from .otp import OTPAuth, Providers
 
-
 LOGGER = logging.getLogger(__name__)
 
 LOGIN_BUTTON_SELECTOR = "button[data-testid='login-button']"
@@ -167,7 +166,9 @@ class ElementInteractor:
         text: str | None = None,
         timeout: int | None = None,
     ) -> bool:
-        element = self.wait_for_clickable(by, selector, timeout=timeout) or self.wait_for_element(by, selector, timeout=timeout)
+        element = self.wait_for_clickable(by, selector, timeout=timeout) or self.wait_for_element(
+            by, selector, timeout=timeout
+        )
         if not element:
             LOGGER.error("Element not found: by=%s selector=%s", by, selector)
             return False
@@ -197,7 +198,7 @@ class LoginMethod(ABC):
         raise NotImplementedError
 
     @staticmethod
-    def derive_login_provider(account: dict[str, Any]) -> type["LoginMethod"]:
+    def derive_login_provider(account: dict[str, Any]) -> type[LoginMethod]:
         # Late imports avoid the circular import via `chatgpt_auth.__init__`.
         from .basic_login import BasicLogin
         from .google_login import GoogleLogin
@@ -281,5 +282,7 @@ class LoginMethod(ABC):
     def enter_password(self, password: str, input_selector: str, button_selector: str, use_xpath: bool = False) -> bool:
         return self._enter_and_click(password, input_selector, button_selector, use_xpath)
 
-    def enter_2fa_token(self, token: str, code_input_selector: str, button_selector: str, use_xpath: bool = False) -> bool:
+    def enter_2fa_token(
+        self, token: str, code_input_selector: str, button_selector: str, use_xpath: bool = False
+    ) -> bool:
         return self._enter_and_click(token, code_input_selector, button_selector, use_xpath)

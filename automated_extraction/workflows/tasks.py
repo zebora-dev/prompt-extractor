@@ -15,7 +15,6 @@ from automated_extraction.product_output_processor import process_product_output
 from automated_extraction.prompt_output_processor import process_prompt_outputs
 from automated_extraction.workflow_trigger import trigger_score_workflows
 
-
 LOGGER = logging.getLogger(__name__)
 
 

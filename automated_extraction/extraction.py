@@ -4,14 +4,13 @@ import json
 import logging
 import os
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from .api_client import ApiClient
 from .chatgpt_runner import ChatGPTRunner
 from .config import Settings
-
 
 LOGGER = logging.getLogger(__name__)
 
@@ -241,7 +240,9 @@ def run_extraction_job(
                 products = []
                 if capture_products:
                     products = runner.capture_product_flyouts()
-                product_capture_method = "product_flyouts" if products else ("skipped" if not capture_products else "none")
+                product_capture_method = (
+                    "product_flyouts" if products else ("skipped" if not capture_products else "none")
+                )
                 LOGGER.info(
                     "[%s/%s] Product capture for prompt %s: enabled=%s count=%s method=%s",
                     index,
@@ -262,7 +263,9 @@ def run_extraction_job(
                 entities = []
                 if capture_entities:
                     entities = runner.capture_entity_flyouts()
-                entity_capture_method = "entity_flyouts" if entities else ("skipped" if not capture_entities else "none")
+                entity_capture_method = (
+                    "entity_flyouts" if entities else ("skipped" if not capture_entities else "none")
+                )
                 LOGGER.info(
                     "[%s/%s] Entity capture for prompt %s: enabled=%s count=%s method=%s",
                     index,
@@ -426,7 +429,7 @@ def build_prompt_output(
     entities: list[dict[str, Any]] | None = None,
     entity_capture_method: str = "none",
 ) -> dict[str, Any]:
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     return {
         "prompt_id": prompt.get("id"),
         "brand_id": prompt.get("brand_id"),
@@ -444,7 +447,9 @@ def build_prompt_output(
         },
         "output_metadata": {
             "brand_name": (prompt.get("brand") or {}).get("name") if isinstance(prompt.get("brand"), dict) else None,
-            "brand_description": (prompt.get("brand") or {}).get("description") if isinstance(prompt.get("brand"), dict) else None,
+            "brand_description": (prompt.get("brand") or {}).get("description")
+            if isinstance(prompt.get("brand"), dict)
+            else None,
             "llm_model": llm_model or "chatgpt",
             "approved": prompt.get("approved"),
             "active": prompt.get("active"),

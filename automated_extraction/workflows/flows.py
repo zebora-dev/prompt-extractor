@@ -291,13 +291,19 @@ def prompt_extraction_flow(
     if not dry_run and capture_products and product_output_refs:
         product_processing_result = product_output_process_task(product_output_refs=product_output_refs)
     else:
-        flow_logger.info("Skipping product output processing. capture_products=%s refs=%s", capture_products, len(product_output_refs))
+        flow_logger.info(
+            "Skipping product output processing. capture_products=%s refs=%s",
+            capture_products,
+            len(product_output_refs),
+        )
 
     entity_processing_result: dict[str, Any] | None = None
     if not dry_run and capture_entities and entity_output_refs:
         entity_processing_result = entity_output_process_task(entity_output_refs=entity_output_refs)
     else:
-        flow_logger.info("Skipping entity output processing. capture_entities=%s refs=%s", capture_entities, len(entity_output_refs))
+        flow_logger.info(
+            "Skipping entity output processing. capture_entities=%s refs=%s", capture_entities, len(entity_output_refs)
+        )
 
     processing_result: dict[str, Any] | None = None
     if not dry_run and result.get("saved_count", 0) > 0:
@@ -312,7 +318,9 @@ def prompt_extraction_flow(
 
     score_workflow_result: dict[str, Any] | None = None
     if not dry_run and result.get("saved_outputs"):
-        score_workflow_result = score_workflow_trigger_task(saved_outputs=result.get("saved_outputs") or [], force=False)
+        score_workflow_result = score_workflow_trigger_task(
+            saved_outputs=result.get("saved_outputs") or [], force=False
+        )
     else:
         flow_logger.info("Skipping score workflow trigger because no outputs were saved.")
 

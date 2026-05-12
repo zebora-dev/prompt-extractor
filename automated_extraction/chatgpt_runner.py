@@ -13,17 +13,23 @@ from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import pyperclip
-from selenium.common.exceptions import ElementClickInterceptedException, JavascriptException, NoSuchElementException, SessionNotCreatedException, StaleElementReferenceException, TimeoutException, WebDriverException
 from selenium import webdriver
-from selenium.webdriver import Chrome
-from selenium.webdriver import ActionChains
+from selenium.common.exceptions import (
+    ElementClickInterceptedException,
+    JavascriptException,
+    NoSuchElementException,
+    SessionNotCreatedException,
+    StaleElementReferenceException,
+    TimeoutException,
+    WebDriverException,
+)
+from selenium.webdriver import ActionChains, Chrome
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.remote.webelement import WebElement
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
-
 
 LOGGER = logging.getLogger(__name__)
 
@@ -121,7 +127,7 @@ class ChatGPTRunner:
         self.login_email = login_email
         self.driver: Chrome | None = None
 
-    def __enter__(self) -> "ChatGPTRunner":
+    def __enter__(self) -> ChatGPTRunner:
         self.start()
         return self
 
@@ -254,11 +260,23 @@ class ChatGPTRunner:
         if not response or len(response.strip()) < 20:
             raise RuntimeError("Captured response was empty or too short")
         if markdown:
-            LOGGER.info("Markdown copied from ChatGPT response. length=%s method=%s", len(markdown.strip()), markdown_capture_method)
+            LOGGER.info(
+                "Markdown copied from ChatGPT response. length=%s method=%s",
+                len(markdown.strip()),
+                markdown_capture_method,
+            )
         else:
-            LOGGER.warning("Markdown copy did not produce a valid clipboard result; markdown field will be empty. response_length=%s method=%s", len(response.strip()), markdown_capture_method)
+            LOGGER.warning(
+                "Markdown copy did not produce a valid clipboard result; markdown field will be empty. response_length=%s method=%s",
+                len(response.strip()),
+                markdown_capture_method,
+            )
         raw_html, raw_html_capture_method = self.capture_latest_response_html()
-        LOGGER.info("Raw HTML extracted from ChatGPT response. length=%s method=%s", len(raw_html or ""), raw_html_capture_method)
+        LOGGER.info(
+            "Raw HTML extracted from ChatGPT response. length=%s method=%s",
+            len(raw_html or ""),
+            raw_html_capture_method,
+        )
         llm_model = self.capture_latest_response_model_slug() or "chatgpt"
         LOGGER.info("Detected ChatGPT response model. llm_model=%s", llm_model)
         sources = self.capture_latest_sources()
@@ -492,15 +510,19 @@ class ChatGPTRunner:
                     return
 
         for button in driver.find_elements(By.CSS_SELECTOR, "button"):
-            label = " ".join(
-                value.strip()
-                for value in [
-                    button.text or "",
-                    button.get_attribute("aria-label") or "",
-                    button.get_attribute("title") or "",
-                ]
-                if value and value.strip()
-            ).strip().lower()
+            label = (
+                " ".join(
+                    value.strip()
+                    for value in [
+                        button.text or "",
+                        button.get_attribute("aria-label") or "",
+                        button.get_attribute("title") or "",
+                    ]
+                    if value and value.strip()
+                )
+                .strip()
+                .lower()
+            )
             if label in DISMISS_BUTTON_TEXT and self.click_if_visible(button):
                 time.sleep(0.5)
                 return
@@ -554,7 +576,10 @@ class ChatGPTRunner:
                 return
             raise TimeoutError(f"ChatGPT stop button did not disappear. {self.collect_page_signals()}")
 
-        LOGGER.warning("ChatGPT stop button did not appear after submit. Falling back to response stability wait. %s", self.collect_page_signals())
+        LOGGER.warning(
+            "ChatGPT stop button did not appear after submit. Falling back to response stability wait. %s",
+            self.collect_page_signals(),
+        )
 
         deadline = time.time() + self.response_timeout_seconds
         last_text = ""
@@ -756,7 +781,9 @@ class ChatGPTRunner:
         self.reveal_response_actions(latest_response)
         sources_button = self.find_sources_button(parent)
         if not sources_button:
-            LOGGER.info("No Sources button found for latest ChatGPT response. %s", self.sources_button_diagnostics(parent))
+            LOGGER.info(
+                "No Sources button found for latest ChatGPT response. %s", self.sources_button_diagnostics(parent)
+            )
             return []
 
         LOGGER.info("Sources button found; opening Sources panel.")
@@ -767,7 +794,9 @@ class ChatGPTRunner:
             return []
         LOGGER.info("Sources panel opened. %s", self.sources_panel_diagnostics())
         if not self.wait_for_sources_panel_links(timeout=30):
-            LOGGER.warning("Sources panel opened but no source links were detected. %s", self.sources_panel_diagnostics())
+            LOGGER.warning(
+                "Sources panel opened but no source links were detected. %s", self.sources_panel_diagnostics()
+            )
             self.close_sources_panel()
             return []
         LOGGER.info("Sources panel links loaded. %s", self.sources_panel_diagnostics())
@@ -776,7 +805,9 @@ class ChatGPTRunner:
             self.scroll_sources_panel_to_end()
             sources = self.extract_sources_from_panel()
             if not sources:
-                LOGGER.warning("Sources panel was found, but extraction returned 0 sources. %s", self.sources_panel_diagnostics())
+                LOGGER.warning(
+                    "Sources panel was found, but extraction returned 0 sources. %s", self.sources_panel_diagnostics()
+                )
             else:
                 LOGGER.info("Sources copied from panel. count=%s", len(sources))
             return sources
@@ -786,15 +817,19 @@ class ChatGPTRunner:
     def find_sources_button(self, container: WebElement) -> WebElement | None:
         buttons = container.find_elements(By.CSS_SELECTOR, "button")
         for button in reversed(buttons):
-            label = " ".join(
-                value.strip()
-                for value in [
-                    button.get_attribute("aria-label") or "",
-                    button.text or "",
-                    button.get_attribute("title") or "",
-                ]
-                if value and value.strip()
-            ).strip().lower()
+            label = (
+                " ".join(
+                    value.strip()
+                    for value in [
+                        button.get_attribute("aria-label") or "",
+                        button.text or "",
+                        button.get_attribute("title") or "",
+                    ]
+                    if value and value.strip()
+                )
+                .strip()
+                .lower()
+            )
             if label == "sources" or label.endswith(" sources") or "sources" in label:
                 if button.is_displayed() and button.is_enabled():
                     return button
@@ -845,7 +880,12 @@ class ChatGPTRunner:
             )
             elapsed = int(timeout - max(0, deadline - time.time()))
             if count != last_count or elapsed >= last_logged_second + 5:
-                LOGGER.info("Waiting for Sources panel links. visible_link_count=%s stable_checks=%s elapsed=%ss", count, stable_checks, elapsed)
+                LOGGER.info(
+                    "Waiting for Sources panel links. visible_link_count=%s stable_checks=%s elapsed=%ss",
+                    count,
+                    stable_checks,
+                    elapsed,
+                )
                 last_logged_second = elapsed
             if count > 0 and count == last_count:
                 stable_checks += 1
@@ -959,16 +999,18 @@ class ChatGPTRunner:
 
     def close_sources_panel(self) -> None:
         driver = self.require_driver()
-        close_button = self.find_first([
-            "[data-testid='screen-threadFlyOut'][aria-label='Sources'] button[aria-label='Close']",
-            "[data-testid='stage-thread-flyout'] section[aria-label='Sources'] button[aria-label='Close']",
-            "section[aria-label='Sources'] button[aria-label='Close']",
-            "[data-testid='bar-search-sources-header'] button[aria-label='Close']",
-            "#modal-search-results button[data-testid='close-button']",
-            "[data-testid='modal-search-results'] button[aria-label='Close']",
-            "[role='dialog'] button[data-testid='close-button']",
-            "[role='dialog'] button[aria-label='Close']",
-        ])
+        close_button = self.find_first(
+            [
+                "[data-testid='screen-threadFlyOut'][aria-label='Sources'] button[aria-label='Close']",
+                "[data-testid='stage-thread-flyout'] section[aria-label='Sources'] button[aria-label='Close']",
+                "section[aria-label='Sources'] button[aria-label='Close']",
+                "[data-testid='bar-search-sources-header'] button[aria-label='Close']",
+                "#modal-search-results button[data-testid='close-button']",
+                "[data-testid='modal-search-results'] button[aria-label='Close']",
+                "[role='dialog'] button[data-testid='close-button']",
+                "[role='dialog'] button[aria-label='Close']",
+            ]
+        )
         if close_button:
             self.click_if_visible(close_button)
             time.sleep(0.5)
@@ -1133,7 +1175,11 @@ class ChatGPTRunner:
             LOGGER.info("No product select buttons found for latest ChatGPT response.")
             return []
 
-        LOGGER.info("Found %s product select button(s); opening product flyouts. %s", button_count, self.product_button_diagnostics(scope))
+        LOGGER.info(
+            "Found %s product select button(s); opening product flyouts. %s",
+            button_count,
+            self.product_button_diagnostics(scope),
+        )
         products: list[dict[str, Any]] = []
         for index in range(button_count):
             self.close_product_flyout()
@@ -1564,7 +1610,11 @@ class ChatGPTRunner:
             LOGGER.info("No entity underline elements found for latest ChatGPT response.")
             return []
 
-        LOGGER.info("Found %s entity element(s); opening entity flyouts. %s", entity_count, self.entity_button_diagnostics(scope))
+        LOGGER.info(
+            "Found %s entity element(s); opening entity flyouts. %s",
+            entity_count,
+            self.entity_button_diagnostics(scope),
+        )
         entities: list[dict[str, Any]] = []
         for index in range(entity_count):
             self.close_entity_flyout()
@@ -2008,7 +2058,11 @@ def normalize_words(value: str) -> list[str]:
 
 def clean_chatgpt_source_url(url: str) -> str:
     parts = urlsplit(url)
-    query = [(key, value) for key, value in parse_qsl(parts.query, keep_blank_values=True) if not (key == "utm_source" and value == "chatgpt.com")]
+    query = [
+        (key, value)
+        for key, value in parse_qsl(parts.query, keep_blank_values=True)
+        if not (key == "utm_source" and value == "chatgpt.com")
+    ]
     return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment))
 
 
@@ -2035,7 +2089,9 @@ def extract_sources_from_markdown(markdown: str) -> list[dict[str, Any]]:
             )
         )
 
-    inline_pattern = re.compile(r"""(?<!!)\[(?P<label>[^\]]+)\]\((?P<url>https?://[^)\s]+)(?:\s+(?P<title>"[^"]*"|'[^']*'))?\)""")
+    inline_pattern = re.compile(
+        r"""(?<!!)\[(?P<label>[^\]]+)\]\((?P<url>https?://[^)\s]+)(?:\s+(?P<title>"[^"]*"|'[^']*'))?\)"""
+    )
     for match in inline_pattern.finditer(markdown or ""):
         raw_url = match.group("url").strip()
         if not is_external_url(raw_url) or raw_url in seen_urls:
