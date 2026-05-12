@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import platform
 import random
 import re
@@ -12,17 +13,23 @@ from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import pyperclip
-from selenium.common.exceptions import ElementClickInterceptedException, JavascriptException, NoSuchElementException, SessionNotCreatedException, TimeoutException, WebDriverException
 from selenium import webdriver
-from selenium.webdriver import Chrome
-from selenium.webdriver import ActionChains
+from selenium.common.exceptions import (
+    ElementClickInterceptedException,
+    JavascriptException,
+    NoSuchElementException,
+    SessionNotCreatedException,
+    StaleElementReferenceException,
+    TimeoutException,
+    WebDriverException,
+)
+from selenium.webdriver import ActionChains, Chrome
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.remote.webelement import WebElement
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
-
 
 LOGGER = logging.getLogger(__name__)
 
@@ -80,7 +87,9 @@ DISMISS_BUTTON_TEXT = {
 @dataclass
 class ChatGPTCapture:
     response: str
+    markdown: str
     capture_method: str
+    markdown_capture_method: str
     raw_html: str
     raw_html_capture_method: str
     llm_model: str
@@ -103,6 +112,9 @@ class ChatGPTRunner:
         login_wait_seconds: int = 180,
         response_timeout_seconds: int = 300,
         sources_panel_pause_seconds: int = 0,
+        auto_login: bool = False,
+        accounts: dict[str, dict[str, Any]] | None = None,
+        login_email: str | None = None,
     ) -> None:
         self.chatgpt_url = chatgpt_url
         self.headless = headless
@@ -110,9 +122,12 @@ class ChatGPTRunner:
         self.login_wait_seconds = login_wait_seconds
         self.response_timeout_seconds = response_timeout_seconds
         self.sources_panel_pause_seconds = max(0, sources_panel_pause_seconds)
+        self.auto_login = auto_login
+        self.accounts = accounts or {}
+        self.login_email = login_email
         self.driver: Chrome | None = None
 
-    def __enter__(self) -> "ChatGPTRunner":
+    def __enter__(self) -> ChatGPTRunner:
         self.start()
         return self
 
@@ -140,9 +155,36 @@ class ChatGPTRunner:
             options.add_argument("--headless=new")
 
         self.driver = self.create_driver(options)
+        if not self.headless:
+            vnc_screen = os.getenv("VNC_SCREEN", "1280x720x24")
+            w, h = vnc_screen.split("x")[:2]
+            self.driver.set_window_size(int(w), int(h))
         self.driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
         self.driver.get(self.chatgpt_url)
+        self.recover_chrome_error_page(context="initial_chatgpt_load")
+        if self.auto_login:
+            self.run_automated_login()
         self.wait_for_login()
+
+    def run_automated_login(self) -> None:
+        from .chatgpt_auth import AutomatedLoginError, perform_automated_login
+
+        if not self.login_email:
+            raise RuntimeError("auto_login=True but no login_email was provided to ChatGPTRunner.")
+        if not self.accounts:
+            raise RuntimeError(
+                "auto_login=True but no accounts were provided to ChatGPTRunner. "
+                "Set CHATGPT_ACCOUNTS_B64 or pass accounts= when constructing the runner."
+            )
+        try:
+            perform_automated_login(
+                self.require_driver(),
+                accounts=self.accounts,
+                email=self.login_email,
+                login_wait_seconds=self.login_wait_seconds,
+            )
+        except AutomatedLoginError as error:
+            raise RuntimeError(f"Automated ChatGPT login failed: {error}") from error
 
     def create_driver(self, options: Options) -> Chrome:
         try:
@@ -211,15 +253,30 @@ class ChatGPTRunner:
         initial_response_count = len(self.response_elements())
         self.click_send(input_element)
         self.wait_for_response_completion(initial_response_count)
-        response = self.capture_latest_response()
+        response, markdown, markdown_capture_method = self.capture_latest_response()
         if not response or response.strip() == prompt_text.strip():
             time.sleep(2)
-            response = self.capture_latest_response()
+            response, markdown, markdown_capture_method = self.capture_latest_response()
         if not response or len(response.strip()) < 20:
             raise RuntimeError("Captured response was empty or too short")
-        LOGGER.info("Markdown copied from ChatGPT response. length=%s method=%s", len(response.strip()), "copy_button_markdown")
+        if markdown:
+            LOGGER.info(
+                "Markdown copied from ChatGPT response. length=%s method=%s",
+                len(markdown.strip()),
+                markdown_capture_method,
+            )
+        else:
+            LOGGER.warning(
+                "Markdown copy did not produce a valid clipboard result; markdown field will be empty. response_length=%s method=%s",
+                len(response.strip()),
+                markdown_capture_method,
+            )
         raw_html, raw_html_capture_method = self.capture_latest_response_html()
-        LOGGER.info("Raw HTML extracted from ChatGPT response. length=%s method=%s", len(raw_html or ""), raw_html_capture_method)
+        LOGGER.info(
+            "Raw HTML extracted from ChatGPT response. length=%s method=%s",
+            len(raw_html or ""),
+            raw_html_capture_method,
+        )
         llm_model = self.capture_latest_response_model_slug() or "chatgpt"
         LOGGER.info("Detected ChatGPT response model. llm_model=%s", llm_model)
         sources = self.capture_latest_sources()
@@ -229,36 +286,104 @@ class ChatGPTRunner:
             sources = extract_sources_from_markdown(response)
             source_capture_method = "markdown_references" if sources else "none"
         LOGGER.info("Captured %s source(s) using %s", len(sources), source_capture_method)
-        products = self.capture_product_flyouts()
-        product_capture_method = "product_flyouts" if products else "none"
-        LOGGER.info("Captured %s product flyout(s) using %s", len(products), product_capture_method)
-        entities = self.capture_entity_flyouts()
-        entity_capture_method = "entity_flyouts" if entities else "none"
-        LOGGER.info("Captured %s entity flyout(s) using %s", len(entities), entity_capture_method)
         return ChatGPTCapture(
             response=response.strip(),
-            capture_method="copy_button_markdown",
+            markdown=markdown.strip(),
+            capture_method="visible_text_fallback" if not markdown else "copy_button_markdown",
+            markdown_capture_method=markdown_capture_method,
             raw_html=raw_html,
             raw_html_capture_method=raw_html_capture_method,
             llm_model=llm_model,
             url=driver.current_url,
             sources=sources,
             source_capture_method=source_capture_method,
-            products=products,
-            product_capture_method=product_capture_method,
-            entities=entities,
-            entity_capture_method=entity_capture_method,
+            products=[],
+            product_capture_method="deferred",
+            entities=[],
+            entity_capture_method="deferred",
         )
 
     def wait_for_login(self) -> None:
         deadline = time.time() + self.login_wait_seconds
         while time.time() < deadline:
+            self.recover_chrome_error_page(context="wait_for_login")
             if self.find_first(CHAT_INPUT_SELECTORS):
                 return
             time.sleep(1)
         raise TimeoutError(
             "Timed out waiting for ChatGPT prompt input. Log in in the opened browser or set CHATGPT_CHROME_USER_DATA_DIR to a logged-in profile."
         )
+
+    def recover_chrome_error_page(self, *, context: str, max_attempts: int = 2) -> bool:
+        """
+        Chrome can occasionally render its own HTTP error interstitial for chatgpt.com.
+        If the visible page has Chrome's Reload button, click it and let the normal
+        ChatGPT waits continue.
+        """
+        driver = self.require_driver()
+        recovered = False
+        for attempt in range(1, max_attempts + 1):
+            state = self.chrome_error_page_state()
+            if not state.get("is_error"):
+                return recovered
+
+            LOGGER.warning(
+                "Detected Chrome error page during %s. attempt=%s/%s error_code=%s heading=%r current_url=%s",
+                context,
+                attempt,
+                max_attempts,
+                state.get("error_code") or "<unknown>",
+                state.get("heading") or "",
+                driver.current_url,
+            )
+
+            reload_button = self.find_first(["#reload-button", "button[data-url]", "button"])
+            if reload_button and self.click_if_visible(reload_button):
+                LOGGER.info("Clicked Chrome error page reload button during %s.", context)
+            else:
+                reload_url = str(state.get("reload_url") or "").strip()
+                if reload_url:
+                    LOGGER.info("Navigating to Chrome error page reload URL during %s: %s", context, reload_url)
+                    driver.get(reload_url)
+                else:
+                    LOGGER.info("Refreshing Chrome error page during %s.", context)
+                    driver.refresh()
+
+            recovered = True
+            time.sleep(3)
+
+        return recovered
+
+    def chrome_error_page_state(self) -> dict[str, Any]:
+        try:
+            result = self.require_driver().execute_script(
+                """
+                const body = document.body;
+                const mainFrameError = document.querySelector('#main-frame-error');
+                const errorCode = (document.querySelector('.error-code')?.innerText || '').trim();
+                const heading = (document.querySelector('#main-message h1, h1')?.innerText || '').trim();
+                const reloadButton = document.querySelector('#reload-button, button[data-url]');
+                const bodyClass = body?.className || '';
+                const isChromeNetError = Boolean(
+                  mainFrameError ||
+                  bodyClass.includes('neterror') ||
+                  window.loadTimeDataRaw?.errorCode ||
+                  /^HTTP ERROR \\d+/i.test(errorCode)
+                );
+                const isChatgptError = /chatgpt\\.com/i.test(document.title || location.href || '');
+                return {
+                  is_error: Boolean(isChromeNetError && isChatgptError),
+                  error_code: errorCode || window.loadTimeDataRaw?.errorCode || '',
+                  heading,
+                  reload_url: reloadButton?.dataset?.url || window.loadTimeDataRaw?.reloadButton?.reloadUrl || '',
+                  has_reload_button: Boolean(reloadButton),
+                  body_class: bodyClass
+                };
+                """
+            )
+            return result if isinstance(result, dict) else {"is_error": False}
+        except WebDriverException:
+            return {"is_error": False}
 
     def create_fresh_chat(self) -> None:
         driver = self.require_driver()
@@ -272,6 +397,7 @@ class ChatGPTRunner:
                 except WebDriverException:
                     LOGGER.debug("Could not click new chat selector: %s", selector)
         driver.get(self.chatgpt_url)
+        self.recover_chrome_error_page(context="create_fresh_chat")
         time.sleep(random.uniform(2.0, 4.0))
 
     def wait_for_input(self) -> WebElement:
@@ -289,14 +415,53 @@ class ChatGPTRunner:
         select_modifier = Keys.COMMAND if platform.system() == "Darwin" else Keys.CONTROL
         input_element.send_keys(select_modifier, "a")
         input_element.send_keys(Keys.BACKSPACE)
-        time.sleep(random.uniform(0.2, 0.5))
 
-        for char in prompt_text:
+        # Type the first word character-by-character to trigger React's input detection,
+        # then insert the remainder instantly to avoid the per-character VNC overhead.
+        words = prompt_text.split(" ", 1)
+        first_word = words[0]
+        remainder = (" " + words[1]) if len(words) > 1 else ""
+
+        for char in first_word:
             if char == "\n":
                 input_element.send_keys(Keys.SHIFT, Keys.ENTER)
             else:
                 input_element.send_keys(char)
-            time.sleep(random.uniform(0.05, 0.2))
+            time.sleep(random.uniform(0.05, 0.12))
+
+        if remainder:
+            if not self._js_insert_at_cursor(input_element, remainder):
+                LOGGER.warning("Fast JS insert failed; falling back to character-by-character for remainder.")
+                for char in remainder:
+                    if char == "\n":
+                        input_element.send_keys(Keys.SHIFT, Keys.ENTER)
+                    else:
+                        input_element.send_keys(char)
+                    time.sleep(random.uniform(0.05, 0.15))
+
+        time.sleep(0.15)
+
+    def _js_insert_at_cursor(self, input_element: WebElement, text: str) -> bool:
+        """Insert text at the current cursor position using execCommand.
+
+        execCommand('insertText') works for both contenteditable divs and textareas
+        in Chrome, fires the correct InputEvent that React picks up, and respects
+        the current cursor position so previously-typed characters are preserved.
+        """
+        try:
+            result = self.require_driver().execute_script(
+                """
+                const el = arguments[0];
+                const text = arguments[1];
+                el.focus();
+                return document.execCommand('insertText', false, text);
+                """,
+                input_element,
+                text,
+            )
+            return bool(result)
+        except (WebDriverException, JavascriptException):
+            return False
 
     def click_send(self, input_element: WebElement) -> None:
         self.dismiss_blocking_dialogs()
@@ -345,15 +510,19 @@ class ChatGPTRunner:
                     return
 
         for button in driver.find_elements(By.CSS_SELECTOR, "button"):
-            label = " ".join(
-                value.strip()
-                for value in [
-                    button.text or "",
-                    button.get_attribute("aria-label") or "",
-                    button.get_attribute("title") or "",
-                ]
-                if value and value.strip()
-            ).strip().lower()
+            label = (
+                " ".join(
+                    value.strip()
+                    for value in [
+                        button.text or "",
+                        button.get_attribute("aria-label") or "",
+                        button.get_attribute("title") or "",
+                    ]
+                    if value and value.strip()
+                )
+                .strip()
+                .lower()
+            )
             if label in DISMISS_BUTTON_TEXT and self.click_if_visible(button):
                 time.sleep(0.5)
                 return
@@ -407,7 +576,10 @@ class ChatGPTRunner:
                 return
             raise TimeoutError(f"ChatGPT stop button did not disappear. {self.collect_page_signals()}")
 
-        LOGGER.warning("ChatGPT stop button did not appear after submit. Falling back to response stability wait. %s", self.collect_page_signals())
+        LOGGER.warning(
+            "ChatGPT stop button did not appear after submit. Falling back to response stability wait. %s",
+            self.collect_page_signals(),
+        )
 
         deadline = time.time() + self.response_timeout_seconds
         last_text = ""
@@ -437,10 +609,18 @@ class ChatGPTRunner:
         return False
 
     def wait_for_stop_button_to_disappear(self, timeout: int) -> bool:
+        def all_stop_buttons_gone(driver) -> bool:
+            for selector in STOP_BUTTON_SELECTORS:
+                try:
+                    elements = driver.find_elements(By.CSS_SELECTOR, selector)
+                    if any(el.is_displayed() for el in elements):
+                        return False
+                except WebDriverException:
+                    pass
+            return True
+
         try:
-            WebDriverWait(self.require_driver(), timeout).until(
-                EC.invisibility_of_element_located((By.CSS_SELECTOR, STOP_BUTTON_SELECTOR))
-            )
+            WebDriverWait(self.require_driver(), timeout).until(all_stop_buttons_gone)
             return True
         except TimeoutException:
             return False
@@ -468,26 +648,62 @@ class ChatGPTRunner:
             return f"Visible page signals: {', '.join(matches)}"
         return "No obvious blocking page text detected."
 
-    def capture_latest_response(self) -> str:
+    def capture_latest_response(self) -> tuple[str, str, str]:
         latest_response = self.latest_response_element()
         if not latest_response:
-            return ""
+            return "", "", "no_response_element"
 
-        parent = self.response_action_container(latest_response)
-        if parent:
-            copy_button = self.find_copy_button(parent)
-            if copy_button:
+        visible_text = latest_response.text or ""
+        parent = self.latest_response_turn_element(latest_response) or self.response_action_container(latest_response)
+        copy_button = self.find_copy_button(parent) if parent else None
+        if not copy_button:
+            return visible_text, "", "copy_button_not_found"
+
+        for attempt in range(1, 4):
+            try:
                 marker = f"__brandsight_capture_marker_{time.time_ns()}__"
                 pyperclip.copy(marker)
                 self.click_element(copy_button)
-                deadline = time.time() + 3
+                deadline = time.time() + 5
                 while time.time() < deadline:
                     copied = pyperclip.paste()
                     if copied and copied != marker:
-                        return copied
+                        if self.is_suspicious_copied_response(copied, visible_text):
+                            LOGGER.warning(
+                                "Ignoring suspicious copied markdown. attempt=%s copied_length=%s visible_text_length=%s copied_preview=%r",
+                                attempt,
+                                len(copied),
+                                len(visible_text),
+                                copied[:200],
+                            )
+                            break
+                        return visible_text, copied, f"copy_button_markdown_attempt_{attempt}"
                     time.sleep(0.2)
+                LOGGER.info("Markdown copy attempt did not produce a valid clipboard payload. attempt=%s/3", attempt)
+                time.sleep(1)
+            except WebDriverException as exc:
+                LOGGER.warning("Markdown copy attempt failed. attempt=%s/3 error=%s", attempt, first_line(str(exc)))
+                time.sleep(1)
 
-        return latest_response.text or ""
+        return visible_text, "", "copy_button_markdown_failed_after_retries"
+
+    def is_suspicious_copied_response(self, copied: str, visible_text: str) -> bool:
+        copied_lines = [line.strip() for line in copied.splitlines() if line.strip()]
+        if len(copied_lines) < 6:
+            return False
+
+        sourceish_lines = 0
+        for line in copied_lines:
+            words = re.findall(r"[A-Za-z0-9][A-Za-z0-9+.'-]*", line)
+            if line.startswith("+") or len(words) <= 3:
+                sourceish_lines += 1
+
+        sourceish_ratio = sourceish_lines / max(1, len(copied_lines))
+        visible_words = set(normalize_words(visible_text))
+        copied_words = set(normalize_words(copied))
+        overlap_ratio = len(visible_words & copied_words) / max(1, min(len(visible_words), len(copied_words)))
+
+        return sourceish_ratio >= 0.75 and overlap_ratio < 0.45
 
     def capture_latest_response_html(self) -> tuple[str, str]:
         latest_response = self.latest_response_element()
@@ -565,7 +781,9 @@ class ChatGPTRunner:
         self.reveal_response_actions(latest_response)
         sources_button = self.find_sources_button(parent)
         if not sources_button:
-            LOGGER.info("No Sources button found for latest ChatGPT response. %s", self.sources_button_diagnostics(parent))
+            LOGGER.info(
+                "No Sources button found for latest ChatGPT response. %s", self.sources_button_diagnostics(parent)
+            )
             return []
 
         LOGGER.info("Sources button found; opening Sources panel.")
@@ -576,7 +794,9 @@ class ChatGPTRunner:
             return []
         LOGGER.info("Sources panel opened. %s", self.sources_panel_diagnostics())
         if not self.wait_for_sources_panel_links(timeout=30):
-            LOGGER.warning("Sources panel opened but no source links were detected. %s", self.sources_panel_diagnostics())
+            LOGGER.warning(
+                "Sources panel opened but no source links were detected. %s", self.sources_panel_diagnostics()
+            )
             self.close_sources_panel()
             return []
         LOGGER.info("Sources panel links loaded. %s", self.sources_panel_diagnostics())
@@ -585,7 +805,9 @@ class ChatGPTRunner:
             self.scroll_sources_panel_to_end()
             sources = self.extract_sources_from_panel()
             if not sources:
-                LOGGER.warning("Sources panel was found, but extraction returned 0 sources. %s", self.sources_panel_diagnostics())
+                LOGGER.warning(
+                    "Sources panel was found, but extraction returned 0 sources. %s", self.sources_panel_diagnostics()
+                )
             else:
                 LOGGER.info("Sources copied from panel. count=%s", len(sources))
             return sources
@@ -595,15 +817,19 @@ class ChatGPTRunner:
     def find_sources_button(self, container: WebElement) -> WebElement | None:
         buttons = container.find_elements(By.CSS_SELECTOR, "button")
         for button in reversed(buttons):
-            label = " ".join(
-                value.strip()
-                for value in [
-                    button.get_attribute("aria-label") or "",
-                    button.text or "",
-                    button.get_attribute("title") or "",
-                ]
-                if value and value.strip()
-            ).strip().lower()
+            label = (
+                " ".join(
+                    value.strip()
+                    for value in [
+                        button.get_attribute("aria-label") or "",
+                        button.text or "",
+                        button.get_attribute("title") or "",
+                    ]
+                    if value and value.strip()
+                )
+                .strip()
+                .lower()
+            )
             if label == "sources" or label.endswith(" sources") or "sources" in label:
                 if button.is_displayed() and button.is_enabled():
                     return button
@@ -654,7 +880,12 @@ class ChatGPTRunner:
             )
             elapsed = int(timeout - max(0, deadline - time.time()))
             if count != last_count or elapsed >= last_logged_second + 5:
-                LOGGER.info("Waiting for Sources panel links. visible_link_count=%s stable_checks=%s elapsed=%ss", count, stable_checks, elapsed)
+                LOGGER.info(
+                    "Waiting for Sources panel links. visible_link_count=%s stable_checks=%s elapsed=%ss",
+                    count,
+                    stable_checks,
+                    elapsed,
+                )
                 last_logged_second = elapsed
             if count > 0 and count == last_count:
                 stable_checks += 1
@@ -768,16 +999,18 @@ class ChatGPTRunner:
 
     def close_sources_panel(self) -> None:
         driver = self.require_driver()
-        close_button = self.find_first([
-            "[data-testid='screen-threadFlyOut'][aria-label='Sources'] button[aria-label='Close']",
-            "[data-testid='stage-thread-flyout'] section[aria-label='Sources'] button[aria-label='Close']",
-            "section[aria-label='Sources'] button[aria-label='Close']",
-            "[data-testid='bar-search-sources-header'] button[aria-label='Close']",
-            "#modal-search-results button[data-testid='close-button']",
-            "[data-testid='modal-search-results'] button[aria-label='Close']",
-            "[role='dialog'] button[data-testid='close-button']",
-            "[role='dialog'] button[aria-label='Close']",
-        ])
+        close_button = self.find_first(
+            [
+                "[data-testid='screen-threadFlyOut'][aria-label='Sources'] button[aria-label='Close']",
+                "[data-testid='stage-thread-flyout'] section[aria-label='Sources'] button[aria-label='Close']",
+                "section[aria-label='Sources'] button[aria-label='Close']",
+                "[data-testid='bar-search-sources-header'] button[aria-label='Close']",
+                "#modal-search-results button[data-testid='close-button']",
+                "[data-testid='modal-search-results'] button[aria-label='Close']",
+                "[role='dialog'] button[data-testid='close-button']",
+                "[role='dialog'] button[aria-label='Close']",
+            ]
+        )
         if close_button:
             self.click_if_visible(close_button)
             time.sleep(0.5)
@@ -942,7 +1175,11 @@ class ChatGPTRunner:
             LOGGER.info("No product select buttons found for latest ChatGPT response.")
             return []
 
-        LOGGER.info("Found %s product select button(s); opening product flyouts. %s", button_count, self.product_button_diagnostics(scope))
+        LOGGER.info(
+            "Found %s product select button(s); opening product flyouts. %s",
+            button_count,
+            self.product_button_diagnostics(scope),
+        )
         products: list[dict[str, Any]] = []
         for index in range(button_count):
             self.close_product_flyout()
@@ -1373,7 +1610,11 @@ class ChatGPTRunner:
             LOGGER.info("No entity underline elements found for latest ChatGPT response.")
             return []
 
-        LOGGER.info("Found %s entity element(s); opening entity flyouts. %s", entity_count, self.entity_button_diagnostics(scope))
+        LOGGER.info(
+            "Found %s entity element(s); opening entity flyouts. %s",
+            entity_count,
+            self.entity_button_diagnostics(scope),
+        )
         entities: list[dict[str, Any]] = []
         for index in range(entity_count):
             self.close_entity_flyout()
@@ -1713,8 +1954,14 @@ class ChatGPTRunner:
         return element.text.strip() if element else ""
 
     def latest_response_element(self) -> WebElement | None:
-        responses = self.response_elements()
-        return responses[-1] if responses else None
+        for attempt in range(3):
+            try:
+                responses = self.response_elements()
+                return responses[-1] if responses else None
+            except StaleElementReferenceException:
+                if attempt < 2:
+                    time.sleep(0.5)
+        return None
 
     def response_elements(self) -> list[WebElement]:
         return self.require_driver().find_elements(By.CSS_SELECTOR, ASSISTANT_RESPONSE_SELECTOR)
@@ -1746,6 +1993,8 @@ class ChatGPTRunner:
                     ],
                 )
             ).lower()
+            if "sources" in label or "select product" in label:
+                continue
             html = button.get_attribute("outerHTML") or ""
             if "copy" in label or "clip-rule" in html and "M7 5a3 3" in html:
                 if button.is_displayed() and button.is_enabled():
@@ -1803,9 +2052,17 @@ def clean_text(value: Any) -> str:
     return re.sub(r"\s+", " ", str(value or "")).strip()
 
 
+def normalize_words(value: str) -> list[str]:
+    return [word.lower() for word in re.findall(r"[A-Za-z0-9][A-Za-z0-9+.'-]*", value or "") if len(word) > 2]
+
+
 def clean_chatgpt_source_url(url: str) -> str:
     parts = urlsplit(url)
-    query = [(key, value) for key, value in parse_qsl(parts.query, keep_blank_values=True) if not (key == "utm_source" and value == "chatgpt.com")]
+    query = [
+        (key, value)
+        for key, value in parse_qsl(parts.query, keep_blank_values=True)
+        if not (key == "utm_source" and value == "chatgpt.com")
+    ]
     return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment))
 
 
@@ -1832,7 +2089,9 @@ def extract_sources_from_markdown(markdown: str) -> list[dict[str, Any]]:
             )
         )
 
-    inline_pattern = re.compile(r"""(?<!!)\[(?P<label>[^\]]+)\]\((?P<url>https?://[^)\s]+)(?:\s+(?P<title>"[^"]*"|'[^']*'))?\)""")
+    inline_pattern = re.compile(
+        r"""(?<!!)\[(?P<label>[^\]]+)\]\((?P<url>https?://[^)\s]+)(?:\s+(?P<title>"[^"]*"|'[^']*'))?\)"""
+    )
     for match in inline_pattern.finditer(markdown or ""):
         raw_url = match.group("url").strip()
         if not is_external_url(raw_url) or raw_url in seen_urls:

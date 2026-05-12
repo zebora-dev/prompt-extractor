@@ -1,0 +1,46 @@
+# fly.yaml app configuration file generated for prompt-extractor-us on 2026-05-07T19:06:55+01:00
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
+
+app: prompt-extractor-us
+primary_region: iad
+kill_signal: SIGINT
+kill_timeout: 30s
+
+build:
+  dockerfile: Dockerfile
+
+env:
+  CHATGPT_CHROME_USER_DATA_DIR: /data/chrome-profile
+  CHATGPT_HEADLESS: "false"
+  PREFECT_WORKING_DIR: /app
+  PREFECT_WORK_POOL: prompt-extraction-us
+  PROMPT_EXTRACTOR_VNC: "true"
+  VNC_SCREEN: 1280x720x24
+
+processes:
+  app: python -m prefect worker start --pool prompt-extraction-us --type process --limit 1 --install-policy never
+
+mounts:
+  - source: prompt_extractor_data
+    destination: /data
+
+    processes:
+      - app
+
+http_service:
+  internal_port: 6080
+  force_https: false
+  auto_stop_machines: false
+  auto_start_machines: true
+  min_machines_running: 1
+  sticky_sessions: true
+
+  processes:
+    - app
+
+vm:
+  - memory: 2048mb
+    cpu_kind: performance
+    cpus: 1

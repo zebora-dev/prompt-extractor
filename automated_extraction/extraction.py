@@ -2,15 +2,15 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from .api_client import ApiClient
 from .chatgpt_runner import ChatGPTRunner
 from .config import Settings
-
 
 LOGGER = logging.getLogger(__name__)
 
@@ -45,6 +45,10 @@ def run_extraction_job(
     sources_panel_pause_seconds: int = 0,
     force_rerun: bool = False,
     llm_model_filter: str | None = "gpt",
+    auto_login: bool | None = None,
+    login_email: str | None = None,
+    capture_products: bool = False,
+    capture_entities: bool = False,
 ) -> ExtractionRunResult:
     if not batch_id and not prompts_file:
         raise ValueError("one of batch_id or prompts_file is required")
@@ -110,13 +114,27 @@ def run_extraction_job(
     product_outputs: list[dict[str, Any]] = []
     entity_outputs: list[dict[str, Any]] = []
 
+    resolved_auto_login = settings.auto_login if auto_login is None else auto_login
+    resolved_login_email = login_email or settings.login_email
+    resolved_chrome_user_data_dir = chrome_user_data_dir or settings.chrome_user_data_dir
+    LOGGER.info(
+        "Starting ChatGPT browser session. chrome_user_data_dir=%s headless=%s auto_login=%s login_email=%s",
+        resolved_chrome_user_data_dir,
+        headless if headless is not None else settings.headless,
+        resolved_auto_login,
+        resolved_login_email or "<unset>",
+    )
+
     with ChatGPTRunner(
         settings.chatgpt_url,
         headless=headless if headless is not None else settings.headless,
-        chrome_user_data_dir=chrome_user_data_dir or settings.chrome_user_data_dir,
+        chrome_user_data_dir=resolved_chrome_user_data_dir,
         login_wait_seconds=settings.login_wait_seconds,
         response_timeout_seconds=settings.response_timeout_seconds,
         sources_panel_pause_seconds=sources_panel_pause_seconds,
+        auto_login=resolved_auto_login,
+        accounts=settings.accounts,
+        login_email=resolved_login_email,
     ) as runner:
         for index, prompt in enumerate(prompts, start=1):
             prompt_id = str(prompt.get("id") or "")
@@ -158,7 +176,9 @@ def run_extraction_job(
                 output = build_prompt_output(
                     prompt,
                     capture.response,
+                    capture.markdown,
                     capture.capture_method,
+                    capture.markdown_capture_method,
                     capture.raw_html,
                     capture.raw_html_capture_method,
                     capture.llm_model,
@@ -166,51 +186,136 @@ def run_extraction_job(
                     resolved_batch_id,
                     capture.sources,
                     capture.source_capture_method,
-                    capture.products,
-                    capture.product_capture_method,
-                    capture.entities,
-                    capture.entity_capture_method,
                 )
                 LOGGER.info(
-                    "[%s/%s] Capture summary for prompt %s: markdown_length=%s raw_html_length=%s llm_model=%s source_count=%s source_method=%s product_count=%s product_method=%s entity_count=%s entity_method=%s",
+                    "[%s/%s] Core capture summary for prompt %s: response_length=%s markdown_length=%s markdown_method=%s raw_html_length=%s llm_model=%s source_count=%s source_method=%s",
                     index,
                     len(prompts),
                     prompt_id,
                     len(capture.response or ""),
+                    len(capture.markdown or ""),
+                    capture.markdown_capture_method,
                     len(capture.raw_html or ""),
                     capture.llm_model,
                     len(capture.sources or []),
                     capture.source_capture_method,
-                    len(capture.products or []),
-                    capture.product_capture_method,
-                    len(capture.entities or []),
-                    capture.entity_capture_method,
                 )
+                # Re-check immediately before saving — another worker may have saved
+                # this prompt while Chrome was running it.
+                concurrent_output = (
+                    None
+                    if force_rerun
+                    else api.find_existing_prompt_output(
+                        prompt_id,
+                        prompt_brand_id,
+                        resolved_batch_id,
+                        llm_model_filter=llm_model_filter,
+                    )
+                )
+                if concurrent_output:
+                    skipped_count += 1
+                    LOGGER.warning(
+                        "[%s/%s] Concurrent worker already saved prompt %s — discarding our result. output_id=%s",
+                        index,
+                        len(prompts),
+                        prompt_id,
+                        concurrent_output.get("output_id") or concurrent_output.get("id"),
+                    )
+                    continue
+
                 saved = api.save_prompt_output(output)
                 saved_count += 1
                 saved_output = normalize_saved_output(saved, output)
                 saved_outputs.append(saved_output)
-                if capture.products:
-                    product_outputs.append(
-                        {
-                            **saved_output,
-                            "products": capture.products,
-                        }
-                    )
-                if capture.entities:
-                    entity_outputs.append(
-                        {
-                            **saved_output,
-                            "entities": capture.entities,
-                        }
-                    )
+
                 LOGGER.info(
-                    "[%s/%s] Saved prompt %s: output_id=%s response=%s",
+                    "[%s/%s] Saved core prompt output for prompt %s before flyout extraction. output_id=%s response=%s",
                     index,
                     len(prompts),
                     prompt_id,
                     saved_output.get("output_id"),
                     saved or "ok",
+                )
+
+                products = []
+                if capture_products:
+                    products = runner.capture_product_flyouts()
+                product_capture_method = (
+                    "product_flyouts" if products else ("skipped" if not capture_products else "none")
+                )
+                LOGGER.info(
+                    "[%s/%s] Product capture for prompt %s: enabled=%s count=%s method=%s",
+                    index,
+                    len(prompts),
+                    prompt_id,
+                    capture_products,
+                    len(products),
+                    product_capture_method,
+                )
+                if products:
+                    product_outputs.append(
+                        {
+                            **saved_output,
+                            "products": products,
+                        }
+                    )
+
+                entities = []
+                if capture_entities:
+                    entities = runner.capture_entity_flyouts()
+                entity_capture_method = (
+                    "entity_flyouts" if entities else ("skipped" if not capture_entities else "none")
+                )
+                LOGGER.info(
+                    "[%s/%s] Entity capture for prompt %s: enabled=%s count=%s method=%s",
+                    index,
+                    len(prompts),
+                    prompt_id,
+                    capture_entities,
+                    len(entities),
+                    entity_capture_method,
+                )
+                if entities:
+                    entity_outputs.append(
+                        {
+                            **saved_output,
+                            "entities": entities,
+                        }
+                    )
+                try:
+                    summary_patch = build_flyout_summary_patch(
+                        output,
+                        products,
+                        product_capture_method,
+                        entities,
+                        entity_capture_method,
+                    )
+                    api.update_prompt_output(saved_output, summary_patch)
+                    LOGGER.info(
+                        "[%s/%s] Updated prompt output flyout summary metadata. output_id=%s product_count=%s entity_count=%s",
+                        index,
+                        len(prompts),
+                        saved_output.get("output_id"),
+                        len(products),
+                        len(entities),
+                    )
+                except Exception as summary_exc:
+                    LOGGER.warning(
+                        "[%s/%s] Could not update flyout summary metadata for prompt %s output_id=%s: %s",
+                        index,
+                        len(prompts),
+                        prompt_id,
+                        saved_output.get("output_id"),
+                        summary_exc,
+                    )
+                LOGGER.info(
+                    "[%s/%s] Completed prompt %s extraction bundle. output_id=%s product_count=%s entity_count=%s",
+                    index,
+                    len(prompts),
+                    prompt_id,
+                    saved_output.get("output_id"),
+                    len(products),
+                    len(entities),
                 )
             except Exception as exc:
                 failed_count += 1
@@ -309,7 +414,9 @@ def normalize_saved_output(saved: dict[str, Any] | None, original_output: dict[s
 def build_prompt_output(
     prompt: dict[str, Any],
     response: str,
+    markdown: str,
     capture_method: str,
+    markdown_capture_method: str,
     raw_html: str,
     raw_html_capture_method: str,
     llm_model: str,
@@ -322,12 +429,12 @@ def build_prompt_output(
     entities: list[dict[str, Any]] | None = None,
     entity_capture_method: str = "none",
 ) -> dict[str, Any]:
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     return {
         "prompt_id": prompt.get("id"),
         "brand_id": prompt.get("brand_id"),
         "response": response,
-        "markdown": response,
+        "markdown": markdown or None,
         "raw_html": raw_html,
         "sources": sources or [],
         "batch_id": batch_id or prompt.get("batch_id"),
@@ -340,7 +447,9 @@ def build_prompt_output(
         },
         "output_metadata": {
             "brand_name": (prompt.get("brand") or {}).get("name") if isinstance(prompt.get("brand"), dict) else None,
-            "brand_description": (prompt.get("brand") or {}).get("description") if isinstance(prompt.get("brand"), dict) else None,
+            "brand_description": (prompt.get("brand") or {}).get("description")
+            if isinstance(prompt.get("brand"), dict)
+            else None,
             "llm_model": llm_model or "chatgpt",
             "approved": prompt.get("approved"),
             "active": prompt.get("active"),
@@ -348,6 +457,8 @@ def build_prompt_output(
             "original_metadata": {
                 "llm_model": llm_model or "chatgpt",
                 "main_response_capture_method": capture_method,
+                "markdown_capture_method": markdown_capture_method,
+                "markdown_length": len(markdown or ""),
                 "copy_validation_status": "validated" if capture_method.startswith("copy_button") else "fallback",
                 "raw_html_capture_method": raw_html_capture_method,
                 "raw_html_length": len(raw_html or ""),
@@ -371,11 +482,41 @@ def build_prompt_output(
             },
             "site_used": "OpenAI",
             "timestamp": now,
-        },
-        "version_info": {
             "app_type": "automated_extraction",
             "app_version": "1.0.0",
-            "extension_version": None,
             "prompt_source": "batch" if batch_id else "local",
+            "worker_name": os.getenv("FLY_MACHINE_ID") or os.getenv("FLY_APP_NAME"),
         },
     }
+
+
+def build_flyout_summary_patch(
+    output: dict[str, Any],
+    products: list[dict[str, Any]],
+    product_capture_method: str,
+    entities: list[dict[str, Any]],
+    entity_capture_method: str,
+) -> dict[str, Any]:
+    metadata = output.get("output_metadata") if isinstance(output.get("output_metadata"), dict) else {}
+    original_metadata = metadata.get("original_metadata") if isinstance(metadata.get("original_metadata"), dict) else {}
+    updated_metadata = {
+        **metadata,
+        "original_metadata": {
+            **original_metadata,
+            "product_count": len(products or []),
+            "product_capture_method": product_capture_method,
+            "product_extraction": {
+                "process_name": "product_extraction",
+                "product_count": len(products or []),
+                "capture_method": product_capture_method,
+            },
+            "entity_count": len(entities or []),
+            "entity_capture_method": entity_capture_method,
+            "entity_extraction": {
+                "process_name": "entity_extraction",
+                "entity_count": len(entities or []),
+                "capture_method": entity_capture_method,
+            },
+        },
+    }
+    return {"output_metadata": updated_metadata}

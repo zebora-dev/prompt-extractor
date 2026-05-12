@@ -11,7 +11,6 @@ from .extraction import run_extraction_job
 from .product_output_processor import process_product_outputs
 from .workflow_trigger import trigger_score_workflows
 
-
 LOGGER = logging.getLogger(__name__)
 
 
@@ -24,13 +23,27 @@ def main(argv: list[str] | None = None) -> int:
     )
     quiet_third_party_http_logs()
 
-    settings = Settings.from_env(require_api_key=not args.login_only)
+    auto_login_override = args.auto_login
+    settings = Settings.from_env(
+        require_api_key=not args.login_only,
+        # When --auto-login is explicitly set, enforce credentials even for
+        # --login-only so misconfiguration fails fast. Otherwise let the env
+        # default decide.
+        require_auto_login_credentials=(auto_login_override is True) or (not args.login_only),
+    )
+    auto_login = auto_login_override if auto_login_override is not None else settings.auto_login
+    login_email = args.login_email or settings.login_email
 
     if args.login_only:
         from .chatgpt_runner import ChatGPTRunner
 
         profile_dir = args.chrome_user_data_dir or settings.chrome_user_data_dir
-        LOGGER.info("Opening ChatGPT login session with profile: %s", profile_dir)
+        LOGGER.info(
+            "Opening ChatGPT login session with profile: %s (auto_login=%s, email=%s)",
+            profile_dir,
+            auto_login,
+            login_email or "<unset>",
+        )
         with ChatGPTRunner(
             settings.chatgpt_url,
             headless=False,
@@ -38,6 +51,9 @@ def main(argv: list[str] | None = None) -> int:
             login_wait_seconds=settings.login_wait_seconds,
             response_timeout_seconds=settings.response_timeout_seconds,
             sources_panel_pause_seconds=args.sources_panel_pause_seconds,
+            auto_login=auto_login,
+            accounts=settings.accounts,
+            login_email=login_email,
         ):
             LOGGER.info("ChatGPT login is ready and stored in the profile.")
         return 0
@@ -58,6 +74,10 @@ def main(argv: list[str] | None = None) -> int:
         sources_panel_pause_seconds=args.sources_panel_pause_seconds,
         force_rerun=args.force_rerun,
         llm_model_filter=args.llm_model_filter,
+        auto_login=auto_login,
+        login_email=login_email,
+        capture_products=args.capture_products,
+        capture_entities=args.capture_entities,
     )
     payload = asdict(result)
     product_output_refs = payload.pop("product_outputs", []) or []
@@ -70,7 +90,9 @@ def main(argv: list[str] | None = None) -> int:
         entity_processing_result = process_entity_outputs(settings=settings, entity_output_refs=entity_output_refs)
     score_workflow_result = None
     if not args.dry_run and payload.get("saved_outputs"):
-        score_workflow_result = trigger_score_workflows(settings=settings, saved_outputs=payload.get("saved_outputs") or [])
+        score_workflow_result = trigger_score_workflows(
+            settings=settings, saved_outputs=payload.get("saved_outputs") or []
+        )
 
     payload["product_output_processing"] = asdict(product_processing_result) if product_processing_result else None
     payload["entity_output_processing"] = asdict(entity_processing_result) if entity_processing_result else None
@@ -94,25 +116,59 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run BrandSight prompts through ChatGPT and save outputs.")
     source = parser.add_mutually_exclusive_group()
     source.add_argument("--batch-id", help="BrandSight batch UUID to load prompts from.")
-    source.add_argument("--prompts-file", type=Path, help="Local prompts JSON file, e.g. chromeApp/extension-shared/prompts.json.")
-    parser.add_argument("--login-only", action="store_true", help="Open ChatGPT and wait for login using the persistent Chrome profile.")
+    source.add_argument(
+        "--prompts-file", type=Path, help="Local prompts JSON file, e.g. chromeApp/extension-shared/prompts.json."
+    )
+    parser.add_argument(
+        "--login-only", action="store_true", help="Open ChatGPT and wait for login using the persistent Chrome profile."
+    )
     parser.add_argument("--brand-id", help="Brand UUID override for local prompts.")
     parser.add_argument("--limit", type=int, help="Maximum prompts to run.")
     parser.add_argument("--skip", type=int, default=0, help="Number of loaded prompts to skip.")
-    parser.add_argument("--dry-run", action="store_true", help="Load prompts and print a preview without opening ChatGPT.")
-    parser.add_argument("--force-rerun", action="store_true", help="Run prompts even when an output already exists for the same batch, brand, and prompt.")
+    parser.add_argument(
+        "--dry-run", action="store_true", help="Load prompts and print a preview without opening ChatGPT."
+    )
+    parser.add_argument(
+        "--force-rerun",
+        action="store_true",
+        help="Run prompts even when an output already exists for the same batch, brand, and prompt.",
+    )
     parser.add_argument(
         "--llm-model-filter",
         default="gpt",
         help="Only treat prompt outputs whose llm_model contains this value as completed. Defaults to 'gpt'. Use an empty string to match any model.",
     )
-    parser.add_argument("--headless", action=argparse.BooleanOptionalAction, default=None, help="Override CHATGPT_HEADLESS.")
+    parser.add_argument(
+        "--headless", action=argparse.BooleanOptionalAction, default=None, help="Override CHATGPT_HEADLESS."
+    )
     parser.add_argument("--chrome-user-data-dir", help="Chrome profile directory to reuse for ChatGPT login.")
+    parser.add_argument(
+        "--auto-login",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Override CHATGPT_AUTO_LOGIN. When true, runs the BasicLogin/GoogleLogin flow using CHATGPT_ACCOUNTS_B64.",
+    )
+    parser.add_argument(
+        "--login-email",
+        help="Override CHATGPT_LOGIN_EMAIL. Selects which account from CHATGPT_ACCOUNTS_B64 to use.",
+    )
     parser.add_argument(
         "--sources-panel-pause-seconds",
         type=int,
         default=0,
         help="Debug pause after opening the ChatGPT Sources panel. Defaults to 0; set e.g. 180 to inspect/copy DOM.",
+    )
+    parser.add_argument(
+        "--capture-products",
+        action="store_true",
+        default=False,
+        help="Enable product flyout capture after each response. Disabled by default.",
+    )
+    parser.add_argument(
+        "--capture-entities",
+        action="store_true",
+        default=False,
+        help="Enable entity flyout capture after each response. Disabled by default.",
     )
     parser.add_argument("--verbose", action="store_true", help="Enable debug logging.")
     return parser
