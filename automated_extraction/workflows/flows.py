@@ -124,6 +124,75 @@ def prompt_extraction_batch_flow(
     saved_count = sum(int(r.get("saved_count") or 0) for r in run_results)
     failed_count = sum(int(r.get("failed_count") or 0) for r in run_results)
     skipped_count = sum(int(r.get("skipped_count") or 0) for r in run_results)
+
+    # --- Batch-check pass ---
+    # After all sequential runs complete, re-fetch remaining prompts once.
+    # If any are still outstanding (missed due to race conditions or failures),
+    # run one additional round of sequential batches to mop them up.
+    mop_up_results: list[dict[str, Any]] = []
+    mop_up_remaining = api.get_prompts(
+        batch_id,
+        str(brand_id),
+        only_remaining=True,
+        llm_model_filter=model_filter,
+    )
+    mop_up_count = len(mop_up_remaining)
+    flow_logger.info(
+        "Batch-check: %s prompt(s) still remaining after initial run. batch_id=%s",
+        mop_up_count,
+        batch_id,
+    )
+
+    if mop_up_count > 0:
+        mop_up_run_count = math.ceil(mop_up_count / limit)
+        flow_logger.info(
+            "Starting mop-up pass: %s run(s) of limit=%s. batch_id=%s",
+            mop_up_run_count,
+            limit,
+            batch_id,
+        )
+        for run_index in range(1, mop_up_run_count + 1):
+            flow_logger.info(
+                "Mop-up run %s/%s. batch_id=%s limit=%s",
+                run_index,
+                mop_up_run_count,
+                batch_id,
+                limit,
+            )
+            result = prompt_extraction_flow(
+                batch_id=batch_id,
+                limit=limit,
+                skip=0,
+                llm_model_filter=model_filter,
+                auto_login=auto_login,
+                login_email=login_email,
+                force_rerun=False,
+                capture_products=capture_products,
+                capture_entities=capture_entities,
+            )
+            mop_up_results.append(result)
+            flow_logger.info(
+                "Mop-up run %s/%s finished. saved_count=%s skipped_count=%s failed_count=%s",
+                run_index,
+                mop_up_run_count,
+                result.get("saved_count", 0),
+                result.get("skipped_count", 0),
+                result.get("failed_count", 0),
+            )
+            if run_index < mop_up_run_count:
+                flow_logger.info("Waiting %ss before next mop-up run.", delay_seconds)
+                time.sleep(delay_seconds)
+
+        mop_up_saved = sum(int(r.get("saved_count") or 0) for r in mop_up_results)
+        mop_up_failed = sum(int(r.get("failed_count") or 0) for r in mop_up_results)
+        saved_count += mop_up_saved
+        failed_count += mop_up_failed
+        flow_logger.info(
+            "Mop-up pass complete. mop_up_saved=%s mop_up_failed=%s",
+            mop_up_saved,
+            mop_up_failed,
+        )
+
     status = "completed" if failed_count == 0 else "completed_with_failures"
     summary = {
         "status": status,
@@ -139,10 +208,13 @@ def prompt_extraction_batch_flow(
         "limit_per_run": limit,
         "planned_runs": run_count,
         "completed_runs": len(run_results),
+        "mop_up_remaining_count": mop_up_count,
+        "mop_up_runs": len(mop_up_results),
         "saved_count": saved_count,
         "skipped_count": skipped_count,
         "failed_count": failed_count,
         "runs": run_results,
+        "mop_up_run_results": mop_up_results,
     }
     flow_logger.info("Sequential prompt extraction batch finished: %s", summary)
     return summary
