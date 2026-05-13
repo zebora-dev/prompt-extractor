@@ -105,11 +105,31 @@ class PromptOutputEntityRow:
     created_at: str | None = None
 
 
+@dataclass(frozen=True)
+class PromptOutputSuggestionRow:
+    output_id: int
+    prompt_id: str
+    brand_id: str
+    batch_id: str
+    index: int
+    text: str
+    id: int | None = None
+    response: str | None = None
+    sources: Any = None
+    raw_html: str | None = None
+    llm_model: str | None = None
+    capture_method: str | None = None
+    error: str | None = None
+    metadata: Any = None
+    created_at: str | None = None
+
+
 BatchDict = dict[str, Any]
 PromptDict = dict[str, Any]
 PromptOutputDict = dict[str, Any]
 PromptOutputProductDict = dict[str, Any]
 PromptOutputEntityDict = dict[str, Any]
+PromptOutputSuggestionDict = dict[str, Any]
 
 BATCH_COLUMNS = tuple(field.name for field in fields(BatchRow) if field.name != "brand")
 PROMPT_COLUMNS = tuple(field.name for field in fields(PromptRow) if field.name != "brand")
@@ -122,6 +142,8 @@ PROMPT_OUTPUT_PRODUCT_COLUMNS = tuple(field.name for field in fields(PromptOutpu
 PROMPT_OUTPUT_PRODUCT_INSERT_COLUMNS = tuple(column for column in PROMPT_OUTPUT_PRODUCT_COLUMNS if column != "id")
 PROMPT_OUTPUT_ENTITY_COLUMNS = tuple(field.name for field in fields(PromptOutputEntityRow))
 PROMPT_OUTPUT_ENTITY_INSERT_COLUMNS = tuple(column for column in PROMPT_OUTPUT_ENTITY_COLUMNS if column != "id")
+PROMPT_OUTPUT_SUGGESTION_COLUMNS = tuple(field.name for field in fields(PromptOutputSuggestionRow))
+PROMPT_OUTPUT_SUGGESTION_INSERT_COLUMNS = tuple(column for column in PROMPT_OUTPUT_SUGGESTION_COLUMNS if column != "id")
 
 
 @dataclass(frozen=True)
@@ -131,6 +153,7 @@ class SupabasePromptOutputRepository:
     table_name: str = "prompts_outputs"
     product_table_name: str = "prompts_outputs_products"
     entity_table_name: str = "prompts_outputs_entities"
+    suggestion_table_name: str = "prompts_outputs_suggestions"
 
     def __post_init__(self) -> None:
         if not self.supabase_url:
@@ -302,6 +325,20 @@ class SupabasePromptOutputRepository:
         )
         response = self.client.table(self.entity_table_name).insert(rows).execute()
         return [row_to_entity(row) for row in response.data or [] if isinstance(row, dict)]
+
+    def save_prompt_output_suggestions(self, suggestions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        rows = [suggestion_to_row(s, include_id=False) for s in suggestions]
+        rows = [row for row in rows if row.get("output_id") and row.get("prompt_id") and row.get("brand_id")]
+        if not rows:
+            return []
+
+        LOGGER.info(
+            "Saving prompt output suggestion rows directly to Supabase. table=%s count=%s",
+            self.suggestion_table_name,
+            len(rows),
+        )
+        response = self.client.table(self.suggestion_table_name).insert(rows).execute()
+        return [row_to_suggestion(row) for row in response.data or [] if isinstance(row, dict)]
 
     def get_prompt_output(self, output_id: int | str) -> dict[str, Any] | None:
         outputs = self.get_prompt_outputs(output_id=output_id, limit=1)
@@ -551,6 +588,49 @@ def row_to_entity(row: dict[str, Any]) -> PromptOutputEntityDict:
         text_length=row.get("text_length"),
         entity_index=row.get("entity_index"),
         capture_method=row.get("capture_method"),
+        created_at=row.get("created_at"),
+    )
+    return asdict(typed_row)
+
+
+def suggestion_to_row(suggestion: dict[str, Any], *, include_id: bool) -> dict[str, Any]:
+    row = {
+        "id": suggestion.get("id"),
+        "output_id": suggestion.get("output_id"),
+        "prompt_id": suggestion.get("prompt_id"),
+        "brand_id": suggestion.get("brand_id"),
+        "batch_id": suggestion.get("batch_id"),
+        "index": suggestion.get("index"),
+        "text": suggestion.get("text"),
+        "response": suggestion.get("response"),
+        "sources": suggestion.get("sources"),
+        "raw_html": suggestion.get("raw_html"),
+        "llm_model": suggestion.get("llm_model"),
+        "capture_method": suggestion.get("capture_method"),
+        "error": suggestion.get("error"),
+        "metadata": suggestion.get("metadata"),
+        "created_at": suggestion.get("created_at"),
+    }
+    allowed_columns = PROMPT_OUTPUT_SUGGESTION_COLUMNS if include_id else PROMPT_OUTPUT_SUGGESTION_INSERT_COLUMNS
+    return compact_row(row, allowed_columns)
+
+
+def row_to_suggestion(row: dict[str, Any]) -> PromptOutputSuggestionDict:
+    typed_row = PromptOutputSuggestionRow(
+        id=row.get("id"),
+        output_id=int(row.get("output_id") or 0),
+        prompt_id=str(row.get("prompt_id") or ""),
+        brand_id=str(row.get("brand_id") or ""),
+        batch_id=str(row.get("batch_id") or ""),
+        index=int(row.get("index") or 0),
+        text=str(row.get("text") or ""),
+        response=row.get("response"),
+        sources=row.get("sources"),
+        raw_html=row.get("raw_html"),
+        llm_model=row.get("llm_model"),
+        capture_method=row.get("capture_method"),
+        error=row.get("error"),
+        metadata=row.get("metadata"),
         created_at=row.get("created_at"),
     )
     return asdict(typed_row)

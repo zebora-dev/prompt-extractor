@@ -13,6 +13,7 @@ from .chatgpt_runner import ChatGPTRunner
 from .config import Settings
 from .google_ai_mode_runner import GoogleAIModeRunner
 from .google_ai_overview_runner import GoogleAIOverviewRunner
+from .google_suggestions_runner import capture_people_also_ask
 
 LOGGER = logging.getLogger(__name__)
 
@@ -62,6 +63,7 @@ def run_extraction_job(
         prompt_outputs_table=settings.prompt_outputs_table,
         prompt_output_products_table=settings.prompt_output_products_table,
         prompt_output_entities_table=settings.prompt_output_entities_table,
+        prompt_output_suggestions_table=settings.prompt_output_suggestions_table,
     )
     prompts, resolved_batch_id, resolved_brand_id = load_prompt_work(
         api=api,
@@ -369,6 +371,7 @@ def run_google_ai_mode_extraction_job(
         prompt_outputs_table=settings.prompt_outputs_table,
         prompt_output_products_table=settings.prompt_output_products_table,
         prompt_output_entities_table=settings.prompt_output_entities_table,
+        prompt_output_suggestions_table=settings.prompt_output_suggestions_table,
     )
     prompts, resolved_batch_id, resolved_brand_id = load_prompt_work(
         api=api,
@@ -506,6 +509,16 @@ def run_google_ai_mode_extraction_job(
                     len(capture.sources or []),
                     capture.capture_state,
                 )
+                _capture_and_save_suggestions(
+                    api=api,
+                    driver=runner.driver,
+                    saved_output=saved_output,
+                    prompt=prompt,
+                    batch_id=resolved_batch_id,
+                    llm_model="google-ai-mode",
+                    index=index,
+                    total=len(prompts),
+                )
             except Exception as exc:
                 failed_count += 1
                 failure = {"prompt_id": prompt_id, "brand_id": prompt_brand_id, "error": str(exc)}
@@ -562,6 +575,7 @@ def run_google_ai_overview_extraction_job(
         prompt_outputs_table=settings.prompt_outputs_table,
         prompt_output_products_table=settings.prompt_output_products_table,
         prompt_output_entities_table=settings.prompt_output_entities_table,
+        prompt_output_suggestions_table=settings.prompt_output_suggestions_table,
     )
     prompts, resolved_batch_id, resolved_brand_id = load_prompt_work(
         api=api,
@@ -696,6 +710,16 @@ def run_google_ai_overview_extraction_job(
                     len(capture.response or ""),
                     len(capture.sources or []),
                     capture.capture_state,
+                )
+                _capture_and_save_suggestions(
+                    api=api,
+                    driver=runner.driver,
+                    saved_output=saved_output,
+                    prompt=prompt,
+                    batch_id=resolved_batch_id,
+                    llm_model="google-ai-overview",
+                    index=index,
+                    total=len(prompts),
                 )
             except Exception as exc:
                 failed_count += 1
@@ -999,6 +1023,7 @@ def build_google_ai_overview_prompt_output(
         **metadata,
         "llm_model": llm_model or "google-ai-overview",
         "site_used": "Google",
+        "ai_overview": ai_overview_triggered,
         "google_ai_overview": {
             "triggered": ai_overview_triggered,
             "capture_state": capture_state,
@@ -1013,6 +1038,7 @@ def build_google_ai_overview_prompt_output(
             "provider": "google-ai-overview",
             "site": "Google",
             "site_used": "Google",
+            "ai_overview": ai_overview_triggered,
             "ai_overview_triggered": ai_overview_triggered,
             "capture_state": capture_state,
             "capture_error": error,
@@ -1026,6 +1052,76 @@ def build_google_ai_overview_prompt_output(
         "app_type": "automated_extraction_google_ai_overview",
     }
     return output
+
+
+def _capture_and_save_suggestions(
+    *,
+    api: ApiClient,
+    driver: Any,
+    saved_output: dict[str, Any],
+    prompt: dict[str, Any],
+    batch_id: str | None,
+    llm_model: str,
+    index: int,
+    total: int,
+) -> None:
+    """Capture PAA suggestions from the current page and save them to Supabase."""
+    if not driver:
+        return
+    output_id = saved_output.get("output_id") or saved_output.get("id")
+    prompt_id = str(prompt.get("id") or "")
+    brand_id = str(prompt.get("brand_id") or saved_output.get("brand_id") or "")
+    resolved_batch = batch_id or str(prompt.get("batch_id") or "")
+    if not output_id or not prompt_id or not brand_id:
+        return
+    try:
+        paa = capture_people_also_ask(driver)
+        if not paa.suggestions:
+            LOGGER.info("[%s/%s] No PAA suggestions found for prompt %s.", index, total, prompt_id)
+            return
+
+        rows = [
+            {
+                "output_id": int(output_id),
+                "prompt_id": prompt_id,
+                "brand_id": brand_id,
+                "batch_id": resolved_batch,
+                "index": s.index,
+                "text": s.text,
+                "response": s.response or None,
+                "sources": s.sources or None,
+                "raw_html": s.raw_html or None,
+                "llm_model": llm_model,
+                "capture_method": s.capture_method,
+                "error": s.error or None,
+                "metadata": {
+                    "prompt_id": prompt_id,
+                    "brand_id": brand_id,
+                    "batch_id": resolved_batch,
+                    "output_id": int(output_id),
+                    "paa_total": paa.count,
+                    "paa_capture_method": paa.capture_method,
+                },
+            }
+            for s in paa.suggestions
+        ]
+        api.save_prompt_output_suggestions(rows)
+        LOGGER.info(
+            "[%s/%s] Saved %s PAA suggestion(s) for prompt %s. output_id=%s",
+            index,
+            total,
+            len(rows),
+            prompt_id,
+            output_id,
+        )
+    except Exception as exc:
+        LOGGER.warning(
+            "[%s/%s] PAA suggestion capture/save failed for prompt %s: %s",
+            index,
+            total,
+            prompt_id,
+            exc,
+        )
 
 
 def build_flyout_summary_patch(
