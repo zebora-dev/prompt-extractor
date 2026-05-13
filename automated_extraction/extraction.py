@@ -356,6 +356,7 @@ def run_google_ai_mode_extraction_job(
     llm_model_filter: str | None = "google-ai-mode",
     country: str | None = None,
     language: str | None = None,
+    debug_pause_seconds: int = 0,
 ) -> ExtractionRunResult:
     if not batch_id and not prompts_file:
         raise ValueError("one of batch_id or prompts_file is required")
@@ -509,6 +510,12 @@ def run_google_ai_mode_extraction_job(
                 failure = {"prompt_id": prompt_id, "brand_id": prompt_brand_id, "error": str(exc)}
                 failures.append(failure)
                 LOGGER.exception("[%s/%s] Google AI Mode prompt %s failed: %s", index, len(prompts), prompt_id, exc)
+
+        if debug_pause_seconds > 0:
+            import time
+
+            LOGGER.info("Debug pause: browser staying open for %s seconds. Inspect at will.", debug_pause_seconds)
+            time.sleep(debug_pause_seconds)
 
     status = "completed" if failed_count == 0 else "completed_with_failures"
     return ExtractionRunResult(

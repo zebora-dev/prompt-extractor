@@ -16,7 +16,6 @@ from selenium.webdriver.common.by import By
 
 from .chatgpt_runner import detect_chrome_major_version, first_line
 
-
 LOGGER = logging.getLogger(__name__)
 
 BLOCKING_URL_PATTERNS = [
@@ -72,7 +71,7 @@ class GoogleAIModeRunner:
         self.use_advanced_ai_param = use_advanced_ai_param
         self.driver: Chrome | None = None
 
-    def __enter__(self) -> "GoogleAIModeRunner":
+    def __enter__(self) -> GoogleAIModeRunner:
         self.start()
         return self
 
@@ -172,20 +171,28 @@ class GoogleAIModeRunner:
                 error=result.get("error") or "no_ai_mode",
             )
 
-        response = clean_text(result.get("text"))
-        markdown = clean_markdown(result.get("markdown") or response)
+        clipboard_markdown, clipboard_method = self.capture_markdown_via_copy_button()
+
+        markdown = clipboard_markdown
+        markdown_capture_method = clipboard_method
+
+        if markdown:
+            response = markdown
+            capture_method = clipboard_method
+        else:
+            response = clean_text(result.get("text"))
+            capture_method = str(result.get("capture_method") or "ai_mode_dom_text")
+
         sources = normalize_sources(result.get("sources") if isinstance(result.get("sources"), list) else [])
         raw_html = str(result.get("raw_html") or "")
-        if not response and markdown:
-            response = markdown_to_text(markdown)
         if not response and not sources:
             raise RuntimeError("Google AI Mode container was detected, but extracted content was empty")
 
         return GoogleAIModeCapture(
             response=response,
             markdown=markdown,
-            capture_method=str(result.get("capture_method") or "ai_mode_dom_text"),
-            markdown_capture_method=str(result.get("markdown_capture_method") or "ai_mode_dom_markdown"),
+            capture_method=capture_method,
+            markdown_capture_method=markdown_capture_method,
             raw_html=raw_html,
             raw_html_capture_method=str(result.get("raw_html_capture_method") or "ai_mode_container_outer_html"),
             llm_model="google-ai-mode",
@@ -196,6 +203,109 @@ class GoogleAIModeRunner:
             capture_state=str(result.get("capture_state") or "complete"),
             error=None,
         )
+
+    def capture_markdown_via_copy_button(self) -> tuple[str, str]:
+        """Click the AI Mode 'Copy text' button and return (markdown, capture_method).
+
+        Uses a three-layer clipboard interception strategy and ActionChains for a
+        trusted click. Returns ('', reason) on any failure — the caller leaves
+        the markdown field blank rather than falling back to DOM extraction.
+        """
+        driver = self.require_driver()
+        try:
+            # Grant clipboard permissions via CDP (best-effort — may not work with uc)
+            try:
+                driver.execute_cdp_cmd(
+                    "Browser.grantPermissions",
+                    {"permissions": ["clipboardReadWrite", "clipboardSanitizedWrite"], "origin": driver.current_url},
+                )
+            except Exception:
+                pass
+
+            # Intercept all three clipboard write paths before the click fires
+            driver.execute_script(
+                """
+                window.__clipboardCapture = null;
+
+                if (navigator.clipboard) {
+                    if (navigator.clipboard.writeText) {
+                        const _origWriteText = navigator.clipboard.writeText.bind(navigator.clipboard);
+                        navigator.clipboard.writeText = async function(text) {
+                            window.__clipboardCapture = text;
+                            try { return await _origWriteText(text); } catch(e) {}
+                        };
+                    }
+                    if (navigator.clipboard.write) {
+                        const _origWrite = navigator.clipboard.write.bind(navigator.clipboard);
+                        navigator.clipboard.write = async function(items) {
+                            try {
+                                for (const item of items) {
+                                    if (item.types && item.types.includes('text/plain')) {
+                                        const blob = await item.getType('text/plain');
+                                        window.__clipboardCapture = await blob.text();
+                                        break;
+                                    }
+                                }
+                            } catch(e) {}
+                            try { return await _origWrite(items); } catch(e) {}
+                        };
+                    }
+                }
+
+                const _origExecCommand = document.execCommand.bind(document);
+                document.execCommand = function(command, ...args) {
+                    if (command === 'copy') {
+                        const sel = window.getSelection();
+                        if (sel && sel.toString()) window.__clipboardCapture = sel.toString();
+                    }
+                    return _origExecCommand(command, ...args);
+                };
+                """
+            )
+
+            buttons = driver.find_elements(By.CSS_SELECTOR, 'button[aria-label="Copy text"]')
+            if not buttons:
+                LOGGER.debug("Copy text button not found.")
+                return "", "copy_button_not_found"
+
+            button = buttons[0]
+            driver.execute_script("arguments[0].scrollIntoView({block: 'center', inline: 'center'});", button)
+            time.sleep(0.3)
+
+            # Use ActionChains for a trusted (isTrusted=true) browser click — JS .click()
+            # produces isTrusted=false which Google's JSAction framework may ignore
+            from selenium.webdriver import ActionChains
+
+            try:
+                ActionChains(driver).move_to_element(button).click().perform()
+            except Exception:
+                # Fallback: full pointer/mouse event sequence
+                driver.execute_script(
+                    """
+                    const el = arguments[0];
+                    el.dispatchEvent(new PointerEvent('pointerdown', {bubbles: true, pointerType: 'mouse'}));
+                    el.dispatchEvent(new MouseEvent('mousedown', {bubbles: true}));
+                    el.dispatchEvent(new PointerEvent('pointerup', {bubbles: true, pointerType: 'mouse'}));
+                    el.dispatchEvent(new MouseEvent('mouseup', {bubbles: true}));
+                    el.click();
+                    """,
+                    button,
+                )
+
+            # Poll for any of the three intercept paths to fire
+            deadline = time.time() + 5
+            while time.time() < deadline:
+                text = driver.execute_script("return window.__clipboardCapture;")
+                if text and str(text).strip():
+                    LOGGER.info("Captured markdown via copy button (%s chars).", len(text))
+                    return clean_markdown(str(text)), "copy_button_clipboard"
+                time.sleep(0.2)
+
+            LOGGER.info("Copy button clicked but no clipboard content captured after 5s.")
+            return "", "copy_button_empty"
+        except Exception as exc:
+            LOGGER.debug("Copy button capture failed: %s", exc)
+            return "", "copy_button_error"
 
     def build_search_url(self, prompt_text: str) -> str:
         base = self.google_url.rstrip("/")
@@ -338,6 +448,22 @@ function isUsefulUrl(url) {
   );
 }
 
+function classifyLink(link) {
+  // Citation: superscript badge at end of a sentence, inside jscontroller="udAs2b"
+  const citationSpan = link.closest('[jscontroller="udAs2b"]');
+  if (citationSpan) {
+    const button = citationSpan.querySelector('button[data-amic="true"]');
+    const ariaLabel = button ? (button.getAttribute("aria-label") || "") : "";
+    const match = ariaLabel.match(/\+(\d+)/);
+    return { extractionSource: "citation", citationCount: match ? parseInt(match[1]) : null };
+  }
+  // Inline: hyperlinked word/phrase embedded in the prose text
+  if (link.classList.contains("H23r4e")) {
+    return { extractionSource: "inline", citationCount: null };
+  }
+  return { extractionSource: "more_links", citationCount: null };
+}
+
 function extractSources(container) {
   const seen = new Set();
   const sources = [];
@@ -345,6 +471,8 @@ function extractSources(container) {
     const url = unwrapGoogleUrl(link.getAttribute("href") || "").replace(/#:~:text=.*$/, "");
     if (!isUsefulUrl(url) || seen.has(url)) continue;
     seen.add(url);
+
+    const { extractionSource, citationCount } = classifyLink(link);
 
     const lines = cleanText(link.innerText || link.textContent || "")
       .split(/\n+/)
@@ -365,15 +493,17 @@ function extractSources(container) {
       parent = parent.parentElement;
     }
 
-    sources.push({
+    const entry = {
       index: sources.length + 1,
       url,
       source,
       title,
       description,
       favicon_url: link.querySelector("img")?.src || null,
-      extraction_source: "ai_mode_dom_links",
-    });
+      extraction_source: extractionSource,
+    };
+    if (citationCount !== null) entry.citation_count = citationCount;
+    sources.push(entry);
   }
   return sources;
 }
@@ -472,19 +602,20 @@ def normalize_sources(raw_sources: list[Any]) -> list[dict[str, Any]]:
             continue
         seen_urls.add(clean_url)
         domain = urlsplit(clean_url).netloc.replace("www.", "")
-        sources.append(
-            {
-                "index": len(sources) + 1,
-                "url": raw_url,
-                "clean_url": clean_url,
-                "source": clean_text(source.get("source")) or domain,
-                "title": clean_text(source.get("title")),
-                "description": clean_text(source.get("description")),
-                "favicon_url": str(source.get("favicon_url") or "").strip()
-                or (f"https://www.google.com/s2/favicons?domain={domain}&sz=32" if domain else None),
-                "extraction_source": clean_text(source.get("extraction_source")) or "ai_mode_dom_links",
-            }
-        )
+        entry: dict[str, Any] = {
+            "index": len(sources) + 1,
+            "url": raw_url,
+            "clean_url": clean_url,
+            "source": clean_text(source.get("source")) or domain,
+            "title": clean_text(source.get("title")),
+            "description": clean_text(source.get("description")),
+            "favicon_url": str(source.get("favicon_url") or "").strip()
+            or (f"https://www.google.com/s2/favicons?domain={domain}&sz=32" if domain else None),
+            "extraction_source": clean_text(source.get("extraction_source")) or "more_links",
+        }
+        if source.get("citation_count") is not None:
+            entry["citation_count"] = int(source["citation_count"])
+        sources.append(entry)
     return sources
 
 
@@ -499,9 +630,7 @@ def clean_google_url(url: str) -> str:
             raw_url = params.get("q") or params.get("url") or raw_url
             parts = urlsplit(raw_url)
         query = [
-            (key, value)
-            for key, value in parse_qsl(parts.query, keep_blank_values=True)
-            if not key.startswith("utm_")
+            (key, value) for key, value in parse_qsl(parts.query, keep_blank_values=True) if not key.startswith("utm_")
         ]
         return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), ""))
     except ValueError:

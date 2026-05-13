@@ -140,6 +140,7 @@ def extract_google_ai_mode_batch_task(
     llm_model_filter: str | None = "google-ai-mode",
     country: str | None = None,
     language: str | None = None,
+    debug_pause_seconds: int = 0,
 ) -> dict[str, Any]:
     """
     Run BrandSight prompts through Google Search and capture AI Mode output.
@@ -172,6 +173,7 @@ def extract_google_ai_mode_batch_task(
         llm_model_filter=llm_model_filter,
         country=country,
         language=language,
+        debug_pause_seconds=debug_pause_seconds,
     )
     payload = asdict(result)
     task_logger.info("Finished Google AI Mode extraction task: %s", summarize_extraction_payload(payload))

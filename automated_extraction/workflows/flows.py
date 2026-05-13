@@ -354,6 +354,7 @@ def google_ai_mode_extraction_flow(
     llm_model_filter: str | None = "google-ai-mode",
     country: str | None = None,
     language: str | None = None,
+    debug_pause_seconds: int = 0,
 ) -> dict[str, Any]:
     """
     Orchestrate a Google AI Mode prompt extraction run.
@@ -387,6 +388,7 @@ def google_ai_mode_extraction_flow(
         llm_model_filter=llm_model_filter,
         country=country,
         language=language,
+        debug_pause_seconds=debug_pause_seconds,
     )
 
     processing_result: dict[str, Any] | None = None
@@ -402,7 +404,9 @@ def google_ai_mode_extraction_flow(
 
     score_workflow_result: dict[str, Any] | None = None
     if not dry_run and result.get("saved_outputs"):
-        score_workflow_result = score_workflow_trigger_task(saved_outputs=result.get("saved_outputs") or [], force=False)
+        score_workflow_result = score_workflow_trigger_task(
+            saved_outputs=result.get("saved_outputs") or [], force=False
+        )
     else:
         flow_logger.info("Skipping score workflow trigger because no Google AI Mode outputs were saved.")
 

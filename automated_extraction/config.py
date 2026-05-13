@@ -112,8 +112,7 @@ class Settings:
                 os.getenv("GOOGLE_AI_MODE_USE_ARV_1") or os.getenv("GOOGLE_AI_OVERVIEW_USE_ARV_1"),
                 default=True,
             ),
-            logged_in_accounts_dir=os.getenv("CHATGPT_LOGGED_IN_ACCOUNTS_DIR")
-            or str(DEFAULT_LOGGED_IN_ACCOUNTS_DIR),
+            logged_in_accounts_dir=os.getenv("CHATGPT_LOGGED_IN_ACCOUNTS_DIR") or str(DEFAULT_LOGGED_IN_ACCOUNTS_DIR),
             headless=parse_bool(os.getenv("CHATGPT_HEADLESS"), default=False),
             login_wait_seconds=parse_int(os.getenv("CHATGPT_LOGIN_WAIT_SECONDS"), default=180),
             response_timeout_seconds=parse_int(os.getenv("CHATGPT_RESPONSE_TIMEOUT_SECONDS"), default=300),
