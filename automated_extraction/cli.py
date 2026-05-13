@@ -7,7 +7,7 @@ from pathlib import Path
 
 from .config import Settings
 from .entity_output_processor import process_entity_outputs
-from .extraction import run_extraction_job, run_google_ai_mode_extraction_job
+from .extraction import run_extraction_job, run_google_ai_mode_extraction_job, run_google_ai_overview_extraction_job
 from .product_output_processor import process_product_outputs
 from .workflow_trigger import trigger_score_workflows
 
@@ -23,31 +23,34 @@ def main(argv: list[str] | None = None) -> int:
     )
     quiet_third_party_http_logs()
 
-    if args.provider == "google-ai-overview":
-        LOGGER.warning("--provider google-ai-overview is deprecated; using google-ai-mode.")
-        args.provider = "google-ai-mode"
-
     if args.llm_model_filter is None:
-        args.llm_model_filter = "google-ai-mode" if args.provider == "google-ai-mode" else "gpt"
+        if args.provider == "google-ai-mode":
+            args.llm_model_filter = "google-ai-mode"
+        elif args.provider == "google-ai-overview":
+            args.llm_model_filter = "google-ai-overview"
+        else:
+            args.llm_model_filter = "gpt"
 
     auto_login_override = args.auto_login
+    is_google_provider = args.provider in {"google-ai-mode", "google-ai-overview"}
     settings = Settings.from_env(
         require_api_key=not args.login_only,
         # When --auto-login is explicitly set, enforce credentials even for
         # --login-only so misconfiguration fails fast. Otherwise let the env
-        # default decide.
+        # default decide. Google providers don't use ChatGPT credentials.
         require_auto_login_credentials=False
-        if args.provider == "google-ai-mode"
+        if is_google_provider
         else (auto_login_override is True) or (not args.login_only),
     )
     auto_login = auto_login_override if auto_login_override is not None else settings.auto_login
     login_email = args.login_email or settings.login_email
 
     if args.login_only:
-        if args.provider == "google-ai-mode":
+        if is_google_provider:
             LOGGER.info(
-                "--login-only is ChatGPT-specific. For Google AI Mode, run Chrome once with "
-                "--provider google-ai-mode or use GOOGLE_CHROME_USER_DATA_DIR."
+                "--login-only is ChatGPT-specific. For Google providers, run Chrome once with "
+                "--provider %s or set GOOGLE_CHROME_USER_DATA_DIR to a logged-in profile.",
+                args.provider,
             )
             return 0
         from .chatgpt_runner import ChatGPTRunner
@@ -76,7 +79,23 @@ def main(argv: list[str] | None = None) -> int:
     if not args.batch_id and not args.prompts_file:
         parser.error("one of --batch-id or --prompts-file is required unless --login-only is used")
 
-    if args.provider == "google-ai-mode":
+    if args.provider == "google-ai-overview":
+        result = run_google_ai_overview_extraction_job(
+            settings=settings,
+            batch_id=args.batch_id,
+            prompts_file=args.prompts_file,
+            brand_id=args.brand_id,
+            limit=args.limit,
+            skip=args.skip,
+            dry_run=args.dry_run,
+            headless=args.headless if args.headless is not None else settings.headless,
+            chrome_user_data_dir=args.chrome_user_data_dir,
+            force_rerun=args.force_rerun,
+            llm_model_filter=args.llm_model_filter,
+            country=args.google_country,
+            language=args.google_language,
+        )
+    elif args.provider == "google-ai-mode":
         result = run_google_ai_mode_extraction_job(
             settings=settings,
             batch_id=args.batch_id,
@@ -176,7 +195,8 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Only treat prompt outputs whose llm_model contains this value as completed. Defaults to "
-            "'gpt' for ChatGPT and 'google-ai-mode' for Google AI Mode. Use an empty string to match any model."
+            "'gpt' for ChatGPT, 'google-ai-mode' for Google AI Mode, 'google-ai-overview' for Google AI Overview. "
+            "Use an empty string to match any model."
         ),
     )
     parser.add_argument(

@@ -1,5 +1,6 @@
-.PHONY: help install install-dev login run-batch run-google-ai-mode run-google-aio dry-run \
-        lint format typecheck test test-cov security \
+.PHONY: help install install-dev login run-batch run-google-ai-mode run-google-aio \
+        run-google-ai-overview dry-run \
+        lint format format-fix typecheck test test-cov security \
         ci validate clean \
         check-prefect prefect-server prefect-serve prefect-pool prefect-deploy prefect-worker prefect-list
 
@@ -22,9 +23,10 @@ help:
 	@echo "  login           Open ChatGPT login session using the persisted Chrome profile"
 	@echo ""
 	@echo "Extraction:"
-	@echo "  run-batch       Run a batch with BATCH_ID=<uuid>"
-	@echo "  run-google-ai-mode  Run a batch through Google AI Mode with BATCH_ID=<uuid>"
-	@echo "  dry-run         Load prompts without opening ChatGPT"
+	@echo "  run-batch              Run a ChatGPT batch with BATCH_ID=<uuid>"
+	@echo "  run-google-ai-mode     Run a batch through Google AI Mode with BATCH_ID=<uuid>"
+	@echo "  run-google-ai-overview Run a batch through Google AI Overview with BATCH_ID=<uuid>"
+	@echo "  dry-run                Load prompts without opening a browser"
 	@echo ""
 	@echo "Quality (run locally — mirrors CI):"
 	@echo "  lint            Ruff lint check"
@@ -95,7 +97,11 @@ run-google-ai-mode:
 	@test -n "$(BATCH_ID)" || (echo "Set BATCH_ID=<uuid>" && exit 1)
 	$(PYTHON) -m automated_extraction --provider google-ai-mode --batch-id "$(BATCH_ID)"
 
-run-google-aio: run-google-ai-mode
+run-google-ai-overview:
+	@test -n "$(BATCH_ID)" || (echo "Set BATCH_ID=<uuid>" && exit 1)
+	$(PYTHON) -m automated_extraction --provider google-ai-overview --batch-id "$(BATCH_ID)"
+
+run-google-aio: run-google-ai-overview
 
 dry-run:
 	@test -n "$(BATCH_ID)" || (echo "Set BATCH_ID=<uuid>" && exit 1)
