@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import platform
 import random
 import re
@@ -12,17 +13,23 @@ from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import pyperclip
-from selenium.common.exceptions import ElementClickInterceptedException, JavascriptException, NoSuchElementException, SessionNotCreatedException, TimeoutException, WebDriverException
 from selenium import webdriver
-from selenium.webdriver import Chrome
-from selenium.webdriver import ActionChains
+from selenium.common.exceptions import (
+    ElementClickInterceptedException,
+    JavascriptException,
+    NoSuchElementException,
+    SessionNotCreatedException,
+    StaleElementReferenceException,
+    TimeoutException,
+    WebDriverException,
+)
+from selenium.webdriver import ActionChains, Chrome
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.remote.webelement import WebElement
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
-
 
 LOGGER = logging.getLogger(__name__)
 
@@ -120,7 +127,7 @@ class ChatGPTRunner:
         self.login_email = login_email
         self.driver: Chrome | None = None
 
-    def __enter__(self) -> "ChatGPTRunner":
+    def __enter__(self) -> ChatGPTRunner:
         self.start()
         return self
 
@@ -148,6 +155,10 @@ class ChatGPTRunner:
             options.add_argument("--headless=new")
 
         self.driver = self.create_driver(options)
+        if not self.headless:
+            vnc_screen = os.getenv("VNC_SCREEN", "1280x720x24")
+            w, h = vnc_screen.split("x")[:2]
+            self.driver.set_window_size(int(w), int(h))
         self.driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
         self.driver.get(self.chatgpt_url)
         self.recover_chrome_error_page(context="initial_chatgpt_load")
@@ -249,11 +260,23 @@ class ChatGPTRunner:
         if not response or len(response.strip()) < 20:
             raise RuntimeError("Captured response was empty or too short")
         if markdown:
-            LOGGER.info("Markdown copied from ChatGPT response. length=%s method=%s", len(markdown.strip()), markdown_capture_method)
+            LOGGER.info(
+                "Markdown copied from ChatGPT response. length=%s method=%s",
+                len(markdown.strip()),
+                markdown_capture_method,
+            )
         else:
-            LOGGER.warning("Markdown copy did not produce a valid clipboard result; markdown field will be empty. response_length=%s method=%s", len(response.strip()), markdown_capture_method)
+            LOGGER.warning(
+                "Markdown copy did not produce a valid clipboard result; markdown field will be empty. response_length=%s method=%s",
+                len(response.strip()),
+                markdown_capture_method,
+            )
         raw_html, raw_html_capture_method = self.capture_latest_response_html()
-        LOGGER.info("Raw HTML extracted from ChatGPT response. length=%s method=%s", len(raw_html or ""), raw_html_capture_method)
+        LOGGER.info(
+            "Raw HTML extracted from ChatGPT response. length=%s method=%s",
+            len(raw_html or ""),
+            raw_html_capture_method,
+        )
         llm_model = self.capture_latest_response_model_slug() or "chatgpt"
         LOGGER.info("Detected ChatGPT response model. llm_model=%s", llm_model)
         sources = self.capture_latest_sources()
@@ -392,14 +415,53 @@ class ChatGPTRunner:
         select_modifier = Keys.COMMAND if platform.system() == "Darwin" else Keys.CONTROL
         input_element.send_keys(select_modifier, "a")
         input_element.send_keys(Keys.BACKSPACE)
-        time.sleep(random.uniform(0.2, 0.5))
 
-        for char in prompt_text:
+        # Type the first word character-by-character to trigger React's input detection,
+        # then insert the remainder instantly to avoid the per-character VNC overhead.
+        words = prompt_text.split(" ", 1)
+        first_word = words[0]
+        remainder = (" " + words[1]) if len(words) > 1 else ""
+
+        for char in first_word:
             if char == "\n":
                 input_element.send_keys(Keys.SHIFT, Keys.ENTER)
             else:
                 input_element.send_keys(char)
-            time.sleep(random.uniform(0.05, 0.2))
+            time.sleep(random.uniform(0.05, 0.12))
+
+        if remainder:
+            if not self._js_insert_at_cursor(input_element, remainder):
+                LOGGER.warning("Fast JS insert failed; falling back to character-by-character for remainder.")
+                for char in remainder:
+                    if char == "\n":
+                        input_element.send_keys(Keys.SHIFT, Keys.ENTER)
+                    else:
+                        input_element.send_keys(char)
+                    time.sleep(random.uniform(0.05, 0.15))
+
+        time.sleep(0.15)
+
+    def _js_insert_at_cursor(self, input_element: WebElement, text: str) -> bool:
+        """Insert text at the current cursor position using execCommand.
+
+        execCommand('insertText') works for both contenteditable divs and textareas
+        in Chrome, fires the correct InputEvent that React picks up, and respects
+        the current cursor position so previously-typed characters are preserved.
+        """
+        try:
+            result = self.require_driver().execute_script(
+                """
+                const el = arguments[0];
+                const text = arguments[1];
+                el.focus();
+                return document.execCommand('insertText', false, text);
+                """,
+                input_element,
+                text,
+            )
+            return bool(result)
+        except (WebDriverException, JavascriptException):
+            return False
 
     def click_send(self, input_element: WebElement) -> None:
         self.dismiss_blocking_dialogs()
@@ -448,15 +510,19 @@ class ChatGPTRunner:
                     return
 
         for button in driver.find_elements(By.CSS_SELECTOR, "button"):
-            label = " ".join(
-                value.strip()
-                for value in [
-                    button.text or "",
-                    button.get_attribute("aria-label") or "",
-                    button.get_attribute("title") or "",
-                ]
-                if value and value.strip()
-            ).strip().lower()
+            label = (
+                " ".join(
+                    value.strip()
+                    for value in [
+                        button.text or "",
+                        button.get_attribute("aria-label") or "",
+                        button.get_attribute("title") or "",
+                    ]
+                    if value and value.strip()
+                )
+                .strip()
+                .lower()
+            )
             if label in DISMISS_BUTTON_TEXT and self.click_if_visible(button):
                 time.sleep(0.5)
                 return
@@ -510,7 +576,10 @@ class ChatGPTRunner:
                 return
             raise TimeoutError(f"ChatGPT stop button did not disappear. {self.collect_page_signals()}")
 
-        LOGGER.warning("ChatGPT stop button did not appear after submit. Falling back to response stability wait. %s", self.collect_page_signals())
+        LOGGER.warning(
+            "ChatGPT stop button did not appear after submit. Falling back to response stability wait. %s",
+            self.collect_page_signals(),
+        )
 
         deadline = time.time() + self.response_timeout_seconds
         last_text = ""
@@ -540,10 +609,18 @@ class ChatGPTRunner:
         return False
 
     def wait_for_stop_button_to_disappear(self, timeout: int) -> bool:
+        def all_stop_buttons_gone(driver) -> bool:
+            for selector in STOP_BUTTON_SELECTORS:
+                try:
+                    elements = driver.find_elements(By.CSS_SELECTOR, selector)
+                    if any(el.is_displayed() for el in elements):
+                        return False
+                except WebDriverException:
+                    pass
+            return True
+
         try:
-            WebDriverWait(self.require_driver(), timeout).until(
-                EC.invisibility_of_element_located((By.CSS_SELECTOR, STOP_BUTTON_SELECTOR))
-            )
+            WebDriverWait(self.require_driver(), timeout).until(all_stop_buttons_gone)
             return True
         except TimeoutException:
             return False
@@ -704,7 +781,9 @@ class ChatGPTRunner:
         self.reveal_response_actions(latest_response)
         sources_button = self.find_sources_button(parent)
         if not sources_button:
-            LOGGER.info("No Sources button found for latest ChatGPT response. %s", self.sources_button_diagnostics(parent))
+            LOGGER.info(
+                "No Sources button found for latest ChatGPT response. %s", self.sources_button_diagnostics(parent)
+            )
             return []
 
         LOGGER.info("Sources button found; opening Sources panel.")
@@ -715,7 +794,9 @@ class ChatGPTRunner:
             return []
         LOGGER.info("Sources panel opened. %s", self.sources_panel_diagnostics())
         if not self.wait_for_sources_panel_links(timeout=30):
-            LOGGER.warning("Sources panel opened but no source links were detected. %s", self.sources_panel_diagnostics())
+            LOGGER.warning(
+                "Sources panel opened but no source links were detected. %s", self.sources_panel_diagnostics()
+            )
             self.close_sources_panel()
             return []
         LOGGER.info("Sources panel links loaded. %s", self.sources_panel_diagnostics())
@@ -724,7 +805,9 @@ class ChatGPTRunner:
             self.scroll_sources_panel_to_end()
             sources = self.extract_sources_from_panel()
             if not sources:
-                LOGGER.warning("Sources panel was found, but extraction returned 0 sources. %s", self.sources_panel_diagnostics())
+                LOGGER.warning(
+                    "Sources panel was found, but extraction returned 0 sources. %s", self.sources_panel_diagnostics()
+                )
             else:
                 LOGGER.info("Sources copied from panel. count=%s", len(sources))
             return sources
@@ -734,15 +817,19 @@ class ChatGPTRunner:
     def find_sources_button(self, container: WebElement) -> WebElement | None:
         buttons = container.find_elements(By.CSS_SELECTOR, "button")
         for button in reversed(buttons):
-            label = " ".join(
-                value.strip()
-                for value in [
-                    button.get_attribute("aria-label") or "",
-                    button.text or "",
-                    button.get_attribute("title") or "",
-                ]
-                if value and value.strip()
-            ).strip().lower()
+            label = (
+                " ".join(
+                    value.strip()
+                    for value in [
+                        button.get_attribute("aria-label") or "",
+                        button.text or "",
+                        button.get_attribute("title") or "",
+                    ]
+                    if value and value.strip()
+                )
+                .strip()
+                .lower()
+            )
             if label == "sources" or label.endswith(" sources") or "sources" in label:
                 if button.is_displayed() and button.is_enabled():
                     return button
@@ -793,7 +880,12 @@ class ChatGPTRunner:
             )
             elapsed = int(timeout - max(0, deadline - time.time()))
             if count != last_count or elapsed >= last_logged_second + 5:
-                LOGGER.info("Waiting for Sources panel links. visible_link_count=%s stable_checks=%s elapsed=%ss", count, stable_checks, elapsed)
+                LOGGER.info(
+                    "Waiting for Sources panel links. visible_link_count=%s stable_checks=%s elapsed=%ss",
+                    count,
+                    stable_checks,
+                    elapsed,
+                )
                 last_logged_second = elapsed
             if count > 0 and count == last_count:
                 stable_checks += 1
@@ -907,16 +999,18 @@ class ChatGPTRunner:
 
     def close_sources_panel(self) -> None:
         driver = self.require_driver()
-        close_button = self.find_first([
-            "[data-testid='screen-threadFlyOut'][aria-label='Sources'] button[aria-label='Close']",
-            "[data-testid='stage-thread-flyout'] section[aria-label='Sources'] button[aria-label='Close']",
-            "section[aria-label='Sources'] button[aria-label='Close']",
-            "[data-testid='bar-search-sources-header'] button[aria-label='Close']",
-            "#modal-search-results button[data-testid='close-button']",
-            "[data-testid='modal-search-results'] button[aria-label='Close']",
-            "[role='dialog'] button[data-testid='close-button']",
-            "[role='dialog'] button[aria-label='Close']",
-        ])
+        close_button = self.find_first(
+            [
+                "[data-testid='screen-threadFlyOut'][aria-label='Sources'] button[aria-label='Close']",
+                "[data-testid='stage-thread-flyout'] section[aria-label='Sources'] button[aria-label='Close']",
+                "section[aria-label='Sources'] button[aria-label='Close']",
+                "[data-testid='bar-search-sources-header'] button[aria-label='Close']",
+                "#modal-search-results button[data-testid='close-button']",
+                "[data-testid='modal-search-results'] button[aria-label='Close']",
+                "[role='dialog'] button[data-testid='close-button']",
+                "[role='dialog'] button[aria-label='Close']",
+            ]
+        )
         if close_button:
             self.click_if_visible(close_button)
             time.sleep(0.5)
@@ -1081,7 +1175,11 @@ class ChatGPTRunner:
             LOGGER.info("No product select buttons found for latest ChatGPT response.")
             return []
 
-        LOGGER.info("Found %s product select button(s); opening product flyouts. %s", button_count, self.product_button_diagnostics(scope))
+        LOGGER.info(
+            "Found %s product select button(s); opening product flyouts. %s",
+            button_count,
+            self.product_button_diagnostics(scope),
+        )
         products: list[dict[str, Any]] = []
         for index in range(button_count):
             self.close_product_flyout()
@@ -1512,7 +1610,11 @@ class ChatGPTRunner:
             LOGGER.info("No entity underline elements found for latest ChatGPT response.")
             return []
 
-        LOGGER.info("Found %s entity element(s); opening entity flyouts. %s", entity_count, self.entity_button_diagnostics(scope))
+        LOGGER.info(
+            "Found %s entity element(s); opening entity flyouts. %s",
+            entity_count,
+            self.entity_button_diagnostics(scope),
+        )
         entities: list[dict[str, Any]] = []
         for index in range(entity_count):
             self.close_entity_flyout()
@@ -1852,8 +1954,14 @@ class ChatGPTRunner:
         return element.text.strip() if element else ""
 
     def latest_response_element(self) -> WebElement | None:
-        responses = self.response_elements()
-        return responses[-1] if responses else None
+        for attempt in range(3):
+            try:
+                responses = self.response_elements()
+                return responses[-1] if responses else None
+            except StaleElementReferenceException:
+                if attempt < 2:
+                    time.sleep(0.5)
+        return None
 
     def response_elements(self) -> list[WebElement]:
         return self.require_driver().find_elements(By.CSS_SELECTOR, ASSISTANT_RESPONSE_SELECTOR)
@@ -1950,7 +2058,11 @@ def normalize_words(value: str) -> list[str]:
 
 def clean_chatgpt_source_url(url: str) -> str:
     parts = urlsplit(url)
-    query = [(key, value) for key, value in parse_qsl(parts.query, keep_blank_values=True) if not (key == "utm_source" and value == "chatgpt.com")]
+    query = [
+        (key, value)
+        for key, value in parse_qsl(parts.query, keep_blank_values=True)
+        if not (key == "utm_source" and value == "chatgpt.com")
+    ]
     return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment))
 
 
@@ -1977,7 +2089,9 @@ def extract_sources_from_markdown(markdown: str) -> list[dict[str, Any]]:
             )
         )
 
-    inline_pattern = re.compile(r"""(?<!!)\[(?P<label>[^\]]+)\]\((?P<url>https?://[^)\s]+)(?:\s+(?P<title>"[^"]*"|'[^']*'))?\)""")
+    inline_pattern = re.compile(
+        r"""(?<!!)\[(?P<label>[^\]]+)\]\((?P<url>https?://[^)\s]+)(?:\s+(?P<title>"[^"]*"|'[^']*'))?\)"""
+    )
     for match in inline_pattern.finditer(markdown or ""):
         raw_url = match.group("url").strip()
         if not is_external_url(raw_url) or raw_url in seen_urls:

@@ -9,22 +9,42 @@ from pathlib import Path
 
 from prefect.types.entrypoint import EntrypointType
 
-
 logging.basicConfig(level=logging.INFO)
 LOGGER = logging.getLogger(__name__)
 
 WORK_POOL_NAME = os.getenv("PREFECT_WORK_POOL", "prompt-extraction-pool")
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+# On the Fly.io worker the app lives at /app; PREFECT_WORKING_DIR is set in
+# the machine env. When registering from a local machine against the remote
+# API, pass PREFECT_WORKING_DIR=/app explicitly so the worker finds the code.
+WORK_DIR = os.getenv("PREFECT_WORKING_DIR") or str(PROJECT_ROOT)
 
 
 def get_flows():
     from automated_extraction.workflows.flows import (
         google_ai_mode_extraction_flow,
+        prompt_extraction_batch_flow,
         prompt_extraction_flow,
         prompt_output_processing_flow,
     )
 
     return {
+        "prompt-extraction-batch": {
+            "flow": prompt_extraction_batch_flow,
+            "tags": ["chatgpt", "extraction", "browser", "batch"],
+            "description": "Sequentially run prompt-extraction in chunks until remaining prompts for a batch are covered.",
+            "parameters": {
+                "batch_id": None,
+                "model_filter": "gpt",
+                "limit": 10,
+                "skip": 0,
+                "auto_login": False,
+                "login_email": None,
+                "capture_products": False,
+                "capture_entities": False,
+                "delay_seconds": 120,
+            },
+        },
         "prompt-extraction": {
             "flow": prompt_extraction_flow,
             "tags": ["chatgpt", "extraction", "browser"],
@@ -43,6 +63,8 @@ def get_flows():
                 "llm_model_filter": "gpt",
                 "auto_login": False,
                 "login_email": None,
+                "capture_products": False,
+                "capture_entities": False,
             },
         },
         "prompt-output-processing": {
@@ -105,9 +127,9 @@ async def deploy_with_local_storage() -> None:
                 name=name,
                 work_pool_name=WORK_POOL_NAME,
                 job_variables={
-                    "working_dir": str(PROJECT_ROOT),
+                    "working_dir": WORK_DIR,
                     "env": {
-                        "PYTHONPATH": str(PROJECT_ROOT),
+                        "PYTHONPATH": WORK_DIR,
                     },
                 },
                 tags=config["tags"],

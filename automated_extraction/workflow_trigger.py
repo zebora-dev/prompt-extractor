@@ -9,7 +9,6 @@ import requests
 
 from .config import Settings
 
-
 LOGGER = logging.getLogger(__name__)
 
 
@@ -67,7 +66,9 @@ def trigger_score_workflows(
                 max_retries=max_retries,
             )
             triggered_count += 1
-            LOGGER.info("Triggered score workflow. batch_id=%s output_id=%s force=%s", batch_id, parsed_output_id, force)
+            LOGGER.info(
+                "Triggered score workflow. batch_id=%s output_id=%s force=%s", batch_id, parsed_output_id, force
+            )
         except Exception as exc:
             failed_count += 1
             failure = {"batch_id": batch_id, "output_id": output_id, "prompt_id": prompt_id, "error": str(exc)}

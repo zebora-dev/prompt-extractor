@@ -18,7 +18,8 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any, Mapping
+from collections.abc import Mapping
+from typing import Any
 
 from selenium.common.exceptions import TimeoutException, WebDriverException
 from selenium.webdriver.common.by import By
@@ -28,12 +29,9 @@ from selenium.webdriver.support.ui import WebDriverWait
 
 from .login_method import LOGIN_BUTTON_SELECTOR, ElementInteractor, LoginMethod
 
-
 LOGGER = logging.getLogger(__name__)
 
-CHAT_INPUT_READY_SELECTOR = (
-    "textarea[id='prompt-textarea'], div[id='prompt-textarea'][contenteditable='true']"
-)
+CHAT_INPUT_READY_SELECTOR = "textarea[id='prompt-textarea'], div[id='prompt-textarea'][contenteditable='true']"
 
 
 class AutomatedLoginError(RuntimeError):
@@ -46,27 +44,40 @@ def perform_automated_login(
     accounts: Mapping[str, dict[str, Any]],
     email: str,
     login_wait_seconds: int = 180,
+    pre_login_pause_seconds: int = 0,
 ) -> bool:
     """Run the automated login flow for `email`.
 
     Returns True on success. Raises `AutomatedLoginError` on misconfiguration
     or when the chosen login method reports failure.
     """
+    import os
+
+    machine_id = os.getenv("FLY_MACHINE_ID", "local")
+    LOGGER.info(
+        "AUTO-LOGIN starting on machine=%s for email=%s — "
+        "connect VNC now at https://prompt-extractor-us.fly.dev/vnc.html "
+        "(set cookie fly_instance_id=%s)",
+        machine_id,
+        email,
+        machine_id,
+    )
+    if pre_login_pause_seconds > 0:
+        LOGGER.info("Pausing %ds before login to allow VNC connection", pre_login_pause_seconds)
+        time.sleep(pre_login_pause_seconds)
+
     if not accounts:
         raise AutomatedLoginError(
             "Automated login requested but no accounts are configured. "
             "Set CHATGPT_ACCOUNTS_B64 to a base64-encoded JSON map of accounts."
         )
     if not email:
-        raise AutomatedLoginError(
-            "Automated login requested but CHATGPT_LOGIN_EMAIL is not set."
-        )
+        raise AutomatedLoginError("Automated login requested but CHATGPT_LOGIN_EMAIL is not set.")
 
     account = accounts.get(email)
     if not account:
         raise AutomatedLoginError(
-            f"Account {email!r} not found in CHATGPT_ACCOUNTS_B64. "
-            f"Available emails: {sorted(accounts.keys())}"
+            f"Account {email!r} not found in CHATGPT_ACCOUNTS_B64. Available emails: {sorted(accounts.keys())}"
         )
 
     if _chat_input_present(driver):
@@ -84,9 +95,7 @@ def perform_automated_login(
     try:
         success = method.login(email, account)
     except WebDriverException as error:
-        raise AutomatedLoginError(
-            f"Selenium error during {method_cls.__name__} for {email}: {error}"
-        ) from error
+        raise AutomatedLoginError(f"Selenium error during {method_cls.__name__} for {email}: {error}") from error
 
     if not success:
         raise AutomatedLoginError(
@@ -128,9 +137,7 @@ def _wait_for_chat_input(driver: WebDriver, timeout: int) -> bool:
     deadline = time.time() + max(1, timeout)
     while time.time() < deadline:
         try:
-            WebDriverWait(driver, 5).until(
-                EC.presence_of_element_located((By.CSS_SELECTOR, CHAT_INPUT_READY_SELECTOR))
-            )
+            WebDriverWait(driver, 5).until(EC.presence_of_element_located((By.CSS_SELECTOR, CHAT_INPUT_READY_SELECTOR)))
             if _chat_input_present(driver):
                 return True
         except TimeoutException:

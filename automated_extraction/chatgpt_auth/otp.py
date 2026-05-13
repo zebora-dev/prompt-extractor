@@ -7,13 +7,13 @@ to emit time-based 2FA codes when an account has a `secret` configured.
 
 from __future__ import annotations
 
-from enum import Enum
+from enum import StrEnum
 from urllib.parse import parse_qs, unquote, urlencode, urlparse
 
 import pyotp
 
 
-class Providers(str, Enum):
+class Providers(StrEnum):
     GOOGLE = "google"
     CHATGPT = "chatgpt"
 

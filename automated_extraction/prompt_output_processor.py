@@ -4,14 +4,13 @@ import html
 import logging
 import re
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from html.parser import HTMLParser
 from typing import Any
 from urllib.parse import unquote
 
 from .api_client import ApiClient
 from .config import Settings
-
 
 LOGGER = logging.getLogger(__name__)
 
@@ -122,7 +121,9 @@ def process_prompt_outputs(
         except Exception as exc:
             failed_count += 1
             failures.append({"output_id": output_id, "prompt_id": prompt_id, "error": str(exc)})
-            LOGGER.exception("Prompt output processing failed. output_id=%s prompt_id=%s: %s", output_id, prompt_id, exc)
+            LOGGER.exception(
+                "Prompt output processing failed. output_id=%s prompt_id=%s: %s", output_id, prompt_id, exc
+            )
 
     status = "completed" if failed_count == 0 else "completed_with_failures"
     return PromptOutputProcessResult(status, processed_count, updated_count, skipped_count, failed_count, failures)
@@ -235,7 +236,9 @@ def build_processed_output_patch(output: dict[str, Any]) -> dict[str, Any] | Non
     response_text = str(output.get("response") or "")
     original_markdown = captured_markdown or response_text
     if not raw_html.strip():
-        LOGGER.info("Prompt output comparison skipped: missing raw_html. output_id=%s prompt_id=%s", output_id, prompt_id)
+        LOGGER.info(
+            "Prompt output comparison skipped: missing raw_html. output_id=%s prompt_id=%s", output_id, prompt_id
+        )
         return None
     if not original_markdown.strip():
         LOGGER.info(
@@ -247,7 +250,9 @@ def build_processed_output_patch(output: dict[str, Any]) -> dict[str, Any] | Non
         return None
 
     raw_html_markdown = html_to_markdown(raw_html)
-    original_was_suspicious = bool(captured_markdown) and looks_like_source_list_capture(captured_markdown, raw_html_markdown)
+    original_was_suspicious = bool(captured_markdown) and looks_like_source_list_capture(
+        captured_markdown, raw_html_markdown
+    )
     if original_was_suspicious:
         LOGGER.warning(
             "Original markdown looks like a source-list miscapture; using raw_html markdown as the enrichment base. output_id=%s prompt_id=%s original_preview=%r",
@@ -280,7 +285,7 @@ def build_processed_output_patch(output: dict[str, Any]) -> dict[str, Any] | Non
         )
     metadata = output.get("output_metadata") if isinstance(output.get("output_metadata"), dict) else {}
     original_metadata = metadata.get("original_metadata") if isinstance(metadata.get("original_metadata"), dict) else {}
-    processed_at = datetime.now(timezone.utc).isoformat()
+    processed_at = datetime.now(UTC).isoformat()
 
     updated_metadata = {
         **metadata,
@@ -299,9 +304,7 @@ def build_processed_output_patch(output: dict[str, Any]) -> dict[str, Any] | Non
     }
 
     if not changed:
-        if (
-            original_metadata.get("prompt_output_process_status") == "processed"
-        ):
+        if original_metadata.get("prompt_output_process_status") == "processed":
             LOGGER.info(
                 "Prompt output already marked processed and has no markdown changes. output_id=%s prompt_id=%s",
                 output_id,
@@ -343,9 +346,7 @@ def enrich_markdown(original_markdown: str, raw_html_markdown: str) -> tuple[str
         enrichments.extend(f"image:{image_url(line)}" for line in missing_images if image_url(line))
 
     missing_links = [
-        line
-        for line in extract_markdown_links(raw_html_markdown)
-        if link_url(line) and link_url(line) not in enriched
+        line for line in extract_markdown_links(raw_html_markdown) if link_url(line) and link_url(line) not in enriched
     ]
     if missing_links:
         enriched += "\n\n## Additional Links\n\n" + "\n".join(f"- {line}" for line in missing_links)
@@ -353,7 +354,9 @@ def enrich_markdown(original_markdown: str, raw_html_markdown: str) -> tuple[str
 
     missing_rendered_blocks = extract_missing_rendered_blocks(raw_html_markdown, enriched)
     if missing_rendered_blocks:
-        enriched += "\n\n## Additional Rendered Content\n\n" + "\n".join(f"- {line}" for line in missing_rendered_blocks)
+        enriched += "\n\n## Additional Rendered Content\n\n" + "\n".join(
+            f"- {line}" for line in missing_rendered_blocks
+        )
         enrichments.extend(f"rendered:{line[:160]}" for line in missing_rendered_blocks)
 
     return enriched + ("\n" if enriched else ""), enrichments
@@ -770,7 +773,9 @@ def looks_like_rendered_product_detail(text: str) -> bool:
     if not text:
         return False
     has_price = bool(re.search(r"[$£€]\s?\d", text))
-    has_vendor = any(marker in text.lower() for marker in ("seller", "partner", "amazon", "john lewis", "smyths", "argos", "others"))
+    has_vendor = any(
+        marker in text.lower() for marker in ("seller", "partner", "amazon", "john lewis", "smyths", "argos", "others")
+    )
     return has_price or (has_vendor and "•" in text)
 
 

@@ -19,7 +19,6 @@ from selenium.webdriver.common.by import By
 from .login_method import LoginMethod
 from .otp import Providers, generate_otp
 
-
 LOGGER = logging.getLogger(__name__)
 
 GOOGLE_LOGIN_BUTTON_XPATH = (
@@ -35,21 +34,15 @@ NEXT_BUTTON_XPATH = (
     "[.//span[contains(normalize-space(.), 'Next')] or contains(normalize-space(.), 'Next')]"
 )
 USE_ANOTHER_ACCOUNT_XPATH = (
-    "//*[self::div or self::li or self::button or @role='button']"
-    "[contains(normalize-space(.), 'Use another account')]"
+    "//*[self::div or self::li or self::button or @role='button'][contains(normalize-space(.), 'Use another account')]"
 )
-TRY_ANOTHER_WAY_LINK_XPATH = (
-    "//*[self::button or @role='button']"
-    "[contains(normalize-space(.), 'Try another way')]"
-)
+TRY_ANOTHER_WAY_LINK_XPATH = "//*[self::button or @role='button'][contains(normalize-space(.), 'Try another way')]"
 SELECT_AUTHENTICATOR_APP_XPATH = (
     "//*[self::li or self::div or @role='link' or @role='button']"
     "[contains(normalize-space(.), 'Google Authenticator')"
     " or contains(normalize-space(.), 'Authenticator')]"
 )
-CODE_TOKEN_INPUT_XPATH = (
-    "//input[@id='totpPin' or @name='totpPin' or @type='tel' or @autocomplete='one-time-code']"
-)
+CODE_TOKEN_INPUT_XPATH = "//input[@id='totpPin' or @name='totpPin' or @type='tel' or @autocomplete='one-time-code']"
 
 # ChatGPT may impose a secondary 2FA prompt of its own after Google SSO
 # completes; this is independent of the Google Authenticator step above.
@@ -146,9 +139,7 @@ class GoogleLogin(LoginMethod):
         if self.find_element(By.XPATH, VERIFY_YOUR_IDENTITY_XPATH):
             chatgpt_otp = self.otp_auth.get(Providers.CHATGPT.value)
             if not chatgpt_otp:
-                LOGGER.error(
-                    "GoogleLogin: ChatGPT secondary 2FA screen present but no chatgpt secret configured"
-                )
+                LOGGER.error("GoogleLogin: ChatGPT secondary 2FA screen present but no chatgpt secret configured")
                 return False
             LOGGER.info("GoogleLogin: submitting secondary ChatGPT 2FA code")
             chatgpt_token = generate_otp(chatgpt_otp.get_secret())
@@ -169,4 +160,4 @@ def xpath_literal(value: str) -> str:
         return f"'{value}'"
     if '"' not in value:
         return f'"{value}"'
-    return "concat(" + ", \"'\", ".join(f"'{part}'" for part in value.split("'")) + ")"
+    return "concat(" + ', "\'", '.join(f"'{part}'" for part in value.split("'")) + ")"

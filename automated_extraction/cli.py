@@ -11,7 +11,6 @@ from .extraction import run_extraction_job, run_google_ai_mode_extraction_job
 from .product_output_processor import process_product_outputs
 from .workflow_trigger import trigger_score_workflows
 
-
 LOGGER = logging.getLogger(__name__)
 
 
@@ -109,6 +108,8 @@ def main(argv: list[str] | None = None) -> int:
             llm_model_filter=args.llm_model_filter,
             auto_login=auto_login,
             login_email=login_email,
+            capture_products=args.capture_products,
+            capture_entities=args.capture_entities,
         )
     payload = asdict(result)
     product_output_refs = payload.pop("product_outputs", []) or []
@@ -121,7 +122,9 @@ def main(argv: list[str] | None = None) -> int:
         entity_processing_result = process_entity_outputs(settings=settings, entity_output_refs=entity_output_refs)
     score_workflow_result = None
     if not args.dry_run and payload.get("saved_outputs"):
-        score_workflow_result = trigger_score_workflows(settings=settings, saved_outputs=payload.get("saved_outputs") or [])
+        score_workflow_result = trigger_score_workflows(
+            settings=settings, saved_outputs=payload.get("saved_outputs") or []
+        )
 
     payload["product_output_processing"] = asdict(product_processing_result) if product_processing_result else None
     payload["entity_output_processing"] = asdict(entity_processing_result) if entity_processing_result else None
@@ -151,13 +154,23 @@ def build_parser() -> argparse.ArgumentParser:
     )
     source = parser.add_mutually_exclusive_group()
     source.add_argument("--batch-id", help="BrandSight batch UUID to load prompts from.")
-    source.add_argument("--prompts-file", type=Path, help="Local prompts JSON file, e.g. chromeApp/extension-shared/prompts.json.")
-    parser.add_argument("--login-only", action="store_true", help="Open ChatGPT and wait for login using the persistent Chrome profile.")
+    source.add_argument(
+        "--prompts-file", type=Path, help="Local prompts JSON file, e.g. chromeApp/extension-shared/prompts.json."
+    )
+    parser.add_argument(
+        "--login-only", action="store_true", help="Open ChatGPT and wait for login using the persistent Chrome profile."
+    )
     parser.add_argument("--brand-id", help="Brand UUID override for local prompts.")
     parser.add_argument("--limit", type=int, help="Maximum prompts to run.")
     parser.add_argument("--skip", type=int, default=0, help="Number of loaded prompts to skip.")
-    parser.add_argument("--dry-run", action="store_true", help="Load prompts and print a preview without opening ChatGPT.")
-    parser.add_argument("--force-rerun", action="store_true", help="Run prompts even when an output already exists for the same batch, brand, and prompt.")
+    parser.add_argument(
+        "--dry-run", action="store_true", help="Load prompts and print a preview without opening ChatGPT."
+    )
+    parser.add_argument(
+        "--force-rerun",
+        action="store_true",
+        help="Run prompts even when an output already exists for the same batch, brand, and prompt.",
+    )
     parser.add_argument(
         "--llm-model-filter",
         default=None,
@@ -166,7 +179,9 @@ def build_parser() -> argparse.ArgumentParser:
             "'gpt' for ChatGPT and 'google-ai-mode' for Google AI Mode. Use an empty string to match any model."
         ),
     )
-    parser.add_argument("--headless", action=argparse.BooleanOptionalAction, default=None, help="Override CHATGPT_HEADLESS.")
+    parser.add_argument(
+        "--headless", action=argparse.BooleanOptionalAction, default=None, help="Override CHATGPT_HEADLESS."
+    )
     parser.add_argument("--chrome-user-data-dir", help="Chrome profile directory to reuse for ChatGPT login.")
     parser.add_argument(
         "--auto-login",
@@ -186,6 +201,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--google-country", help="Google Search country code override, e.g. US or GB.")
     parser.add_argument("--google-language", help="Google Search language code override, e.g. en.")
+    parser.add_argument(
+        "--capture-products",
+        action="store_true",
+        default=False,
+        help="Enable product flyout capture after each response. Disabled by default.",
+    )
+    parser.add_argument(
+        "--capture-entities",
+        action="store_true",
+        default=False,
+        help="Enable entity flyout capture after each response. Disabled by default.",
+    )
     parser.add_argument("--verbose", action="store_true", help="Enable debug logging.")
     return parser
 

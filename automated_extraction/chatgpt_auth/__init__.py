@@ -14,7 +14,6 @@ from __future__ import annotations
 
 from .accounts import AccountsDeserializer
 
-
 __all__ = [
     "AccountsDeserializer",
     "AutomatedLoginError",

@@ -24,13 +24,13 @@ from selenium.common.exceptions import (
 )
 from selenium.webdriver import ActionChains
 from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.remote.webdriver import WebDriver
 from selenium.webdriver.remote.webelement import WebElement
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 
 from .otp import OTPAuth, Providers
-
 
 LOGGER = logging.getLogger(__name__)
 
@@ -88,17 +88,50 @@ class ElementInteractor:
         return " ".join((text or "").split())[:limit]
 
     def type_text(self, element: WebElement, text: str) -> bool:
+        # Scroll into view before interacting — important on VNC where the element
+        # may be off-screen and click/focus silently no-ops.
+        try:
+            self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", element)
+            time.sleep(0.2)
+        except WebDriverException:
+            pass
+
         try:
             element.click()
+            time.sleep(0.3)
         except (ElementClickInterceptedException, WebDriverException):
             try:
                 self.driver.execute_script("arguments[0].focus();", element)
+                time.sleep(0.3)
             except WebDriverException:
                 return False
+
+        # Clear with keyboard (Ctrl+A → Delete) so Angular/React change detection
+        # fires correctly. element.clear() bypasses the browser's input event pipeline
+        # and leaves Google's form in a broken state where Next stays disabled.
         try:
-            element.clear()
-        except (StaleElementReferenceException, WebDriverException):
+            element.send_keys(Keys.CONTROL + "a")
+            element.send_keys(Keys.DELETE)
+        except WebDriverException:
+            try:
+                element.clear()
+            except (StaleElementReferenceException, WebDriverException):
+                pass
+
+        # Prefer execCommand('insertText') — fires a native InputEvent that Angular
+        # picks up, and avoids one send_keys round-trip per character over VNC.
+        try:
+            inserted = self.driver.execute_script(
+                "arguments[0].focus(); return document.execCommand('insertText', false, arguments[1]);",
+                element,
+                text,
+            )
+            if inserted:
+                return True
+        except WebDriverException:
             pass
+
+        # Fallback: character-by-character.
         for char in text:
             try:
                 element.send_keys(char)
@@ -133,7 +166,9 @@ class ElementInteractor:
         text: str | None = None,
         timeout: int | None = None,
     ) -> bool:
-        element = self.wait_for_clickable(by, selector, timeout=timeout) or self.wait_for_element(by, selector, timeout=timeout)
+        element = self.wait_for_clickable(by, selector, timeout=timeout) or self.wait_for_element(
+            by, selector, timeout=timeout
+        )
         if not element:
             LOGGER.error("Element not found: by=%s selector=%s", by, selector)
             return False
@@ -163,7 +198,7 @@ class LoginMethod(ABC):
         raise NotImplementedError
 
     @staticmethod
-    def derive_login_provider(account: dict[str, Any]) -> type["LoginMethod"]:
+    def derive_login_provider(account: dict[str, Any]) -> type[LoginMethod]:
         # Late imports avoid the circular import via `chatgpt_auth.__init__`.
         from .basic_login import BasicLogin
         from .google_login import GoogleLogin
@@ -247,5 +282,7 @@ class LoginMethod(ABC):
     def enter_password(self, password: str, input_selector: str, button_selector: str, use_xpath: bool = False) -> bool:
         return self._enter_and_click(password, input_selector, button_selector, use_xpath)
 
-    def enter_2fa_token(self, token: str, code_input_selector: str, button_selector: str, use_xpath: bool = False) -> bool:
+    def enter_2fa_token(
+        self, token: str, code_input_selector: str, button_selector: str, use_xpath: bool = False
+    ) -> bool:
         return self._enter_and_click(token, code_input_selector, button_selector, use_xpath)

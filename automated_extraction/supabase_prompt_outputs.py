@@ -6,7 +6,6 @@ from typing import Any
 
 from supabase import Client, create_client
 
-
 LOGGER = logging.getLogger(__name__)
 
 
@@ -184,7 +183,11 @@ class SupabasePromptOutputRepository:
             .limit(max(1, limit))
             .execute()
         )
-        prompts = [row_to_prompt(row, batch_id=batch_id, brand_id=brand_id) for row in response.data or [] if isinstance(row, dict)]
+        prompts = [
+            row_to_prompt(row, batch_id=batch_id, brand_id=brand_id)
+            for row in response.data or []
+            if isinstance(row, dict)
+        ]
         if not only_remaining:
             LOGGER.info("Loaded %s active prompt(s) for brand_id=%s without remaining filter.", len(prompts), brand_id)
             return prompts
@@ -212,12 +215,15 @@ class SupabasePromptOutputRepository:
             .select("prompt_id")
             .eq("batch_id", batch_id)
             .eq("brand_id", brand_id)
+            .eq("active", True)
         )
         if llm_model_filter:
             query = query.ilike("llm_model", f"%{llm_model_filter}%")
 
         response = query.execute()
-        return {str(row.get("prompt_id")) for row in response.data or [] if isinstance(row, dict) and row.get("prompt_id")}
+        return {
+            str(row.get("prompt_id")) for row in response.data or [] if isinstance(row, dict) and row.get("prompt_id")
+        }
 
     def prompt_output_exists(
         self,
@@ -227,7 +233,10 @@ class SupabasePromptOutputRepository:
         *,
         llm_model_filter: str | None = "gpt",
     ) -> bool:
-        return self.find_existing_prompt_output(prompt_id, brand_id, batch_id, llm_model_filter=llm_model_filter) is not None
+        return (
+            self.find_existing_prompt_output(prompt_id, brand_id, batch_id, llm_model_filter=llm_model_filter)
+            is not None
+        )
 
     def find_existing_prompt_output(
         self,
@@ -246,6 +255,7 @@ class SupabasePromptOutputRepository:
             .eq("prompt_id", prompt_id)
             .eq("brand_id", brand_id)
             .eq("batch_id", batch_id)
+            .eq("active", True)
         )
         if llm_model_filter:
             query = query.ilike("llm_model", f"%{llm_model_filter}%")
@@ -257,7 +267,9 @@ class SupabasePromptOutputRepository:
 
     def save_prompt_output(self, output: dict[str, Any]) -> dict[str, Any] | None:
         row = output_to_row(output, include_id=False)
-        LOGGER.info("Saving prompt output directly to Supabase. table=%s prompt_id=%s", self.table_name, row.get("prompt_id"))
+        LOGGER.info(
+            "Saving prompt output directly to Supabase. table=%s prompt_id=%s", self.table_name, row.get("prompt_id")
+        )
         response = self.client.table(self.table_name).insert(row).execute()
         if not response.data:
             return None
@@ -269,7 +281,11 @@ class SupabasePromptOutputRepository:
         if not rows:
             return []
 
-        LOGGER.info("Saving prompt output product rows directly to Supabase. table=%s count=%s", self.product_table_name, len(rows))
+        LOGGER.info(
+            "Saving prompt output product rows directly to Supabase. table=%s count=%s",
+            self.product_table_name,
+            len(rows),
+        )
         response = self.client.table(self.product_table_name).insert(rows).execute()
         return [row_to_product(row) for row in response.data or [] if isinstance(row, dict)]
 
@@ -279,7 +295,11 @@ class SupabasePromptOutputRepository:
         if not rows:
             return []
 
-        LOGGER.info("Saving prompt output entity rows directly to Supabase. table=%s count=%s", self.entity_table_name, len(rows))
+        LOGGER.info(
+            "Saving prompt output entity rows directly to Supabase. table=%s count=%s",
+            self.entity_table_name,
+            len(rows),
+        )
         response = self.client.table(self.entity_table_name).insert(rows).execute()
         return [row_to_entity(row) for row in response.data or [] if isinstance(row, dict)]
 
@@ -486,7 +506,9 @@ def row_to_output(row: dict[str, Any]) -> PromptOutputDict:
     )
     payload = asdict(typed_row)
     payload["output_id"] = typed_row.id
-    payload["output_metadata"] = typed_row.metadata if isinstance(typed_row.metadata, dict) else typed_row.metadata or {}
+    payload["output_metadata"] = (
+        typed_row.metadata if isinstance(typed_row.metadata, dict) else typed_row.metadata or {}
+    )
     return payload
 
 

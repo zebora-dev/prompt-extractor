@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -11,7 +12,6 @@ from .api_client import ApiClient
 from .chatgpt_runner import ChatGPTRunner
 from .config import Settings
 from .google_ai_mode_runner import GoogleAIModeRunner
-
 
 LOGGER = logging.getLogger(__name__)
 
@@ -48,6 +48,8 @@ def run_extraction_job(
     llm_model_filter: str | None = "gpt",
     auto_login: bool | None = None,
     login_email: str | None = None,
+    capture_products: bool = False,
+    capture_entities: bool = False,
 ) -> ExtractionRunResult:
     if not batch_id and not prompts_file:
         raise ValueError("one of batch_id or prompts_file is required")
@@ -199,6 +201,29 @@ def run_extraction_job(
                     len(capture.sources or []),
                     capture.source_capture_method,
                 )
+                # Re-check immediately before saving — another worker may have saved
+                # this prompt while Chrome was running it.
+                concurrent_output = (
+                    None
+                    if force_rerun
+                    else api.find_existing_prompt_output(
+                        prompt_id,
+                        prompt_brand_id,
+                        resolved_batch_id,
+                        llm_model_filter=llm_model_filter,
+                    )
+                )
+                if concurrent_output:
+                    skipped_count += 1
+                    LOGGER.warning(
+                        "[%s/%s] Concurrent worker already saved prompt %s — discarding our result. output_id=%s",
+                        index,
+                        len(prompts),
+                        prompt_id,
+                        concurrent_output.get("output_id") or concurrent_output.get("id"),
+                    )
+                    continue
+
                 saved = api.save_prompt_output(output)
                 saved_count += 1
                 saved_output = normalize_saved_output(saved, output)
@@ -213,14 +238,19 @@ def run_extraction_job(
                     saved or "ok",
                 )
 
-                products = runner.capture_product_flyouts()
-                product_capture_method = "product_flyouts" if products else "none"
+                products = []
+                if capture_products:
+                    products = runner.capture_product_flyouts()
+                product_capture_method = (
+                    "product_flyouts" if products else ("skipped" if not capture_products else "none")
+                )
                 LOGGER.info(
-                    "[%s/%s] Captured %s product flyout(s) for prompt %s using %s",
+                    "[%s/%s] Product capture for prompt %s: enabled=%s count=%s method=%s",
                     index,
                     len(prompts),
-                    len(products),
                     prompt_id,
+                    capture_products,
+                    len(products),
                     product_capture_method,
                 )
                 if products:
@@ -231,14 +261,19 @@ def run_extraction_job(
                         }
                     )
 
-                entities = runner.capture_entity_flyouts()
-                entity_capture_method = "entity_flyouts" if entities else "none"
+                entities = []
+                if capture_entities:
+                    entities = runner.capture_entity_flyouts()
+                entity_capture_method = (
+                    "entity_flyouts" if entities else ("skipped" if not capture_entities else "none")
+                )
                 LOGGER.info(
-                    "[%s/%s] Captured %s entity flyout(s) for prompt %s using %s",
+                    "[%s/%s] Entity capture for prompt %s: enabled=%s count=%s method=%s",
                     index,
                     len(prompts),
-                    len(entities),
                     prompt_id,
+                    capture_entities,
+                    len(entities),
                     entity_capture_method,
                 )
                 if entities:
@@ -581,7 +616,7 @@ def build_prompt_output(
     entities: list[dict[str, Any]] | None = None,
     entity_capture_method: str = "none",
 ) -> dict[str, Any]:
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     return {
         "prompt_id": prompt.get("id"),
         "brand_id": prompt.get("brand_id"),
@@ -599,7 +634,9 @@ def build_prompt_output(
         },
         "output_metadata": {
             "brand_name": (prompt.get("brand") or {}).get("name") if isinstance(prompt.get("brand"), dict) else None,
-            "brand_description": (prompt.get("brand") or {}).get("description") if isinstance(prompt.get("brand"), dict) else None,
+            "brand_description": (prompt.get("brand") or {}).get("description")
+            if isinstance(prompt.get("brand"), dict)
+            else None,
             "llm_model": llm_model or "chatgpt",
             "approved": prompt.get("approved"),
             "active": prompt.get("active"),
@@ -632,12 +669,10 @@ def build_prompt_output(
             },
             "site_used": "OpenAI",
             "timestamp": now,
-        },
-        "version_info": {
             "app_type": "automated_extraction",
             "app_version": "1.0.0",
-            "extension_version": None,
             "prompt_source": "batch" if batch_id else "local",
+            "worker_name": os.getenv("FLY_MACHINE_ID") or os.getenv("FLY_APP_NAME"),
         },
     }
 
