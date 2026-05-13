@@ -1,0 +1,646 @@
+from __future__ import annotations
+
+import logging
+import sys
+import time
+from dataclasses import dataclass
+from typing import Any
+from urllib.parse import quote_plus, urlsplit
+
+from selenium import webdriver
+from selenium.common.exceptions import SessionNotCreatedException, WebDriverException
+from selenium.webdriver import ActionChains, Chrome
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.by import By
+
+from .chatgpt_runner import detect_chrome_major_version, first_line
+from .google_ai_mode_runner import (
+    clean_google_url,
+    clean_markdown,
+    clean_text,
+    has_meaningful_content,
+    normalize_sources,
+)
+
+LOGGER = logging.getLogger(__name__)
+
+BLOCKING_URL_PATTERNS = [
+    "google.com/sorry",
+    "recaptcha",
+    "captcha",
+]
+BLOCKING_TEXT_PATTERNS = [
+    "unusual traffic",
+    "our systems have detected",
+    "verify you are human",
+    "captcha",
+]
+
+SHOW_MORE_SELECTORS = [
+    ".niO4u.VDgVie.SlP8xc",
+    "[aria-label='Show more']",
+    "div.VDgVie span",
+]
+
+
+@dataclass
+class GoogleAIOverviewCapture:
+    response: str
+    markdown: str
+    capture_method: str
+    markdown_capture_method: str
+    raw_html: str
+    raw_html_capture_method: str
+    llm_model: str
+    url: str
+    sources: list[dict[str, Any]]
+    source_capture_method: str
+    ai_overview_triggered: bool
+    capture_state: str
+    error: str | None = None
+
+
+class GoogleAIOverviewRunner:
+    def __init__(
+        self,
+        google_url: str = "https://www.google.com/search",
+        *,
+        headless: bool = False,
+        chrome_user_data_dir: str | None = None,
+        response_timeout_seconds: int = 90,
+        country: str | None = None,
+        language: str = "en",
+    ) -> None:
+        self.google_url = google_url
+        self.headless = headless
+        self.chrome_user_data_dir = chrome_user_data_dir
+        self.response_timeout_seconds = response_timeout_seconds
+        self.country = country
+        self.language = language
+        self.driver: Chrome | None = None
+
+    def __enter__(self) -> GoogleAIOverviewRunner:
+        self.start()
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.close()
+
+    def start(self) -> None:
+        options = Options()
+        options.add_argument("--no-sandbox")
+        options.add_argument("--disable-dev-shm-usage")
+        options.add_argument("--disable-blink-features=AutomationControlled")
+        options.add_argument("--disable-extensions")
+        if self.chrome_user_data_dir:
+            options.add_argument(f"--user-data-dir={self.chrome_user_data_dir}")
+        if self.headless:
+            options.add_argument("--headless=new")
+
+        self.driver = self.create_driver(options)
+        self.driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+
+    def create_driver(self, options: Options) -> Chrome:
+        try:
+            uc = self._import_uc()
+            uc_options = uc.ChromeOptions()
+            for argument in options.arguments:
+                if argument.startswith("--user-data-dir="):
+                    continue
+                uc_options.add_argument(argument)
+            kwargs: dict[str, Any] = {}
+            if self.chrome_user_data_dir:
+                kwargs["user_data_dir"] = self.chrome_user_data_dir
+            chrome_major = detect_chrome_major_version()
+            if chrome_major:
+                kwargs["version_main"] = chrome_major
+            LOGGER.info("Using undetected-chromedriver for Google AI Overview capture.")
+            return uc.Chrome(options=uc_options, **kwargs)
+        except (ImportError, ModuleNotFoundError) as error:
+            LOGGER.warning("undetected-chromedriver unavailable (%s). Falling back to Selenium Chrome.", error)
+            return webdriver.Chrome(options=options)
+        except SessionNotCreatedException as error:
+            LOGGER.warning(
+                "undetected-chromedriver session failed (%s). Falling back to Selenium Chrome.",
+                first_line(str(error)),
+            )
+            return webdriver.Chrome(options=options)
+
+    def _import_uc(self):
+        try:
+            import undetected_chromedriver as uc
+
+            return uc
+        except ModuleNotFoundError as error:
+            if error.name != "distutils":
+                raise
+            try:
+                import setuptools._distutils as distutils_module
+                import setuptools._distutils.version as distutils_version_module
+            except ModuleNotFoundError:
+                raise error
+            sys.modules.setdefault("distutils", distutils_module)
+            sys.modules.setdefault("distutils.version", distutils_version_module)
+            import undetected_chromedriver as uc
+
+            return uc
+
+    def close(self) -> None:
+        if self.driver:
+            self.driver.quit()
+            self.driver = None
+
+    def run_prompt(self, prompt_text: str) -> GoogleAIOverviewCapture:
+        driver = self.require_driver()
+        search_url = self.build_search_url(prompt_text)
+        LOGGER.info("Loading Google AI Overview URL: %s", search_url)
+        driver.get(search_url)
+
+        blocked_reason = self.detect_blocking_page()
+        if blocked_reason:
+            raise RuntimeError(f"Google blocked the request: {blocked_reason}")
+
+        result = self.wait_for_ai_overview()
+        current_url = driver.current_url
+
+        if not result.get("ai_overview_triggered"):
+            return GoogleAIOverviewCapture(
+                response="",
+                markdown="",
+                capture_method="no_ai_overview",
+                markdown_capture_method="none",
+                raw_html=result.get("raw_html") or "",
+                raw_html_capture_method=result.get("raw_html_capture_method") or "none",
+                llm_model="google-ai-overview",
+                url=current_url,
+                sources=[],
+                source_capture_method="none",
+                ai_overview_triggered=False,
+                capture_state=result.get("capture_state") or "no_ai_overview",
+                error=result.get("error") or "no_ai_overview",
+            )
+
+        clipboard_markdown, clipboard_method = self.capture_markdown_via_copy_button()
+
+        markdown = clipboard_markdown
+        markdown_capture_method = clipboard_method
+
+        if markdown:
+            response = markdown
+            capture_method = clipboard_method
+        else:
+            response = clean_text(result.get("text"))
+            capture_method = str(result.get("capture_method") or "ai_overview_dom_text")
+
+        _raw = result.get("sources")
+        raw_sources: list[Any] = _raw if isinstance(_raw, list) else []
+        sources = normalize_sources(raw_sources)
+        raw_html = str(result.get("raw_html") or "")
+        if not response and not sources:
+            raise RuntimeError("Google AI Overview container was detected, but extracted content was empty")
+
+        return GoogleAIOverviewCapture(
+            response=response,
+            markdown=markdown,
+            capture_method=capture_method,
+            markdown_capture_method=markdown_capture_method,
+            raw_html=raw_html,
+            raw_html_capture_method=str(result.get("raw_html_capture_method") or "ai_overview_container_outer_html"),
+            llm_model="google-ai-overview",
+            url=current_url,
+            sources=sources,
+            source_capture_method="ai_overview_dom_links" if sources else "none",
+            ai_overview_triggered=True,
+            capture_state=str(result.get("capture_state") or "complete"),
+            error=None,
+        )
+
+    def build_search_url(self, prompt_text: str) -> str:
+        base = self.google_url.rstrip("/")
+        query_params: list[tuple[str, str]] = [("q", prompt_text), ("hl", self.language or "en")]
+        if self.country:
+            query_params.append(("gl", self.country.lower()))
+        separator = "&" if "?" in base else "?"
+        encoded = "&".join(f"{key}={quote_plus(str(value))}" for key, value in query_params)
+        return f"{base}{separator}{encoded}"
+
+    def wait_for_ai_overview(self) -> dict[str, Any]:
+        """Poll until AI Overview appears and content is stable, then expand it."""
+        deadline = time.time() + self.response_timeout_seconds
+        last_result: dict[str, Any] = {
+            "ai_overview_triggered": False,
+            "capture_state": "no_ai_overview",
+            "error": "no_ai_overview",
+        }
+        last_signature = ""
+        stable_checks = 0
+        show_more_clicked = False
+
+        while time.time() < deadline:
+            blocked_reason = self.detect_blocking_page()
+            if blocked_reason:
+                raise RuntimeError(f"Google blocked the request: {blocked_reason}")
+
+            result = self.extract_ai_overview()
+            last_result = result
+
+            if result.get("ai_overview_triggered"):
+                if not show_more_clicked:
+                    self.click_show_more()
+                    show_more_clicked = True
+                    time.sleep(1)
+                    continue
+
+                signature = (
+                    f"{result.get('markdown') or ''}\n---\n"
+                    f"{result.get('text') or ''}\n---\n"
+                    f"{result.get('sources') or []}"
+                )
+                if signature and signature == last_signature and has_meaningful_content(result):
+                    stable_checks += 1
+                else:
+                    stable_checks = 0
+                    last_signature = signature
+                if stable_checks >= 2:
+                    return {**result, "capture_state": "complete"}
+
+            time.sleep(1)
+
+        if last_result.get("ai_overview_triggered"):
+            return {**last_result, "capture_state": "timeout_partial"}
+        return last_result
+
+    def click_show_more(self) -> None:
+        """Click the Show more button if present. Silently no-ops if not found."""
+        driver = self.require_driver()
+        for selector in SHOW_MORE_SELECTORS:
+            try:
+                elements = driver.find_elements(By.CSS_SELECTOR, selector)
+                for el in elements:
+                    text = (el.text or "").strip().lower()
+                    if "show more" in text:
+                        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", el)
+                        time.sleep(0.2)
+                        try:
+                            ActionChains(driver).move_to_element(el).click().perform()
+                        except Exception:
+                            driver.execute_script("arguments[0].click();", el)
+                        LOGGER.info("Clicked 'Show more' button to expand AI Overview.")
+                        return
+            except WebDriverException:
+                continue
+        LOGGER.debug("No 'Show more' button found — AI Overview may already be fully expanded.")
+
+    def extract_ai_overview(self) -> dict[str, Any]:
+        try:
+            result = self.require_driver().execute_script(AI_OVERVIEW_EXTRACTION_SCRIPT)
+            if isinstance(result, dict):
+                return result
+        except WebDriverException as exc:
+            LOGGER.debug("Google AI Overview extraction script failed: %s", first_line(str(exc)))
+        return {
+            "ai_overview_triggered": False,
+            "capture_state": "extraction_error",
+            "error": "extraction_error",
+        }
+
+    def capture_markdown_via_copy_button(self) -> tuple[str, str]:
+        """Click the AI Overview 'Copy text' button, intercept clipboard in-page.
+
+        Returns ('', reason) on any failure — caller leaves markdown blank.
+        """
+        driver = self.require_driver()
+        try:
+            try:
+                driver.execute_cdp_cmd(
+                    "Browser.grantPermissions",
+                    {"permissions": ["clipboardReadWrite", "clipboardSanitizedWrite"], "origin": driver.current_url},
+                )
+            except Exception:
+                pass
+
+            driver.execute_script(
+                """
+                window.__clipboardCapture = null;
+                if (navigator.clipboard) {
+                    if (navigator.clipboard.writeText) {
+                        const _origWriteText = navigator.clipboard.writeText.bind(navigator.clipboard);
+                        navigator.clipboard.writeText = async function(text) {
+                            window.__clipboardCapture = text;
+                            try { return await _origWriteText(text); } catch(e) {}
+                        };
+                    }
+                    if (navigator.clipboard.write) {
+                        const _origWrite = navigator.clipboard.write.bind(navigator.clipboard);
+                        navigator.clipboard.write = async function(items) {
+                            try {
+                                for (const item of items) {
+                                    if (item.types && item.types.includes('text/plain')) {
+                                        const blob = await item.getType('text/plain');
+                                        window.__clipboardCapture = await blob.text();
+                                        break;
+                                    }
+                                }
+                            } catch(e) {}
+                            try { return await _origWrite(items); } catch(e) {}
+                        };
+                    }
+                }
+                const _origExecCommand = document.execCommand.bind(document);
+                document.execCommand = function(command, ...args) {
+                    if (command === 'copy') {
+                        const sel = window.getSelection();
+                        if (sel && sel.toString()) window.__clipboardCapture = sel.toString();
+                    }
+                    return _origExecCommand(command, ...args);
+                };
+                """
+            )
+
+            buttons = driver.find_elements(By.CSS_SELECTOR, 'button[aria-label="Copy text"]')
+            if not buttons:
+                LOGGER.debug("Copy text button not found.")
+                return "", "copy_button_not_found"
+
+            button = buttons[0]
+            driver.execute_script("arguments[0].scrollIntoView({block: 'center', inline: 'center'});", button)
+            time.sleep(0.3)
+
+            try:
+                ActionChains(driver).move_to_element(button).click().perform()
+            except Exception:
+                driver.execute_script(
+                    """
+                    const el = arguments[0];
+                    el.dispatchEvent(new PointerEvent('pointerdown', {bubbles: true, pointerType: 'mouse'}));
+                    el.dispatchEvent(new MouseEvent('mousedown', {bubbles: true}));
+                    el.dispatchEvent(new PointerEvent('pointerup', {bubbles: true, pointerType: 'mouse'}));
+                    el.dispatchEvent(new MouseEvent('mouseup', {bubbles: true}));
+                    el.click();
+                    """,
+                    button,
+                )
+
+            deadline = time.time() + 5
+            while time.time() < deadline:
+                text = driver.execute_script("return window.__clipboardCapture;")
+                if text and str(text).strip():
+                    LOGGER.info("Captured AI Overview markdown via copy button (%s chars).", len(text))
+                    return clean_markdown(str(text)), "copy_button_clipboard"
+                time.sleep(0.2)
+
+            LOGGER.info("Copy button clicked but no clipboard content captured after 5s.")
+            return "", "copy_button_empty"
+        except Exception as exc:
+            LOGGER.debug("Copy button capture failed: %s", exc)
+            return "", "copy_button_error"
+
+    def detect_blocking_page(self) -> str:
+        driver = self.require_driver()
+        current_url = (driver.current_url or "").lower()
+        if any(pattern in current_url for pattern in BLOCKING_URL_PATTERNS):
+            return current_url
+        try:
+            body_text = driver.find_element(By.TAG_NAME, "body").text.lower()
+        except WebDriverException:
+            return ""
+        for pattern in BLOCKING_TEXT_PATTERNS:
+            if pattern in body_text:
+                return pattern
+        return ""
+
+    def require_driver(self) -> Chrome:
+        if not self.driver:
+            raise RuntimeError("Browser has not been started")
+        return self.driver
+
+
+AI_OVERVIEW_EXTRACTION_SCRIPT = r"""
+const cleanText = (value) => (value || '').replace(/\s+/g, ' ').trim();
+
+function findAIOverviewContainer() {
+  // Strategy 1: known attributes
+  const byAttr =
+    document.querySelector('[data-attrid="wa:/description"]') ||
+    document.querySelector('[data-async-type="editableDirectAnswerCard"]') ||
+    document.querySelector('div[id="aiob"]');
+  if (byAttr) return byAttr;
+
+  // Strategy 2: climb from the Show more button
+  const showMoreCandidates = document.querySelectorAll('.niO4u, .VDgVie');
+  for (const el of showMoreCandidates) {
+    if (/show more/i.test(el.textContent || '')) {
+      let node = el.parentElement;
+      for (let i = 0; i < 8 && node; i++) {
+        if (node.querySelectorAll('p, li, a').length >= 3) return node;
+        node = node.parentElement;
+      }
+    }
+  }
+
+  // Strategy 3: "AI Overview" heading walk
+  const headings = document.querySelectorAll("h2, h3, [role='heading']");
+  for (const heading of headings) {
+    if (/ai overview/i.test(heading.textContent || '')) {
+      let node = heading.parentElement;
+      for (let i = 0; i < 6 && node; i++) {
+        if (node.querySelectorAll('p, li, span, a').length >= 3) return node;
+        node = node.parentElement;
+      }
+      return heading.parentElement;
+    }
+  }
+
+  return null;
+}
+
+function unwrapGoogleUrl(href) {
+  if (!href) return '';
+  try {
+    const url = new URL(href, 'https://www.google.com');
+    if (url.pathname === '/url') {
+      return url.searchParams.get('q') || url.searchParams.get('url') || href;
+    }
+    return url.href;
+  } catch {
+    return href;
+  }
+}
+
+function isUsefulUrl(url) {
+  if (!url || !/^https?:\/\//i.test(url)) return false;
+  return !(
+    url.includes('google.com/search') ||
+    url.includes('accounts.google.com') ||
+    url.includes('policies.google.com') ||
+    url.includes('support.google.com') ||
+    url.includes('webcache.googleusercontent.com')
+  );
+}
+
+function classifyLink(link) {
+  const citationSpan = link.closest('[jscontroller="udAs2b"]');
+  if (citationSpan) {
+    const button = citationSpan.querySelector('button[data-amic="true"]');
+    const ariaLabel = button ? (button.getAttribute('aria-label') || '') : '';
+    const match = ariaLabel.match(/\+(\d+)/);
+    return { extractionSource: 'citation', citationCount: match ? parseInt(match[1]) : null };
+  }
+  if (link.classList.contains('H23r4e')) {
+    return { extractionSource: 'inline', citationCount: null };
+  }
+  return { extractionSource: 'more_links', citationCount: null };
+}
+
+function extractSources(container) {
+  const seen = new Set();
+  const sources = [];
+  for (const link of container.querySelectorAll('a[href]')) {
+    const url = unwrapGoogleUrl(link.getAttribute('href') || '').replace(/#:~:text=.*$/, '');
+    if (!isUsefulUrl(url) || seen.has(url)) continue;
+    seen.add(url);
+
+    const { extractionSource, citationCount } = classifyLink(link);
+
+    const lines = cleanText(link.innerText || link.textContent || '')
+      .split(/\n+/)
+      .map((line) => cleanText(line))
+      .filter(Boolean);
+    let source = lines[0] || '';
+    let title = lines[1] || '';
+    let description = lines.slice(2).join(' ');
+
+    let parent = link.parentElement;
+    for (let i = 0; i < 3 && parent && (!title || !description); i++) {
+      const parentLines = (parent.innerText || '')
+        .split(/\n+/)
+        .map((line) => cleanText(line))
+        .filter(Boolean);
+      if (!title && parentLines.length > 0) title = parentLines.find((line) => line !== source) || '';
+      if (!description && parentLines.length > 1) description = parentLines.slice(1, 4).join(' ');
+      parent = parent.parentElement;
+    }
+
+    const entry = {
+      index: sources.length + 1,
+      url,
+      source,
+      title,
+      description,
+      favicon_url: link.querySelector('img')?.src || null,
+      extraction_source: extractionSource,
+    };
+    if (citationCount !== null) entry.citation_count = citationCount;
+    sources.push(entry);
+  }
+  return sources;
+}
+
+function stripForContent(container) {
+  const clone = container.cloneNode(true);
+  clone.querySelectorAll('style, script, noscript, template, svg, button, [role="button"]').forEach((n) => n.remove());
+  clone.querySelectorAll('img[src^="data:"]').forEach((n) => n.remove());
+  const firstHeading = clone.querySelector('h2, h3, [role="heading"]');
+  if (firstHeading && /ai overview/i.test(firstHeading.textContent || '')) firstHeading.remove();
+  return clone;
+}
+
+function htmlToMarkdownish(root) {
+  const lines = [];
+  const visit = (node) => {
+    if (node.nodeType === Node.TEXT_NODE) {
+      const text = cleanText(node.textContent || '');
+      if (text) lines.push(text);
+      return;
+    }
+    if (node.nodeType !== Node.ELEMENT_NODE) return;
+    const tag = node.tagName.toLowerCase();
+    if (tag === 'a' && node.href && isUsefulUrl(node.href)) {
+      const text = cleanText(node.innerText || node.textContent || node.href);
+      lines.push(`[${text}](${unwrapGoogleUrl(node.href)})`);
+      return;
+    }
+    if (['p', 'li', 'h2', 'h3', 'h4', 'div'].includes(tag)) {
+      const before = lines.length;
+      for (const child of node.childNodes) visit(child);
+      if (lines.length > before) lines.push('');
+      return;
+    }
+    for (const child of node.childNodes) visit(child);
+  };
+  visit(root);
+  return lines
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .replace(/[ \t]+\n/g, '\n')
+    .trim();
+}
+
+const container = findAIOverviewContainer();
+if (!container) {
+  return {
+    ai_overview_triggered: false,
+    capture_state: 'no_ai_overview',
+    error: 'no_ai_overview',
+  };
+}
+
+const visibleText = cleanText(container.innerText || container.textContent || '');
+if (/you['']?ve reached your daily limit/i.test(visibleText)) {
+  return {
+    ai_overview_triggered: true,
+    capture_state: 'quota_exhausted',
+    error: 'quota_exhausted',
+    text: '',
+    markdown: '',
+    raw_html: container.outerHTML || '',
+    raw_html_capture_method: 'ai_overview_container_outer_html',
+    sources: [],
+  };
+}
+
+const cleaned = stripForContent(container);
+const markdown = htmlToMarkdownish(cleaned);
+const sources = extractSources(container);
+return {
+  ai_overview_triggered: true,
+  capture_state: markdown || sources.length ? 'content_detected' : 'empty_ai_overview_extraction',
+  error: markdown || sources.length ? null : 'empty_ai_overview_extraction',
+  text: cleanText(cleaned.innerText || cleaned.textContent || ''),
+  markdown,
+  raw_html: container.outerHTML || '',
+  raw_html_capture_method: 'ai_overview_container_outer_html',
+  capture_method: 'ai_overview_dom_text',
+  markdown_capture_method: 'ai_overview_dom_markdownish',
+  sources,
+};
+"""
+
+
+def normalize_overview_sources(raw_sources: list[Any]) -> list[dict[str, Any]]:
+    sources: list[dict[str, Any]] = []
+    seen_urls: set[str] = set()
+    for source in raw_sources:
+        if not isinstance(source, dict):
+            continue
+        raw_url = str(source.get("url") or "").strip()
+        clean_url = clean_google_url(raw_url)
+        if not clean_url or clean_url in seen_urls:
+            continue
+        seen_urls.add(clean_url)
+        domain = urlsplit(clean_url).netloc.replace("www.", "")
+        entry: dict[str, Any] = {
+            "index": len(sources) + 1,
+            "url": raw_url,
+            "clean_url": clean_url,
+            "source": clean_text(source.get("source")) or domain,
+            "title": clean_text(source.get("title")),
+            "description": clean_text(source.get("description")),
+            "favicon_url": str(source.get("favicon_url") or "").strip()
+            or (f"https://www.google.com/s2/favicons?domain={domain}&sz=32" if domain else None),
+            "extraction_source": clean_text(source.get("extraction_source")) or "more_links",
+        }
+        if source.get("citation_count") is not None:
+            entry["citation_count"] = int(source["citation_count"])
+        sources.append(entry)
+    return sources

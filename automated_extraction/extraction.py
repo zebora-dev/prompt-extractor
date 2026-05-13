@@ -12,6 +12,7 @@ from .api_client import ApiClient
 from .chatgpt_runner import ChatGPTRunner
 from .config import Settings
 from .google_ai_mode_runner import GoogleAIModeRunner
+from .google_ai_overview_runner import GoogleAIOverviewRunner
 
 LOGGER = logging.getLogger(__name__)
 
@@ -534,6 +535,197 @@ def run_google_ai_mode_extraction_job(
     )
 
 
+def run_google_ai_overview_extraction_job(
+    *,
+    settings: Settings,
+    batch_id: str | None = None,
+    prompts_file: Path | None = None,
+    brand_id: str | None = None,
+    limit: int | None = None,
+    skip: int = 0,
+    dry_run: bool = False,
+    headless: bool | None = None,
+    chrome_user_data_dir: str | None = None,
+    force_rerun: bool = False,
+    llm_model_filter: str | None = "google-ai-overview",
+    country: str | None = None,
+    language: str | None = None,
+    debug_pause_seconds: int = 0,
+) -> ExtractionRunResult:
+    if not batch_id and not prompts_file:
+        raise ValueError("one of batch_id or prompts_file is required")
+
+    api = ApiClient(
+        settings.api_base_url,
+        settings.anon_key,
+        supabase_url=settings.supabase_url,
+        prompt_outputs_table=settings.prompt_outputs_table,
+        prompt_output_products_table=settings.prompt_output_products_table,
+        prompt_output_entities_table=settings.prompt_output_entities_table,
+    )
+    prompts, resolved_batch_id, resolved_brand_id = load_prompt_work(
+        api=api,
+        batch_id=batch_id,
+        prompts_file=prompts_file,
+        brand_id=brand_id,
+        only_remaining=not force_rerun,
+        llm_model_filter=llm_model_filter,
+    )
+    prompts = prompts[max(0, skip) :]
+    if limit:
+        prompts = prompts[:limit]
+
+    LOGGER.info(
+        "Loaded %s prompt(s) for Google AI Overview. batch_id=%s brand_id=%s dry_run=%s only_remaining=%s llm_model_filter=%s",
+        len(prompts),
+        resolved_batch_id or "local",
+        resolved_brand_id or "mixed",
+        dry_run,
+        not force_rerun,
+        llm_model_filter or "any",
+    )
+
+    if dry_run:
+        for prompt in prompts[:5]:
+            LOGGER.info("Dry run Google AI Overview prompt: id=%s text=%r", prompt.get("id"), prompt_text(prompt)[:120])
+        return ExtractionRunResult(
+            status="dry_run",
+            loaded_count=len(prompts),
+            attempted_count=0,
+            saved_count=0,
+            skipped_count=0,
+            failed_count=0,
+            batch_id=resolved_batch_id,
+            brand_id=resolved_brand_id,
+            failures=[],
+            saved_outputs=[],
+            product_outputs=[],
+            entity_outputs=[],
+        )
+
+    saved_count = 0
+    skipped_count = 0
+    failed_count = 0
+    failures: list[dict[str, Any]] = []
+    saved_outputs: list[dict[str, Any]] = []
+
+    resolved_chrome_user_data_dir = chrome_user_data_dir or settings.google_chrome_user_data_dir
+    resolved_country = country or settings.google_country
+    resolved_language = language or settings.google_language
+    LOGGER.info(
+        "Starting Google AI Overview browser session. chrome_user_data_dir=%s headless=%s country=%s language=%s",
+        resolved_chrome_user_data_dir,
+        headless if headless is not None else settings.headless,
+        resolved_country or "<default>",
+        resolved_language,
+    )
+
+    with GoogleAIOverviewRunner(
+        settings.google_url,
+        headless=headless if headless is not None else settings.headless,
+        chrome_user_data_dir=resolved_chrome_user_data_dir,
+        response_timeout_seconds=settings.response_timeout_seconds,
+        country=resolved_country,
+        language=resolved_language,
+    ) as runner:
+        for index, prompt in enumerate(prompts, start=1):
+            prompt_id = str(prompt.get("id") or "")
+            prompt_brand_id = str(prompt.get("brand_id") or resolved_brand_id or "")
+            if not prompt_id or not prompt_brand_id:
+                skipped_count += 1
+                LOGGER.warning("Skipping Google AI Overview prompt missing id or brand_id: %s", prompt)
+                continue
+
+            existing_output = (
+                None
+                if force_rerun
+                else api.find_existing_prompt_output(
+                    prompt_id,
+                    prompt_brand_id,
+                    resolved_batch_id,
+                    llm_model_filter=llm_model_filter,
+                )
+            )
+            if existing_output:
+                skipped_count += 1
+                LOGGER.info(
+                    "[%s/%s] Skipping existing Google AI Overview output for prompt %s. output_id=%s llm_model=%s run_at=%s",
+                    index,
+                    len(prompts),
+                    prompt_id,
+                    existing_output.get("output_id") or existing_output.get("id"),
+                    existing_output.get("llm_model"),
+                    existing_output.get("run_at"),
+                )
+                continue
+
+            text = prompt_text(prompt)
+            LOGGER.info("[%s/%s] Running Google AI Overview prompt %s", index, len(prompts), prompt_id)
+            try:
+                capture = runner.run_prompt(text)
+                output = build_google_ai_overview_prompt_output(
+                    prompt,
+                    capture.response,
+                    capture.markdown,
+                    capture.capture_method,
+                    capture.markdown_capture_method,
+                    capture.raw_html,
+                    capture.raw_html_capture_method,
+                    capture.llm_model,
+                    capture.url,
+                    resolved_batch_id,
+                    capture.sources,
+                    capture.source_capture_method,
+                    ai_overview_triggered=capture.ai_overview_triggered,
+                    capture_state=capture.capture_state,
+                    error=capture.error,
+                    country=resolved_country,
+                    language=resolved_language,
+                )
+                saved = api.save_prompt_output(output)
+                saved_count += 1
+                saved_output = normalize_saved_output(saved, output)
+                saved_outputs.append(saved_output)
+                LOGGER.info(
+                    "[%s/%s] Saved Google AI Overview output for prompt %s. output_id=%s triggered=%s response_length=%s source_count=%s state=%s",
+                    index,
+                    len(prompts),
+                    prompt_id,
+                    saved_output.get("output_id"),
+                    capture.ai_overview_triggered,
+                    len(capture.response or ""),
+                    len(capture.sources or []),
+                    capture.capture_state,
+                )
+            except Exception as exc:
+                failed_count += 1
+                failure = {"prompt_id": prompt_id, "brand_id": prompt_brand_id, "error": str(exc)}
+                failures.append(failure)
+                LOGGER.exception("[%s/%s] Google AI Overview prompt %s failed: %s", index, len(prompts), prompt_id, exc)
+
+        if debug_pause_seconds > 0:
+            import time
+
+            LOGGER.info("Debug pause: browser staying open for %s seconds. Inspect at will.", debug_pause_seconds)
+            time.sleep(debug_pause_seconds)
+
+    status = "completed" if failed_count == 0 else "completed_with_failures"
+    return ExtractionRunResult(
+        status=status,
+        loaded_count=len(prompts),
+        attempted_count=len(prompts) - skipped_count,
+        saved_count=saved_count,
+        skipped_count=skipped_count,
+        failed_count=failed_count,
+        batch_id=resolved_batch_id,
+        brand_id=resolved_brand_id,
+        failures=failures,
+        saved_outputs=saved_outputs,
+        product_outputs=[],
+        entity_outputs=[],
+    )
+
+
 def load_prompt_work(
     *,
     api: ApiClient,
@@ -756,6 +948,82 @@ def build_google_ai_mode_prompt_output(
     output["version_info"] = {
         **(output.get("version_info") or {}),
         "app_type": "automated_extraction_google_ai_mode",
+    }
+    return output
+
+
+def build_google_ai_overview_prompt_output(
+    prompt: dict[str, Any],
+    response: str,
+    markdown: str,
+    capture_method: str,
+    markdown_capture_method: str,
+    raw_html: str,
+    raw_html_capture_method: str,
+    llm_model: str,
+    url: str,
+    batch_id: str | None,
+    sources: list[dict[str, Any]] | None = None,
+    source_capture_method: str = "none",
+    *,
+    ai_overview_triggered: bool,
+    capture_state: str,
+    error: str | None,
+    country: str | None,
+    language: str,
+) -> dict[str, Any]:
+    output = build_prompt_output(
+        prompt,
+        response,
+        markdown,
+        capture_method,
+        markdown_capture_method,
+        raw_html,
+        raw_html_capture_method,
+        llm_model or "google-ai-overview",
+        url,
+        batch_id,
+        sources,
+        source_capture_method,
+    )
+    output["config"] = {
+        **(output.get("config") or {}),
+        "site": "Google",
+        "provider": "google-ai-overview",
+        "country": country,
+        "language": language,
+    }
+    metadata = output.get("output_metadata") if isinstance(output.get("output_metadata"), dict) else {}
+    original_metadata = metadata.get("original_metadata") if isinstance(metadata.get("original_metadata"), dict) else {}
+    output["output_metadata"] = {
+        **metadata,
+        "llm_model": llm_model or "google-ai-overview",
+        "site_used": "Google",
+        "google_ai_overview": {
+            "triggered": ai_overview_triggered,
+            "capture_state": capture_state,
+            "error": error,
+            "country": country,
+            "language": language,
+            "url": url,
+        },
+        "original_metadata": {
+            **original_metadata,
+            "llm_model": llm_model or "google-ai-overview",
+            "provider": "google-ai-overview",
+            "site": "Google",
+            "site_used": "Google",
+            "ai_overview_triggered": ai_overview_triggered,
+            "capture_state": capture_state,
+            "capture_error": error,
+            "google_url": url,
+            "google_country": country,
+            "google_language": language,
+        },
+    }
+    output["version_info"] = {
+        **(output.get("version_info") or {}),
+        "app_type": "automated_extraction_google_ai_overview",
     }
     return output
 

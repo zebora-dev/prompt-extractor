@@ -23,6 +23,7 @@ WORK_DIR = os.getenv("PREFECT_WORKING_DIR") or str(PROJECT_ROOT)
 def get_flows():
     from automated_extraction.workflows.flows import (
         google_ai_mode_extraction_flow,
+        google_ai_overview_extraction_flow,
         prompt_extraction_batch_flow,
         prompt_extraction_flow,
         prompt_output_processing_flow,
@@ -94,6 +95,25 @@ def get_flows():
                 "chrome_user_data_dir": None,
                 "force_rerun": False,
                 "llm_model_filter": "google-ai-mode",
+                "country": None,
+                "language": None,
+            },
+        },
+        "google-ai-overview-extraction": {
+            "flow": google_ai_overview_extraction_flow,
+            "tags": ["google", "ai-overview", "extraction", "browser"],
+            "description": "Run BrandSight prompts through Google Search and save organic AI Overview responses, sources, and citations.",
+            "parameters": {
+                "batch_id": None,
+                "prompts_file": None,
+                "brand_id": None,
+                "limit": None,
+                "skip": 0,
+                "dry_run": False,
+                "headless": None,
+                "chrome_user_data_dir": None,
+                "force_rerun": False,
+                "llm_model_filter": "google-ai-overview",
                 "country": None,
                 "language": None,
             },
