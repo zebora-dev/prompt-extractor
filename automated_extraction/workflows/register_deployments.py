@@ -22,7 +22,9 @@ WORK_DIR = os.getenv("PREFECT_WORKING_DIR") or str(PROJECT_ROOT)
 
 def get_flows():
     from automated_extraction.workflows.flows import (
+        google_ai_mode_extraction_batch_flow,
         google_ai_mode_extraction_flow,
+        google_ai_overview_extraction_batch_flow,
         google_ai_overview_extraction_flow,
         prompt_extraction_batch_flow,
         prompt_extraction_flow,
@@ -78,6 +80,34 @@ def get_flows():
                 "brand_id": None,
                 "prompt_id": None,
                 "limit": 50,
+            },
+        },
+        "google-ai-mode-extraction-batch": {
+            "flow": google_ai_mode_extraction_batch_flow,
+            "tags": ["google", "ai-mode", "extraction", "browser", "batch"],
+            "description": "Sequentially run google-ai-mode-extraction in chunks until all remaining prompts in a batch are covered.",
+            "parameters": {
+                "batch_id": None,
+                "model_filter": "google-ai-mode",
+                "limit": 10,
+                "skip": 0,
+                "delay_seconds": 60,
+                "country": None,
+                "language": None,
+            },
+        },
+        "google-ai-overview-extraction-batch": {
+            "flow": google_ai_overview_extraction_batch_flow,
+            "tags": ["google", "ai-overview", "extraction", "browser", "batch"],
+            "description": "Sequentially run google-ai-overview-extraction in chunks until all remaining prompts in a batch are covered.",
+            "parameters": {
+                "batch_id": None,
+                "model_filter": "google-ai-overview",
+                "limit": 10,
+                "skip": 0,
+                "delay_seconds": 60,
+                "country": None,
+                "language": None,
             },
         },
         "google-ai-mode-extraction": {
