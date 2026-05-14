@@ -21,6 +21,9 @@ PAA_SHOW_MORE_SELECTOR = "span.PBBEhf, div.ZFiwCf span"
 PAA_EXTRACTION_SCRIPT = r"""return (function(containerEl) {
   const cleanText = (v) => (v || '').replace(/\s+/g, ' ').trim();
 
+  // Link texts that indicate a UI control rather than a real source name
+  const SKIP_SOURCE_TEXTS = /^(more items[.…]*|show more|see more|show all|view more|read more|\+\d+.*|feedback)$/i;
+
   function unwrapGoogleUrl(href) {
     if (!href) return '';
     try {
@@ -37,8 +40,13 @@ PAA_EXTRACTION_SCRIPT = r"""return (function(containerEl) {
       url.includes('accounts.google.com') ||
       url.includes('policies.google.com') ||
       url.includes('support.google.com') ||
-      url.includes('webcache.googleusercontent.com')
+      url.includes('webcache.googleusercontent.com') ||
+      url.includes('youtube.com/shorts')
     );
+  }
+
+  function hostnameFromUrl(url) {
+    try { return new URL(url).hostname.replace(/^www\./, ''); } catch { return ''; }
   }
 
   function extractSources(root) {
@@ -48,14 +56,17 @@ PAA_EXTRACTION_SCRIPT = r"""return (function(containerEl) {
       const url = unwrapGoogleUrl(link.getAttribute('href') || '').replace(/#:~:text=.*$/, '');
       if (!isUsefulUrl(url) || seen.has(url)) continue;
       seen.add(url);
-      const lines = cleanText(link.innerText || link.textContent || '')
-        .split(/\n+/).map(l => cleanText(l)).filter(Boolean);
+      const rawText = cleanText(link.innerText || link.textContent || '');
+      // Use link text as source name only when it looks like a real name, not a UI control
+      const sourceName = (rawText && !SKIP_SOURCE_TEXTS.test(rawText))
+        ? rawText.split(/\n/)[0].trim()
+        : hostnameFromUrl(url);
       sources.push({
         index: sources.length + 1,
         url,
-        source: lines[0] || '',
-        title: lines[1] || '',
-        description: lines.slice(2).join(' '),
+        source: sourceName,
+        title: '',
+        description: '',
         favicon_url: link.querySelector('img')?.src || null,
       });
     }
@@ -65,7 +76,16 @@ PAA_EXTRACTION_SCRIPT = r"""return (function(containerEl) {
   function htmlToText(root) {
     const clone = root.cloneNode(true);
     clone.querySelectorAll('style, script, noscript, template, svg, button').forEach(n => n.remove());
-    return cleanText(clone.innerText || clone.textContent || '');
+    // Remove anchor and cite elements — their text (source names, URL breadcrumbs,
+    // "More items…") is noise in the response body; captured separately by extractSources.
+    clone.querySelectorAll('a, cite').forEach(n => n.remove());
+    let text = cleanText(clone.innerText || clone.textContent || '');
+    // Strip "AI Overview not available" notice that appears when a PAA panel loads
+    // a nested AI Overview widget and quota is exhausted
+    text = text.replace(/^An AI Overview is not available[^.]*\.?\s*(Can'?t generate[^.]*\.?\s*)?(Try again later\.?\s*)?/i, '');
+    // Strip "AI Overview" header that sometimes leads the expanded panel content
+    text = text.replace(/^AI Overview\s*/i, '');
+    return text;
   }
 
   if (!containerEl) return { text: '', sources: [], raw_html: '' };
