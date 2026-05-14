@@ -393,7 +393,8 @@ SIDEBAR_EXTRA_SOURCES_SCRIPT = r"""
     const descEl = li.querySelector('[data-crb-snippet-text]');
     const description = cleanText(descEl?.innerText || '');
     const sourceEl = li.querySelector('.R0r5R, .Z1JFYc');
-    const sourceName = cleanText(sourceEl?.innerText || '');
+    const sourceName = cleanText(sourceEl?.innerText || '')
+      || (url ? (new URL(url).hostname.replace(/^www\./, '')) : '');
     sources.push({ index: 0, url, source: sourceName, title, description, favicon_url: null, extraction_source: 'sidebar' });
   }
   return sources;
@@ -436,62 +437,39 @@ AI_OVERVIEW_EXTRACTION_SCRIPT = r"""
     );
   }
 
-  function getSourceName(link) {
+  function getSourceName(link, url) {
     // Citation chips (muU3oe): name is in the parent span text, trailing " +N" stripped
     if (link.classList.contains('muU3oe')) {
       const raw = (link.parentElement?.innerText || link.parentElement?.textContent || '');
       return raw.replace(/\s*\+\d+\s*$/, '').replace(/^\s+/, '').trim();
     }
-    return cleanText(link.innerText || link.textContent || '');
-  }
-
-  function extractPanelSources(root) {
-    if (!root) return [];
-    const seen = new Set();
-    const sources = [];
-    for (const link of root.querySelectorAll('a[href]')) {
-      const rawHref = link.getAttribute('href') || '';
-      const url = unwrapGoogleUrl(rawHref).replace(/#:~:text=.*$/, '');
-      if (!isUsefulUrl(url) || seen.has(url)) continue;
-      seen.add(url);
-      const name = getSourceName(link);
-      const isCitation = link.classList.contains('muU3oe');
-      const isInline = link.classList.contains('H23r4e');
-      sources.push({
-        index: sources.length + 1,
-        url,
-        source: name,
-        title: '',
-        description: '',
-        favicon_url: link.querySelector('img')?.src || null,
-        extraction_source: isCitation ? 'citation' : (isInline ? 'inline' : 'more_links'),
-      });
-    }
-    return sources;
+    const text = cleanText(link.innerText || link.textContent || '');
+    if (text) return text;
+    // Fallback: derive name from hostname when link has no visible text
+    try { return new URL(url).hostname.replace(/^www\./, ''); } catch { return ''; }
   }
 
   // Sidebar corroboration panel — the numbered source cards shown beside the AIO box.
+  // Extracted FIRST so its rich metadata (title, description, brand name) takes priority
+  // over the unnamed more_links in the panel body.
   // Anchored on data-xid which is tied to the component name, not CSS classes.
   function extractSidebarSources(seen) {
     const container = document.querySelector('[data-xid="aim-aside-initial-corroboration-container"]');
     if (!container) return [];
     const sources = [];
     for (const li of container.querySelectorAll('li')) {
-      // NDNGvf links carry a direct href (not a Google redirect)
       const link = li.querySelector('a[href]');
       if (!link) continue;
       const url = (link.getAttribute('href') || '').replace(/#:~:text=.*$/, '');
       if (!isUsefulUrl(url) || seen.has(url)) continue;
       seen.add(url);
-      // Title from aria-label — strip the " Opens in a new tab." suffix added for a11y
       const ariaLabel = link.getAttribute('aria-label') || '';
       const title = ariaLabel.replace(/\.\s*opens in a new tab\.?$/i, '').trim();
-      // Snippet text is in the element annotated with data-crb-snippet-text
       const descEl = li.querySelector('[data-crb-snippet-text]');
       const description = cleanText(descEl?.innerText || descEl?.textContent || '');
-      // Display source name (domain brand, e.g. "Money Saving Expert")
       const sourceEl = li.querySelector('.R0r5R, .Z1JFYc');
-      const sourceName = cleanText(sourceEl?.innerText || sourceEl?.textContent || '');
+      const sourceName = cleanText(sourceEl?.innerText || sourceEl?.textContent || '')
+        || (url ? (new URL(url).hostname.replace(/^www\./, '')) : '');
       sources.push({
         index: 0,
         url,
@@ -505,12 +483,37 @@ AI_OVERVIEW_EXTRACTION_SCRIPT = r"""
     return sources;
   }
 
+  function extractPanelSources(root, seen) {
+    if (!root) return [];
+    const sources = [];
+    for (const link of root.querySelectorAll('a[href]')) {
+      const rawHref = link.getAttribute('href') || '';
+      const url = unwrapGoogleUrl(rawHref).replace(/#:~:text=.*$/, '');
+      if (!isUsefulUrl(url) || seen.has(url)) continue;
+      seen.add(url);
+      const name = getSourceName(link, url);
+      const isCitation = link.classList.contains('muU3oe');
+      const isInline = link.classList.contains('H23r4e');
+      sources.push({
+        index: 0,
+        url,
+        source: name,
+        title: '',
+        description: '',
+        favicon_url: link.querySelector('img')?.src || null,
+        extraction_source: isCitation ? 'citation' : (isInline ? 'inline' : 'more_links'),
+      });
+    }
+    return sources;
+  }
+
   function extractSources(panel) {
     const seen = new Set();
-    const panelSources = extractPanelSources(panel);
-    panelSources.forEach(s => seen.add(s.url));
+    // Sidebar first — richer metadata wins when URLs overlap with panel
     const sidebarSources = extractSidebarSources(seen);
-    const merged = [...panelSources, ...sidebarSources];
+    // Panel second — adds inline citations and body links not covered by sidebar
+    const panelSources = extractPanelSources(panel, seen);
+    const merged = [...sidebarSources, ...panelSources];
     merged.forEach((s, i) => { s.index = i + 1; });
     return merged;
   }
