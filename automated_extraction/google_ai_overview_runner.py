@@ -217,7 +217,13 @@ class GoogleAIOverviewRunner:
         return f"{base}{separator}{encoded}"
 
     def wait_for_ai_overview(self) -> dict[str, Any]:
-        """Poll until the AI Overview panel is detected, expanded, and content is stable."""
+        """Poll until the AI Overview panel is detected and content is stable.
+
+        Google pre-loads the full panel content in the DOM before the Show more
+        button is clicked — clicking it only removes the CSS height clamp. We
+        therefore extract content regardless of aria-expanded state and just
+        click Show more once to ensure any lazily-rendered extra content appears.
+        """
         deadline = time.time() + self.response_timeout_seconds
         last_result: dict[str, Any] = {
             "ai_overview_triggered": False,
@@ -240,16 +246,13 @@ class GoogleAIOverviewRunner:
                 time.sleep(1)
                 continue
 
-            # AI Overview detected — click Show more once
+            # Click Show more once as soon as the AIO box is detected.
+            # Content is already in the DOM; the click removes the height clamp
+            # and may trigger any lazy follow-on content.
             if not show_more_clicked:
                 self.click_show_more()
                 show_more_clicked = True
-                time.sleep(1.5)
-                continue
-
-            # Wait for the panel to finish expanding
-            if not result.get("is_expanded"):
-                time.sleep(0.5)
+                time.sleep(1)
                 continue
 
             # Panel expanded — wait for content to stabilise
@@ -400,7 +403,10 @@ AI_OVERVIEW_EXTRACTION_SCRIPT = r"""
   const panelId = btn.getAttribute('aria-controls');
   const panel = panelId ? document.getElementById(panelId) : null;
 
-  if (!isExpanded || !panel) {
+  // Google pre-loads full content in the panel DOM before the button is clicked —
+  // clicking just removes the CSS height clamp. Extract immediately; is_expanded
+  // is passed back so Python knows whether the click has registered yet.
+  if (!panel) {
     return {
       ai_overview_triggered: true,
       is_expanded: false,
