@@ -39,7 +39,7 @@ def get_flows():
             "parameters": {
                 "batch_id": None,
                 "model_filter": "gpt",
-                "limit": 10,
+                "limit": 5,
                 "skip": 0,
                 "auto_login": False,
                 "login_email": None,
@@ -89,7 +89,7 @@ def get_flows():
             "parameters": {
                 "batch_id": None,
                 "model_filter": "google-ai-mode",
-                "limit": 10,
+                "limit": 5,
                 "skip": 0,
                 "delay_seconds": 60,
                 "country": None,
@@ -103,7 +103,7 @@ def get_flows():
             "parameters": {
                 "batch_id": None,
                 "model_filter": "google-ai-overview",
-                "limit": 10,
+                "limit": 5,
                 "skip": 0,
                 "delay_seconds": 60,
                 "country": None,

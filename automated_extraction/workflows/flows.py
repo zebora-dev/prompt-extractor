@@ -29,7 +29,7 @@ from automated_extraction.workflows.tasks import (
 def prompt_extraction_batch_flow(
     batch_id: str | None = None,
     model_filter: str | None = "gpt",
-    limit: int = 10,
+    limit: int = 5,
     skip: int = 0,
     auto_login: bool | None = False,
     login_email: str | None = None,
@@ -345,7 +345,7 @@ def prompt_extraction_flow(
 def google_ai_mode_extraction_batch_flow(
     batch_id: str | None = None,
     model_filter: str | None = "google-ai-mode",
-    limit: int = 10,
+    limit: int = 5,
     skip: int = 0,
     delay_seconds: int = 60,
     country: str | None = None,
@@ -466,7 +466,7 @@ def google_ai_mode_extraction_batch_flow(
 def google_ai_overview_extraction_batch_flow(
     batch_id: str | None = None,
     model_filter: str | None = "google-ai-overview",
-    limit: int = 10,
+    limit: int = 5,
     skip: int = 0,
     delay_seconds: int = 60,
     country: str | None = None,
