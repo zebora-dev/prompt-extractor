@@ -178,13 +178,25 @@ class GoogleAIOverviewRunner:
                 error=result.get("error") or "no_ai_overview",
             )
 
+        # Expand the sidebar "Show all" button — the extra sources are dynamically
+        # loaded (not CSS-hidden) so we click, wait, then re-extract.
+        existing_raw: list[Any] = result.get("sources") if isinstance(result.get("sources"), list) else []
+        existing_urls = {str(s.get("url") or "") for s in existing_raw if isinstance(s, dict)}
+        if self._click_show_all_sidebar():
+            time.sleep(1.5)
+            extra = self._extract_extra_sidebar_sources(existing_urls)
+            if extra:
+                LOGGER.info("Sidebar 'Show all' revealed %s additional source(s).", len(extra))
+                for i, s in enumerate(extra, start=len(existing_raw) + 1):
+                    s["index"] = i
+                existing_raw = existing_raw + extra
+
         response = clean_text(result.get("text") or "")
         markdown = clean_markdown(result.get("markdown") or response)
         capture_method = str(result.get("capture_method") or "ai_overview_dom_text")
         markdown_capture_method = str(result.get("markdown_capture_method") or "ai_overview_dom_text")
 
-        _raw = result.get("sources")
-        raw_sources: list[Any] = _raw if isinstance(_raw, list) else []
+        raw_sources: list[Any] = existing_raw
         sources = normalize_overview_sources(raw_sources)
         raw_html = str(result.get("raw_html") or "")
 
@@ -291,6 +303,37 @@ class GoogleAIOverviewRunner:
             LOGGER.debug("'Show more AI Overview' button not found — panel may already be fully expanded.")
             return False
 
+    def _click_show_all_sidebar(self) -> bool:
+        """Click the sidebar 'Show all related links' button if present.
+
+        Returns True when the button was found and clicked. The extra sources
+        are loaded dynamically so the caller must wait before re-extracting.
+        """
+        driver = self.require_driver()
+        try:
+            btn = driver.find_element(By.CSS_SELECTOR, '[aria-label="Show all related links"]')
+            driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", btn)
+            time.sleep(0.2)
+            try:
+                ActionChains(driver).move_to_element(btn).click().perform()
+            except Exception:
+                driver.execute_script("arguments[0].click();", btn)
+            LOGGER.info("Clicked 'Show all related links' sidebar button.")
+            return True
+        except WebDriverException:
+            LOGGER.debug("'Show all related links' sidebar button not found.")
+            return False
+
+    def _extract_extra_sidebar_sources(self, existing_urls: set[str]) -> list[dict[str, Any]]:
+        """Extract sidebar sources that weren't present before 'Show all' was clicked."""
+        try:
+            result = self.require_driver().execute_script(SIDEBAR_EXTRA_SOURCES_SCRIPT, list(existing_urls))
+            if isinstance(result, list):
+                return result
+        except WebDriverException as exc:
+            LOGGER.debug("Extra sidebar source extraction failed: %s", first_line(str(exc)))
+        return []
+
     def extract_ai_overview(self) -> dict[str, Any]:
         try:
             result = self.require_driver().execute_script(AI_OVERVIEW_EXTRACTION_SCRIPT)
@@ -323,6 +366,39 @@ class GoogleAIOverviewRunner:
             raise RuntimeError("Browser has not been started")
         return self.driver
 
+
+# Extracts sidebar sources that are NEW since the last extraction pass.
+# Called with a list of already-seen URLs so deduplication works across passes.
+SIDEBAR_EXTRA_SOURCES_SCRIPT = r"""
+(function(existingUrls) {
+  const seen = new Set(existingUrls || []);
+  const cleanText = (v) => (v || '').replace(/\s+/g, ' ').trim();
+  function isUsefulUrl(url) {
+    if (!url || !/^https?:\/\//i.test(url)) return false;
+    return !(
+      url.includes('google.com/search') || url.includes('accounts.google.com') ||
+      url.includes('policies.google.com') || url.includes('support.google.com')
+    );
+  }
+  const container = document.querySelector('[data-xid="aim-aside-initial-corroboration-container"]');
+  if (!container) return [];
+  const sources = [];
+  for (const li of container.querySelectorAll('li')) {
+    const link = li.querySelector('a[href]');
+    if (!link) continue;
+    const url = (link.getAttribute('href') || '').replace(/#:~:text=.*$/, '');
+    if (!isUsefulUrl(url) || seen.has(url)) continue;
+    seen.add(url);
+    const title = (link.getAttribute('aria-label') || '').replace(/\.\s*opens in a new tab\.?$/i, '').trim();
+    const descEl = li.querySelector('[data-crb-snippet-text]');
+    const description = cleanText(descEl?.innerText || '');
+    const sourceEl = li.querySelector('.R0r5R, .Z1JFYc');
+    const sourceName = cleanText(sourceEl?.innerText || '');
+    sources.push({ index: 0, url, source: sourceName, title, description, favicon_url: null, extraction_source: 'sidebar' });
+  }
+  return sources;
+})(arguments[0])
+"""
 
 # Detection and extraction are combined in one script.
 #
@@ -369,7 +445,7 @@ AI_OVERVIEW_EXTRACTION_SCRIPT = r"""
     return cleanText(link.innerText || link.textContent || '');
   }
 
-  function extractSources(root) {
+  function extractPanelSources(root) {
     if (!root) return [];
     const seen = new Set();
     const sources = [];
@@ -392,6 +468,51 @@ AI_OVERVIEW_EXTRACTION_SCRIPT = r"""
       });
     }
     return sources;
+  }
+
+  // Sidebar corroboration panel — the numbered source cards shown beside the AIO box.
+  // Anchored on data-xid which is tied to the component name, not CSS classes.
+  function extractSidebarSources(seen) {
+    const container = document.querySelector('[data-xid="aim-aside-initial-corroboration-container"]');
+    if (!container) return [];
+    const sources = [];
+    for (const li of container.querySelectorAll('li')) {
+      // NDNGvf links carry a direct href (not a Google redirect)
+      const link = li.querySelector('a[href]');
+      if (!link) continue;
+      const url = (link.getAttribute('href') || '').replace(/#:~:text=.*$/, '');
+      if (!isUsefulUrl(url) || seen.has(url)) continue;
+      seen.add(url);
+      // Title from aria-label — strip the " Opens in a new tab." suffix added for a11y
+      const ariaLabel = link.getAttribute('aria-label') || '';
+      const title = ariaLabel.replace(/\.\s*opens in a new tab\.?$/i, '').trim();
+      // Snippet text is in the element annotated with data-crb-snippet-text
+      const descEl = li.querySelector('[data-crb-snippet-text]');
+      const description = cleanText(descEl?.innerText || descEl?.textContent || '');
+      // Display source name (domain brand, e.g. "Money Saving Expert")
+      const sourceEl = li.querySelector('.R0r5R, .Z1JFYc');
+      const sourceName = cleanText(sourceEl?.innerText || sourceEl?.textContent || '');
+      sources.push({
+        index: 0,
+        url,
+        source: sourceName,
+        title,
+        description,
+        favicon_url: null,
+        extraction_source: 'sidebar',
+      });
+    }
+    return sources;
+  }
+
+  function extractSources(panel) {
+    const seen = new Set();
+    const panelSources = extractPanelSources(panel);
+    panelSources.forEach(s => seen.add(s.url));
+    const sidebarSources = extractSidebarSources(seen);
+    const merged = [...panelSources, ...sidebarSources];
+    merged.forEach((s, i) => { s.index = i + 1; });
+    return merged;
   }
 
   const btn = document.querySelector('[aria-label="Show more AI Overview"]');
