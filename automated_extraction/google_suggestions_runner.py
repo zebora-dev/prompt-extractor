@@ -52,7 +52,23 @@ PAA_EXTRACTION_SCRIPT = r"""return (function(containerEl) {
   function extractSources(root) {
     const seen = new Set();
     const sources = [];
-    for (const link of root.querySelectorAll('a[href]')) {
+
+    // First pass: slider cards (a.Zbfntb) with rich metadata
+    for (const card of root.querySelectorAll('div[role="listitem"], div.PmZFeb')) {
+      const link = card.querySelector('a.Zbfntb[href]');
+      if (!link) continue;
+      const url = unwrapGoogleUrl(link.getAttribute('href') || '').replace(/#:~:text=.*$/, '');
+      if (!isUsefulUrl(url) || seen.has(url)) continue;
+      seen.add(url);
+      const title = cleanText(card.querySelector('.hmTtFe')?.innerText || card.querySelector('.hmTtFe')?.textContent || '');
+      const description = cleanText(card.querySelector('[data-crb-snippet-text]')?.innerText || card.querySelector('[data-crb-snippet-text]')?.textContent || '');
+      const sourceName = cleanText(card.querySelector('.Q8Wngd span')?.innerText || card.querySelector('.Q8Wngd span')?.textContent || '') || hostnameFromUrl(url);
+      const favicon = card.querySelector('img.sGgDgb[src]')?.src || null;
+      sources.push({ index: sources.length + 1, url, source: sourceName, title, description, favicon_url: favicon });
+    }
+
+    // Second pass: regular a[href] links not already captured (skip slider anchors)
+    for (const link of root.querySelectorAll('a[href]:not(.Zbfntb)')) {
       const url = unwrapGoogleUrl(link.getAttribute('href') || '').replace(/#:~:text=.*$/, '');
       if (!isUsefulUrl(url) || seen.has(url)) continue;
       seen.add(url);
