@@ -18,8 +18,7 @@ PAA_EXPAND_BUTTON_SELECTOR = "div[jsname='tJHJj'][role='button']"
 PAA_CONTENT_PANEL_SELECTOR = "div[jsname='NRdf4c']"
 PAA_SHOW_MORE_SELECTOR = "span.PBBEhf, div.ZFiwCf span"
 
-PAA_EXTRACTION_SCRIPT = r"""
-(function(containerEl) {
+PAA_EXTRACTION_SCRIPT = r"""return (function(containerEl) {
   const cleanText = (v) => (v || '').replace(/\s+/g, ' ').trim();
 
   function unwrapGoogleUrl(href) {
