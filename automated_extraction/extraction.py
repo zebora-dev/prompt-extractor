@@ -360,6 +360,7 @@ def run_google_ai_mode_extraction_job(
     country: str | None = None,
     language: str | None = None,
     debug_pause_seconds: int = 0,
+    use_proxy: bool = False,
 ) -> ExtractionRunResult:
     if not batch_id and not prompts_file:
         raise ValueError("one of batch_id or prompts_file is required")
@@ -422,12 +423,15 @@ def run_google_ai_mode_extraction_job(
     resolved_chrome_user_data_dir = chrome_user_data_dir or settings.google_chrome_user_data_dir
     resolved_country = country or settings.google_country
     resolved_language = language or settings.google_language
+    from .google_chrome_factory import resolve_proxy_url
+    proxy_url = resolve_proxy_url(use_proxy)
     LOGGER.info(
-        "Starting Google AI Mode browser session. chrome_user_data_dir=%s headless=%s country=%s language=%s",
+        "Starting Google AI Mode browser session. chrome_user_data_dir=%s headless=%s country=%s language=%s proxy=%s",
         resolved_chrome_user_data_dir,
         headless if headless is not None else settings.headless,
         resolved_country or "<default>",
         resolved_language,
+        "yes" if proxy_url else "no",
     )
 
     with GoogleAIModeRunner(
@@ -439,6 +443,7 @@ def run_google_ai_mode_extraction_job(
         language=resolved_language,
         use_ai_mode_param=settings.google_use_ai_mode_param,
         use_advanced_ai_param=settings.google_use_advanced_ai_param,
+        proxy_url=proxy_url,
     ) as runner:
         for index, prompt in enumerate(prompts, start=1):
             prompt_id = str(prompt.get("id") or "")
@@ -564,6 +569,7 @@ def run_google_ai_overview_extraction_job(
     country: str | None = None,
     language: str | None = None,
     debug_pause_seconds: int = 0,
+    use_proxy: bool = False,
 ) -> ExtractionRunResult:
     if not batch_id and not prompts_file:
         raise ValueError("one of batch_id or prompts_file is required")
@@ -626,12 +632,15 @@ def run_google_ai_overview_extraction_job(
     resolved_chrome_user_data_dir = chrome_user_data_dir or settings.google_chrome_user_data_dir
     resolved_country = country or settings.google_country
     resolved_language = language or settings.google_language
+    from .google_chrome_factory import resolve_proxy_url
+    proxy_url = resolve_proxy_url(use_proxy)
     LOGGER.info(
-        "Starting Google AI Overview browser session. chrome_user_data_dir=%s headless=%s country=%s language=%s",
+        "Starting Google AI Overview browser session. chrome_user_data_dir=%s headless=%s country=%s language=%s proxy=%s",
         resolved_chrome_user_data_dir,
         headless if headless is not None else settings.headless,
         resolved_country or "<default>",
         resolved_language,
+        "yes" if proxy_url else "no",
     )
 
     with GoogleAIOverviewRunner(
@@ -641,6 +650,7 @@ def run_google_ai_overview_extraction_job(
         response_timeout_seconds=settings.response_timeout_seconds,
         country=resolved_country,
         language=resolved_language,
+        proxy_url=proxy_url,
     ) as runner:
         for index, prompt in enumerate(prompts, start=1):
             prompt_id = str(prompt.get("id") or "")

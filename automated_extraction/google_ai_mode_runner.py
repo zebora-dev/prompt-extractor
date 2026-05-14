@@ -2,19 +2,16 @@ from __future__ import annotations
 
 import logging
 import re
-import sys
 import time
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import parse_qsl, quote_plus, urlencode, urlsplit, urlunsplit
 
-from selenium import webdriver
-from selenium.common.exceptions import SessionNotCreatedException, WebDriverException
+from selenium.common.exceptions import WebDriverException
 from selenium.webdriver import Chrome
-from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 
-from .chatgpt_runner import detect_chrome_major_version, first_line
+from .google_chrome_factory import build_google_driver, warmup_google_session
 
 LOGGER = logging.getLogger(__name__)
 
@@ -60,6 +57,7 @@ class GoogleAIModeRunner:
         language: str = "en",
         use_ai_mode_param: bool = True,
         use_advanced_ai_param: bool = True,
+        proxy_url: str | None = None,
     ) -> None:
         self.google_url = google_url
         self.headless = headless
@@ -69,6 +67,7 @@ class GoogleAIModeRunner:
         self.language = language
         self.use_ai_mode_param = use_ai_mode_param
         self.use_advanced_ai_param = use_advanced_ai_param
+        self.proxy_url = proxy_url
         self.driver: Chrome | None = None
 
     def __enter__(self) -> GoogleAIModeRunner:
@@ -79,63 +78,12 @@ class GoogleAIModeRunner:
         self.close()
 
     def start(self) -> None:
-        options = Options()
-        options.add_argument("--no-sandbox")
-        options.add_argument("--disable-dev-shm-usage")
-        options.add_argument("--disable-blink-features=AutomationControlled")
-        options.add_argument("--disable-extensions")
-        if self.chrome_user_data_dir:
-            options.add_argument(f"--user-data-dir={self.chrome_user_data_dir}")
-        if self.headless:
-            options.add_argument("--headless=new")
-
-        self.driver = self.create_driver(options)
-        self.driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-
-    def create_driver(self, options: Options) -> Chrome:
-        try:
-            uc = self.import_undetected_chromedriver()
-            uc_options = uc.ChromeOptions()
-            for argument in options.arguments:
-                if argument.startswith("--user-data-dir="):
-                    continue
-                uc_options.add_argument(argument)
-            kwargs: dict[str, Any] = {}
-            if self.chrome_user_data_dir:
-                kwargs["user_data_dir"] = self.chrome_user_data_dir
-            chrome_major = detect_chrome_major_version()
-            if chrome_major:
-                kwargs["version_main"] = chrome_major
-            LOGGER.info("Using undetected-chromedriver for Google AI Mode capture.")
-            return uc.Chrome(options=uc_options, **kwargs)
-        except (ImportError, ModuleNotFoundError) as error:
-            LOGGER.warning("undetected-chromedriver unavailable (%s). Falling back to Selenium Chrome.", error)
-            return webdriver.Chrome(options=options)
-        except SessionNotCreatedException as error:
-            LOGGER.warning(
-                "undetected-chromedriver session failed (%s). Falling back to Selenium Chrome.",
-                first_line(str(error)),
-            )
-            return webdriver.Chrome(options=options)
-
-    def import_undetected_chromedriver(self):
-        try:
-            import undetected_chromedriver as uc
-
-            return uc
-        except ModuleNotFoundError as error:
-            if error.name != "distutils":
-                raise
-            try:
-                import setuptools._distutils as distutils_module
-                import setuptools._distutils.version as distutils_version_module
-            except ModuleNotFoundError:
-                raise error
-            sys.modules.setdefault("distutils", distutils_module)
-            sys.modules.setdefault("distutils.version", distutils_version_module)
-            import undetected_chromedriver as uc
-
-            return uc
+        self.driver = build_google_driver(
+            headless=self.headless,
+            user_data_dir=self.chrome_user_data_dir,
+            proxy_url=self.proxy_url,
+        )
+        warmup_google_session(self.driver)
 
     def close(self) -> None:
         if self.driver:

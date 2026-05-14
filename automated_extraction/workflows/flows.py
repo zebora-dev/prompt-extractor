@@ -379,6 +379,7 @@ def google_ai_mode_extraction_batch_flow(
     delay_seconds: int = 60,
     country: str | None = None,
     language: str | None = None,
+    use_proxy: bool = False,
 ) -> dict[str, Any]:
     """
     Sequentially run google-ai-mode-extraction until all remaining prompts in
@@ -430,7 +431,7 @@ def google_ai_mode_extraction_batch_flow(
         result = google_ai_mode_extraction_flow(
             batch_id=batch_id, limit=limit, skip=run_skip,
             llm_model_filter=model_filter, force_rerun=False,
-            country=country, language=language,
+            country=country, language=language, use_proxy=use_proxy,
         )
         run_results.append(result)
         flow_logger.info(
@@ -476,7 +477,7 @@ def google_ai_mode_extraction_batch_flow(
                 result = google_ai_mode_extraction_flow(
                     batch_id=batch_id, limit=limit, skip=0,
                     llm_model_filter=model_filter, force_rerun=False,
-                    country=country, language=language,
+                    country=country, language=language, use_proxy=use_proxy,
                 )
                 mop_up_results.append(result)
                 flow_logger.info(
@@ -507,7 +508,7 @@ def google_ai_mode_extraction_batch_flow(
     summary = {
         "status": status, "batch_id": batch_id, "brand_id": str(brand_id),
         "model_filter": model_filter, "skip": skip, "delay_seconds": delay_seconds,
-        "country": country, "language": language,
+        "country": country, "language": language, "use_proxy": use_proxy,
         "initial_remaining_count": remaining_count, "limit_per_run": limit,
         "planned_runs": run_count, "completed_runs": len(run_results),
         "mop_up_remaining_count": mop_up_count, "mop_up_runs": len(mop_up_results),
@@ -532,6 +533,7 @@ def google_ai_overview_extraction_batch_flow(
     delay_seconds: int = 60,
     country: str | None = None,
     language: str | None = None,
+    use_proxy: bool = False,
 ) -> dict[str, Any]:
     """
     Sequentially run google-ai-overview-extraction until all remaining prompts
@@ -569,9 +571,9 @@ def google_ai_overview_extraction_batch_flow(
     remaining_count = max(0, len(remaining_prompts) - skip)
     run_count = math.ceil(remaining_count / limit) if remaining_count else 0
     flow_logger.info(
-        "Starting sequential Google AI Overview batch. batch_id=%s brand_id=%s model_filter=%s remaining_count=%s skip=%s limit_per_run=%s planned_runs=%s delay_seconds=%s country=%s language=%s",
+        "Starting sequential Google AI Overview batch. batch_id=%s brand_id=%s model_filter=%s remaining_count=%s skip=%s limit_per_run=%s planned_runs=%s delay_seconds=%s country=%s language=%s use_proxy=%s",
         batch_id, brand_id, model_filter or "any", remaining_count, skip, limit, run_count, delay_seconds,
-        country or "<env>", language or "<env>",
+        country or "<env>", language or "<env>", use_proxy,
     )
 
     run_results: list[dict[str, Any]] = []
@@ -583,7 +585,7 @@ def google_ai_overview_extraction_batch_flow(
         result = google_ai_overview_extraction_flow(
             batch_id=batch_id, limit=limit, skip=run_skip,
             llm_model_filter=model_filter, force_rerun=False,
-            country=country, language=language,
+            country=country, language=language, use_proxy=use_proxy,
         )
         run_results.append(result)
         flow_logger.info(
@@ -629,7 +631,7 @@ def google_ai_overview_extraction_batch_flow(
                 result = google_ai_overview_extraction_flow(
                     batch_id=batch_id, limit=limit, skip=0,
                     llm_model_filter=model_filter, force_rerun=False,
-                    country=country, language=language,
+                    country=country, language=language, use_proxy=use_proxy,
                 )
                 mop_up_results.append(result)
                 flow_logger.info(
@@ -660,7 +662,7 @@ def google_ai_overview_extraction_batch_flow(
     summary = {
         "status": status, "batch_id": batch_id, "brand_id": str(brand_id),
         "model_filter": model_filter, "skip": skip, "delay_seconds": delay_seconds,
-        "country": country, "language": language,
+        "country": country, "language": language, "use_proxy": use_proxy,
         "initial_remaining_count": remaining_count, "limit_per_run": limit,
         "planned_runs": run_count, "completed_runs": len(run_results),
         "mop_up_remaining_count": mop_up_count, "mop_up_runs": len(mop_up_results),
@@ -691,6 +693,7 @@ def google_ai_mode_extraction_flow(
     country: str | None = None,
     language: str | None = None,
     debug_pause_seconds: int = 0,
+    use_proxy: bool = False,
 ) -> dict[str, Any]:
     """
     Orchestrate a Google AI Mode prompt extraction run.
@@ -725,6 +728,7 @@ def google_ai_mode_extraction_flow(
         country=country,
         language=language,
         debug_pause_seconds=debug_pause_seconds,
+        use_proxy=use_proxy,
     )
 
     processing_result: dict[str, Any] | None = None
@@ -774,6 +778,7 @@ def google_ai_overview_extraction_flow(
     country: str | None = None,
     language: str | None = None,
     debug_pause_seconds: int = 0,
+    use_proxy: bool = False,
 ) -> dict[str, Any]:
     """
     Orchestrate a Google AI Overview prompt extraction run.
@@ -808,6 +813,7 @@ def google_ai_overview_extraction_flow(
         country=country,
         language=language,
         debug_pause_seconds=debug_pause_seconds,
+        use_proxy=use_proxy,
     )
 
     processing_result: dict[str, Any] | None = None

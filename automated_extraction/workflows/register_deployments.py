@@ -94,6 +94,7 @@ def get_flows():
                 "delay_seconds": 60,
                 "country": None,
                 "language": None,
+                "use_proxy": False,
             },
         },
         "google-ai-overview-extraction-batch": {
@@ -108,6 +109,7 @@ def get_flows():
                 "delay_seconds": 60,
                 "country": None,
                 "language": None,
+                "use_proxy": False,
             },
         },
         "google-ai-mode-extraction": {
@@ -127,6 +129,7 @@ def get_flows():
                 "llm_model_filter": "google-ai-mode",
                 "country": None,
                 "language": None,
+                "use_proxy": False,
             },
         },
         "google-ai-overview-extraction": {
@@ -146,6 +149,7 @@ def get_flows():
                 "llm_model_filter": "google-ai-overview",
                 "country": None,
                 "language": None,
+                "use_proxy": False,
             },
         },
     }
