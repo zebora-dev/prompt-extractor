@@ -19,6 +19,12 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 # API, pass PREFECT_WORKING_DIR=/app explicitly so the worker finds the code.
 WORK_DIR = os.getenv("PREFECT_WORKING_DIR") or str(PROJECT_ROOT)
 
+# Supported regions. Each maps to a deployment name suffix and a region tag.
+REGIONS = {
+    "us": {"suffix": "", "tag": "region:us"},
+    "uk": {"suffix": "-uk", "tag": "region:uk"},
+}
+
 
 def get_flows():
     from automated_extraction.workflows.flows import (
@@ -155,6 +161,10 @@ def get_flows():
     }
 
 
+def _deployment_name(base_name: str, suffix: str) -> str:
+    return f"{base_name}{suffix}"
+
+
 def serve_deployments() -> None:
     from prefect import serve
 
@@ -174,11 +184,20 @@ def serve_deployments() -> None:
     serve(*deployments)
 
 
-async def deploy_with_local_storage() -> None:
-    for name, config in get_flows().items():
+async def deploy_with_local_storage(region: str = "us") -> None:
+    region_config = REGIONS.get(region)
+    if region_config is None:
+        raise ValueError(f"Unknown region {region!r}. Choose from: {list(REGIONS)}")
+
+    suffix = region_config["suffix"]
+    region_tag = region_config["tag"]
+
+    for base_name, config in get_flows().items():
+        deployment_name = _deployment_name(base_name, suffix)
+        tags = [*config["tags"], region_tag]
         try:
             await config["flow"].deploy(
-                name=name,
+                name=deployment_name,
                 work_pool_name=WORK_POOL_NAME,
                 job_variables={
                     "working_dir": WORK_DIR,
@@ -186,7 +205,7 @@ async def deploy_with_local_storage() -> None:
                         "PYTHONPATH": WORK_DIR,
                     },
                 },
-                tags=config["tags"],
+                tags=tags,
                 description=config["description"],
                 parameters=config.get("parameters", {}),
                 build=False,
@@ -194,9 +213,14 @@ async def deploy_with_local_storage() -> None:
                 entrypoint_type=EntrypointType.MODULE_PATH,
                 ignore_warnings=True,
             )
-            LOGGER.info("Deployed %s to work pool %s", name, WORK_POOL_NAME)
+            LOGGER.info(
+                "Deployed %s (region=%s) to work pool %s",
+                deployment_name,
+                region,
+                WORK_POOL_NAME,
+            )
         except Exception as exc:
-            LOGGER.error("Failed to deploy %s: %s", name, exc)
+            LOGGER.error("Failed to deploy %s: %s", deployment_name, exc)
             raise
 
 
@@ -231,14 +255,20 @@ def create_work_pool() -> bool:
         return False
 
 
-def list_deployments() -> None:
+def list_deployments(region: str | None = None) -> None:
+    regions_to_show = [region] if region else list(REGIONS)
     print("\nAvailable Prompt Extraction Workflows:")
     print("=" * 60)
-    for name, config in get_flows().items():
-        print(f"\n{name}")
+    for base_name, config in get_flows().items():
+        print(f"\n{base_name}")
         print(f"  Description: {config['description']}")
         print(f"  Tags: {', '.join(config['tags'])}")
         print(f"  Default params: {config.get('parameters', {})}")
+        print(f"  Deployments:")
+        for r in regions_to_show:
+            rc = REGIONS[r]
+            dep_name = _deployment_name(base_name, rc["suffix"])
+            print(f"    [{r}] {dep_name}  ({rc['tag']})")
     print()
 
 
@@ -250,15 +280,27 @@ def main() -> None:
     parser.add_argument("--deploy-local", action="store_true", help="Deploy flows for local process workers.")
     parser.add_argument("--create-pool", action="store_true", help="Create the process work pool.")
     parser.add_argument("--list", action="store_true", help="List available workflows.")
+    parser.add_argument(
+        "--region",
+        choices=list(REGIONS),
+        default="us",
+        help=(
+            "Region to deploy for. Controls the deployment name suffix and region tag. "
+            "Must match the PREFECT_WORK_POOL set for that region's worker. "
+            "Default: us"
+        ),
+    )
     args = parser.parse_args()
 
     if not any([args.serve, args.deploy_local, args.create_pool, args.list]):
         parser.print_help()
         print("\nFor local development, use: --serve")
+        print("To deploy for US workers: --deploy-local --region us")
+        print("To deploy for UK workers: --deploy-local --region uk")
         sys.exit(0)
 
     if args.list:
-        list_deployments()
+        list_deployments(args.region if args.region else None)
         return
 
     if args.create_pool:
@@ -270,7 +312,7 @@ def main() -> None:
     if args.serve:
         serve_deployments()
     elif args.deploy_local:
-        asyncio.run(deploy_with_local_storage())
+        asyncio.run(deploy_with_local_storage(region=args.region))
 
 
 if __name__ == "__main__":

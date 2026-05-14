@@ -1,0 +1,61 @@
+# fly-uk.yaml — Fly.io worker configuration for the UK region (lhr)
+#
+# Creates prompt-extractor-uk running in London (lhr).
+# This worker polls the prompt-extraction-uk Prefect work pool so that
+# UK-tagged deployments (e.g. google-ai-mode-extraction-batch-uk) are
+# routed here rather than to the US worker.
+#
+# Deploy:   fly deploy -a prompt-extractor-uk -c fly-uk.yaml
+# Secrets (run once, not stored in this file):
+#   fly secrets set -a prompt-extractor-uk \
+#     BRANDSIGHT_API_BASE_URL=... \
+#     BRANDSIGHT_SUPABASE_URL=... \
+#     BRANDSIGHT_SUPABASE_ANON_KEY=... \
+#     PREFECT_API_URL=https://prompt-extractor-prefect.fly.dev/api \
+#     WORKFLOW_API_KEY=... \
+#     GOOGLE_PROXY_URL=http://user-country-gb:password@gw.dataimpulse.com:823
+
+app: prompt-extractor-uk
+primary_region: lhr
+kill_signal: SIGINT
+kill_timeout: 30s
+
+build:
+  dockerfile: Dockerfile
+
+env:
+  CHATGPT_CHROME_USER_DATA_DIR: /data/chrome-profile
+  CHATGPT_HEADLESS: "false"
+  PREFECT_WORKING_DIR: /app
+  PREFECT_WORK_POOL: prompt-extraction-uk
+  PROMPT_EXTRACTOR_VNC: "true"
+  VNC_SCREEN: 1280x720x24
+  # Geo defaults for this worker — flows can override per-run via parameters
+  GOOGLE_SEARCH_COUNTRY: GB
+  GOOGLE_SEARCH_LANGUAGE: en
+
+processes:
+  app: python -m prefect worker start --pool prompt-extraction-uk --type process --limit 1 --install-policy never
+
+mounts:
+  - source: prompt_extractor_data_uk
+    destination: /data
+
+    processes:
+      - app
+
+http_service:
+  internal_port: 6080
+  force_https: false
+  auto_stop_machines: false
+  auto_start_machines: true
+  min_machines_running: 1
+  sticky_sessions: true
+
+  processes:
+    - app
+
+vm:
+  - memory: 2048mb
+    cpu_kind: performance
+    cpus: 1
