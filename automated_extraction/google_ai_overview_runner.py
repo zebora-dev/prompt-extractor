@@ -162,6 +162,11 @@ class GoogleAIOverviewRunner:
         current_url = driver.current_url
 
         if not result.get("ai_overview_triggered"):
+            LOGGER.warning(
+                "run_prompt: no AI Overview detected — state=%s url=%s",
+                result.get("capture_state"),
+                current_url[:120],
+            )
             return GoogleAIOverviewCapture(
                 response="",
                 markdown="",
@@ -203,6 +208,13 @@ class GoogleAIOverviewRunner:
         if not response and not sources:
             raise RuntimeError("Google AI Overview container was detected, but extracted content was empty")
 
+        LOGGER.info(
+            "run_prompt: captured AIO — text_len=%s sources=%s raw_html_len=%s state=%s",
+            len(response),
+            len(sources),
+            len(raw_html),
+            result.get("capture_state"),
+        )
         return GoogleAIOverviewCapture(
             response=response,
             markdown=markdown,
@@ -246,6 +258,7 @@ class GoogleAIOverviewRunner:
         stable_checks = 0
         show_more_clicked = False
 
+        poll = 0
         while time.time() < deadline:
             blocked_reason = self.detect_blocking_page()
             if blocked_reason:
@@ -253,8 +266,17 @@ class GoogleAIOverviewRunner:
 
             result = self.extract_ai_overview()
             last_result = result
+            poll += 1
 
             if not result.get("ai_overview_triggered"):
+                elapsed = round(time.time() - (deadline - self.response_timeout_seconds), 1)
+                LOGGER.info(
+                    "wait_for_ai_overview poll#%s (%.1fs): no AIO yet — state=%s url=%s",
+                    poll,
+                    elapsed,
+                    result.get("capture_state"),
+                    self.require_driver().current_url[:120],
+                )
                 time.sleep(1)
                 continue
 
@@ -280,7 +302,19 @@ class GoogleAIOverviewRunner:
             time.sleep(0.5)
 
         if last_result.get("ai_overview_triggered"):
+            LOGGER.warning(
+                "wait_for_ai_overview: timed out after %ss — returning timeout_partial (text_len=%s, sources=%s)",
+                self.response_timeout_seconds,
+                len(last_result.get("text") or ""),
+                len(last_result.get("sources") or []),
+            )
             return {**last_result, "capture_state": "timeout_partial"}
+        LOGGER.warning(
+            "wait_for_ai_overview: timed out after %ss with no AIO detected — final state=%s final_url=%s",
+            self.response_timeout_seconds,
+            last_result.get("capture_state"),
+            self.require_driver().current_url[:120],
+        )
         return last_result
 
     def click_show_more(self) -> bool:
@@ -300,7 +334,7 @@ class GoogleAIOverviewRunner:
             LOGGER.info("Clicked 'Show more AI Overview' button.")
             return True
         except WebDriverException:
-            LOGGER.debug("'Show more AI Overview' button not found — panel may already be fully expanded.")
+            LOGGER.info("'Show more AI Overview' button not found — panel may already be fully expanded.")
             return False
 
     def _click_show_all_sidebar(self) -> bool:
@@ -338,9 +372,17 @@ class GoogleAIOverviewRunner:
         try:
             result = self.require_driver().execute_script(AI_OVERVIEW_EXTRACTION_SCRIPT)
             if isinstance(result, dict):
+                LOGGER.info(
+                    "extract_ai_overview: triggered=%s state=%s text_len=%s sources=%s",
+                    result.get("ai_overview_triggered"),
+                    result.get("capture_state"),
+                    len(result.get("text") or ""),
+                    len(result.get("sources") or []),
+                )
                 return result
+            LOGGER.warning("extract_ai_overview: script returned non-dict: %r", result)
         except WebDriverException as exc:
-            LOGGER.debug("Google AI Overview extraction script failed: %s", first_line(str(exc)))
+            LOGGER.warning("Google AI Overview extraction script failed: %s", first_line(str(exc)))
         return {
             "ai_overview_triggered": False,
             "capture_state": "extraction_error",
