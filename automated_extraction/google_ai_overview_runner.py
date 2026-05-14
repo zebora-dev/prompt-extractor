@@ -411,8 +411,7 @@ class GoogleAIOverviewRunner:
 
 # Extracts sidebar sources that are NEW since the last extraction pass.
 # Called with a list of already-seen URLs so deduplication works across passes.
-SIDEBAR_EXTRA_SOURCES_SCRIPT = r"""
-(function(existingUrls) {
+SIDEBAR_EXTRA_SOURCES_SCRIPT = r"""return (function(existingUrls) {
   const seen = new Set(existingUrls || []);
   const cleanText = (v) => (v || '').replace(/\s+/g, ' ').trim();
   function isUsefulUrl(url) {
@@ -455,8 +454,7 @@ SIDEBAR_EXTRA_SOURCES_SCRIPT = r"""
 #   muU3oe  — inline citation chips; href is the real URL, name is in parent span
 #   H23r4e  — source links embedded in body text; link.innerText is the name
 # Both are deduplicated by URL.
-AI_OVERVIEW_EXTRACTION_SCRIPT = r"""
-(function() {
+AI_OVERVIEW_EXTRACTION_SCRIPT = r"""return (function() {
   const cleanText = (v) => (v || '').replace(/\s+/g, ' ').trim();
 
   function unwrapGoogleUrl(href) {
