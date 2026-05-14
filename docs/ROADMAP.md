@@ -70,7 +70,11 @@ Ranked by impact / effort. Items marked **[quick win]** are low-effort and high-
 **Why:** `CHATGPT_ACCOUNTS_B64` encodes credentials. A developer could accidentally log or commit a decoded version.  
 **What:** Add `gitleaks` (or GitHub's push protection + secret scanning) to the repository settings and CI workflow.
 
-### 4.3 Chrome profile volume encryption
+### 4.3 Switch API client to service role key **[quick win]**
+**Why:** The worker currently uses the anon key for all Supabase writes. The anon key is subject to RLS policies that can block inserts (e.g. `prompts_outputs_suggestions`) and is lower-privilege than needed for a trusted server process.  
+**What:** Add a `BRANDSIGHT_SUPABASE_SERVICE_KEY` env var. In `api_client.py`, use the service role key for direct table writes (bypasses RLS entirely). Keep the anon key path for any user-facing / edge-function calls. Set the secret on Fly.io via `fly secrets set BRANDSIGHT_SUPABASE_SERVICE_KEY="..."`.
+
+### 4.4 Chrome profile volume encryption
 **Why:** The Fly.io persistent volume (`/data`) stores real Chrome sessions (cookies, local storage) for logged-in ChatGPT accounts.  
 **What:** Document (and optionally script) `fly volumes` encryption-at-rest for the `/data` volume. Fly volumes already support this via the `--encrypted` flag.
 
