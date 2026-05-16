@@ -687,7 +687,9 @@ def warmup_google_session(browser: NodriverBrowser, warmup_url: str = "https://w
         browser.navigate(warmup_url)
         time.sleep(random.uniform(1.5, 2.5))
 
-        _dismiss_google_overlays(browser)
+        current_url = _log_page_state(browser, "warmup: after navigation")
+        _dismiss_google_overlays(browser, origin_url=current_url)
+        _log_page_state(browser, "warmup: after overlay dismissal")
 
         search_box = None
         for css in ("textarea[name='q']", "input[name='q']"):
@@ -715,6 +717,18 @@ def warmup_google_session(browser: NodriverBrowser, warmup_url: str = "https://w
         LOGGER.warning("Session warmup failed (non-fatal): %s", exc)
 
 
+def _log_page_state(browser: NodriverBrowser, label: str) -> str:
+    """Log current URL and title; returns the URL string."""
+    try:
+        url = str(_run_sync(browser._tab.evaluate("window.location.href")) or "")
+        title = str(_run_sync(browser._tab.evaluate("document.title")) or "")
+        LOGGER.info("%s — url=%s title=%r", label, url, title[:120])
+        return url
+    except Exception as exc:
+        LOGGER.debug("_log_page_state failed: %s", exc)
+        return ""
+
+
 def search_via_box(browser: NodriverBrowser, query: str) -> None:
     """
     Submit a search by navigating to the Google homepage and typing into the
@@ -726,7 +740,12 @@ def search_via_box(browser: NodriverBrowser, query: str) -> None:
     LOGGER.info("search_via_box: navigating to google.com homepage.")
     browser.navigate("https://www.google.com")
     time.sleep(random.uniform(1.2, 2.0))
-    _dismiss_google_overlays(browser)
+
+    current_url = _log_page_state(browser, "search_via_box: after navigation")
+    _dismiss_google_overlays(browser, origin_url=current_url)
+
+    # After overlay dismissal the page may have reloaded; re-check URL.
+    current_url = _log_page_state(browser, "search_via_box: after overlay dismissal")
 
     search_box = None
     for css in ("textarea[name='q']", "input[name='q']"):
@@ -736,7 +755,9 @@ def search_via_box(browser: NodriverBrowser, query: str) -> None:
             break
 
     if search_box is None:
-        raise RuntimeError("search_via_box: could not find Google search box")
+        raise RuntimeError(
+            f"search_via_box: could not find Google search box (url={current_url!r})"
+        )
 
     search_box.click()
     time.sleep(random.uniform(0.3, 0.6))
@@ -783,20 +804,49 @@ def _press_enter(browser: NodriverBrowser) -> None:
             pass
 
 
-def _dismiss_google_overlays(browser: NodriverBrowser) -> None:
-    """Click through Google's cookie consent / sign-in prompts if visible."""
+def _dismiss_google_overlays(browser: NodriverBrowser, origin_url: str = "") -> None:
+    """
+    Click through Google's cookie consent / sign-in prompts if visible.
+
+    Handles both the standard google.com modal overlay and the redirect to
+    consent.google.com that Google UK serves on fresh profiles via UK proxies.
+    After accepting, if still on a consent/accounts page, navigates back to
+    google.com so subsequent search-box lookups work.
+    """
+    _CONSENT_TEXTS = [
+        "Accept all", "Reject all", "I agree", "Agree", "Accept",
+        "Tout accepter", "Alles akzeptieren",  # French / German variants
+    ]
     try:
-        _CONSENT_TEXTS = ["Accept all", "Reject all", "I agree", "Agree"]
         buttons = browser.find_elements_by_css("button")
+        LOGGER.debug("Overlay check: found %d button(s) on page.", len(buttons))
         for btn in buttons:
             btn_text = btn.text.strip()
+            if not btn_text:
+                continue
             if any(t.lower() in btn_text.lower() for t in _CONSENT_TEXTS):
-                LOGGER.info("Dismissing Google overlay button: %r", btn_text[:40])
+                LOGGER.info("Dismissing Google overlay button: %r", btn_text[:60])
                 btn.click()
-                time.sleep(random.uniform(0.5, 1.0))
+                time.sleep(random.uniform(0.8, 1.5))
                 break
+        else:
+            LOGGER.debug("No consent button matched among %d button(s).", len(buttons))
     except Exception as exc:
         LOGGER.debug("Overlay dismissal (non-fatal): %s", exc)
+
+    # After consent, Google may land on consent.google.com or accounts.google.com.
+    # Navigate explicitly back to google.com so we can find the search box.
+    try:
+        current_url = str(_run_sync(browser._tab.evaluate("window.location.href")) or "")
+        _NON_SEARCH_HOSTS = ("consent.google.", "accounts.google.", "myaccount.google.")
+        if any(h in current_url for h in _NON_SEARCH_HOSTS):
+            LOGGER.info(
+                "Still on non-search page after consent (%s) — navigating to google.com", current_url
+            )
+            browser.navigate("https://www.google.com")
+            time.sleep(random.uniform(1.2, 2.0))
+    except Exception as exc:
+        LOGGER.debug("Post-consent redirect check failed (non-fatal): %s", exc)
 
 
 # ---------------------------------------------------------------------------
