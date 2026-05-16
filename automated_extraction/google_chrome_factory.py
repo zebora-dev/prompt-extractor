@@ -494,23 +494,42 @@ def build_nodriver_browser(
     return nb
 
 
+async def _wait_for_chrome_debug_port(host: str, port: int, timeout: float = 30.0) -> None:
+    """Poll Chrome's debug endpoint until it responds or timeout is reached."""
+    url = f"http://{host}:{port}/json/version"
+    deadline = time.monotonic() + timeout
+    last_exc: Exception | None = None
+    while time.monotonic() < deadline:
+        try:
+            await asyncio.get_event_loop().run_in_executor(
+                None, lambda: urllib.request.urlopen(url, timeout=2)
+            )
+            return
+        except Exception as exc:
+            last_exc = exc
+            await asyncio.sleep(0.5)
+    raise TimeoutError(
+        f"Chrome debug port {host}:{port} not ready after {timeout}s. Last error: {last_exc}"
+    )
+
+
 async def _start_nodriver(
     *,
     headless: bool,
     proxy_url: str | None,
     user_agent: str,
 ):
-    """Async coroutine: start nodriver with the given config."""
-    import sys
-    import nodriver as uc  # type: ignore[import-untyped]
-    cdp = uc.cdp
+    """Async coroutine: start nodriver with the given config.
 
-    # On Linux (container environments), Chrome in non-headless (GUI) mode
-    # stalls before opening the CDP debug port even when Xvfb is running.
-    # Force headless=True on Linux regardless of the caller's preference.
-    if sys.platform.startswith("linux") and not headless:
-        LOGGER.info("Linux detected: forcing headless=True (non-headless Chrome blocks CDP port on Fly.io/Xvfb)")
-        headless = True
+    We launch Chrome ourselves (rather than letting nodriver do it) so we can
+    wait up to 30 seconds for the CDP debug port to open.  This is necessary
+    on Linux / Fly.io where non-headless Chrome can take 15+ seconds to open
+    the debug port (waiting for dbus timeouts) — far longer than nodriver's
+    built-in 2.75 second retry window.
+    """
+    import nodriver as uc  # type: ignore[import-untyped]
+    import nodriver.core.util as uc_util
+    cdp = uc.cdp
 
     browser_args = [
         "--no-sandbox",
@@ -535,15 +554,38 @@ async def _start_nodriver(
         browser_args.append(f"--proxy-server=http://{proxy_host_port}")
         LOGGER.info("Proxy configured: %s (credentials: %s)", proxy_host_port, "yes" if proxy_username else "no")
 
-    # Do NOT pass user_data_dir — let nodriver create a fresh temp profile.
-    # sandbox=False is required when running as root (e.g. Fly.io workers).
-    # Note: the parameter is `sandbox` (not `no_sandbox`) — passing `no_sandbox=True`
-    # is silently swallowed via **kwargs and has no effect.
-    browser = await uc.start(
+    # Build a nodriver Config so we get the correct binary path + default args.
+    # We start Chrome ourselves to bypass nodriver's 2.75s connection timeout.
+    config = uc.Config(
         headless=headless,
-        browser_args=browser_args,
         sandbox=False,
+        browser_args=browser_args,
     )
+    debug_host = "127.0.0.1"
+    debug_port = uc_util.free_port()
+    config.host = debug_host
+    config.port = debug_port
+
+    LOGGER.info(
+        "Launching Chrome: exe=%s headless=%s port=%s",
+        config.browser_executable_path, headless, debug_port,
+    )
+    _chrome_proc = await asyncio.create_subprocess_exec(
+        config.browser_executable_path,
+        *config(),
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+
+    # Wait up to 30s for Chrome to open its debug port before connecting.
+    startup_timeout = 30.0
+    LOGGER.info("Waiting up to %.0fs for Chrome debug port %s:%s…", startup_timeout, debug_host, debug_port)
+    await _wait_for_chrome_debug_port(debug_host, debug_port, timeout=startup_timeout)
+    LOGGER.info("Chrome debug port ready.")
+
+    # Connect nodriver to the already-running Chrome instance.
+    browser = await uc.start(host=debug_host, port=debug_port)
     tab = browser.main_tab
 
     # Proxy auth via CDP Fetch.AuthRequired
