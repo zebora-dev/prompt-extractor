@@ -501,8 +501,16 @@ async def _start_nodriver(
     user_agent: str,
 ):
     """Async coroutine: start nodriver with the given config."""
+    import sys
     import nodriver as uc  # type: ignore[import-untyped]
     cdp = uc.cdp
+
+    # On Linux (container environments), Chrome in non-headless (GUI) mode
+    # stalls before opening the CDP debug port even when Xvfb is running.
+    # Force headless=True on Linux regardless of the caller's preference.
+    if sys.platform.startswith("linux") and not headless:
+        LOGGER.info("Linux detected: forcing headless=True (non-headless Chrome blocks CDP port on Fly.io/Xvfb)")
+        headless = True
 
     browser_args = [
         "--no-sandbox",
