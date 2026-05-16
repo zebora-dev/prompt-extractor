@@ -1,276 +1,712 @@
 """
-Centralised Chrome driver factory for Google extraction runners.
+Centralised Chrome browser factory for Google extraction runners.
 
-Handles:
-- undetected_chromedriver (primary) with optional selenium-wire for proxy auth
-- selenium-stealth fingerprint patches (graceful no-op if not installed)
-- CDP navigator.webdriver override injected before any page script runs
-- Rotating user-agent strings
-- Optional residential proxy via GOOGLE_PROXY_URL env var or explicit proxy_url
-- Session warmup (homepage visit before first search)
+Replaced from Selenium/undetected-chromedriver to nodriver (CDP-native).
+
+nodriver communicates directly with Chrome via CDP without Selenium's WebDriver
+protocol, making it significantly harder to fingerprint.
+
+Key improvements over the old Selenium factory:
+- No Selenium/WebDriver fingerprint — Chrome never runs in "controlled" mode
+- Proxy auth via CDP Fetch domain (no Chrome extension required)
+- Fresh temp profile on every run (no accumulated bot signals)
+- navigator.webdriver override injected via Page.addScriptToEvaluateOnNewDocument
+
+The sync/async boundary is bridged by running a dedicated asyncio event loop in
+a background daemon thread. All async operations are dispatched into that loop
+via asyncio.run_coroutine_threadsafe(), keeping the callers fully synchronous.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import random
-import sys
+import threading
 import time
+import urllib.parse
 from typing import Any
-
-from selenium import webdriver
-from selenium.common.exceptions import SessionNotCreatedException
-from selenium.webdriver import Chrome
-from selenium.webdriver.chrome.options import Options
-
-from .chatgpt_runner import detect_chrome_major_version, first_line
 
 LOGGER = logging.getLogger(__name__)
 
 # Chrome 135-137 on Windows/macOS — updated May 2026.
-# Keep platform consistent with selenium-stealth's platform arg.
-_CHROME_USER_AGENTS: list[tuple[str, str]] = [
-    # (user_agent, stealth_platform)
-    (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36",
-        "Win32",
-    ),
-    (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.7103.93 Safari/537.36",
-        "Win32",
-    ),
-    (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.7049.100 Safari/537.36",
-        "Win32",
-    ),
-    (
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36",
-        "MacIntel",
-    ),
-    (
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.7103.93 Safari/537.36",
-        "MacIntel",
-    ),
+_CHROME_USER_AGENTS: list[str] = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.7103.93 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.7049.100 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.7103.93 Safari/537.36",
 ]
 
-# navigator.webdriver override injected at document creation — before any page JS runs.
+# Injected before any page script runs to mask automation.
 _WEBDRIVER_OVERRIDE_SCRIPT = "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
 
+_WARMUP_QUERIES = [
+    "weather today",
+    "news today",
+    "latest news uk",
+    "bbc news",
+    "time right now",
+]
 
-def build_google_driver(
+# ---------------------------------------------------------------------------
+# Background event loop thread
+# ---------------------------------------------------------------------------
+
+_loop: asyncio.AbstractEventLoop | None = None
+_loop_lock = threading.Lock()
+
+
+def _get_or_create_loop() -> asyncio.AbstractEventLoop:
+    """Return the shared background asyncio event loop, creating it if needed."""
+    global _loop
+    with _loop_lock:
+        if _loop is None or not _loop.is_running():
+            ready = threading.Event()
+
+            def _run() -> None:
+                global _loop
+                _loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(_loop)
+                _loop.call_soon(ready.set)
+                _loop.run_forever()
+
+            t = threading.Thread(target=_run, daemon=True, name="nodriver-event-loop")
+            t.start()
+            ready.wait(timeout=10)
+    return _loop  # type: ignore[return-value]
+
+
+def _run_sync(coro) -> Any:
+    """Run a coroutine on the background event loop and return the result."""
+    loop = _get_or_create_loop()
+    future = asyncio.run_coroutine_threadsafe(coro, loop)
+    return future.result(timeout=120)
+
+
+# ---------------------------------------------------------------------------
+# Element wrapper
+# ---------------------------------------------------------------------------
+
+class NodriverElement:
+    """
+    Thin sync wrapper around a nodriver Element object.
+
+    Provides a duck-type-compatible surface for the Google runners and the PAA
+    suggestions runner (which expects Selenium-ish element objects).
+
+    nodriver Element attributes are accessed via element.attrs (a ContraDict)
+    or element[attr_name]. We bridge these to the Selenium-style
+    get_attribute(name) API expected by the runners.
+    """
+
+    def __init__(self, elem, tab) -> None:
+        # elem: a nodriver Element object
+        self._elem = elem
+        self._tab = tab
+
+    # --- properties --------------------------------------------------------
+
+    @property
+    def text(self) -> str:
+        """Return element's innerText via JS apply."""
+        try:
+            result = _run_sync(self._elem.apply(
+                "(el) => el.innerText || el.textContent || ''"
+            ))
+            return str(result or "")
+        except Exception:
+            # fallback to nodriver's built-in text property (direct text nodes only)
+            try:
+                return self._elem.text_all or ""
+            except Exception:
+                return ""
+
+    # --- attribute access --------------------------------------------------
+
+    def get_attribute(self, name: str) -> str | None:
+        """Return element attribute value, or None if absent."""
+        try:
+            # First try the nodriver attrs ContraDict (populated from DOM snapshot)
+            val = self._elem.attrs.get(name) if hasattr(self._elem, "attrs") else None
+            if val is not None:
+                return str(val)
+            # Fallback: get via JS in case attrs is stale
+            result = _run_sync(self._elem.apply(
+                f"(el) => el.getAttribute({name!r})"
+            ))
+            return result if result is not None else None
+        except Exception:
+            return None
+
+    # --- interaction -------------------------------------------------------
+
+    def click(self) -> None:
+        """Click element via JS dispatched events."""
+        try:
+            _run_sync(self._elem.apply(
+                """(el) => {
+                    el.scrollIntoView({block:'center', inline:'center'});
+                    el.dispatchEvent(new PointerEvent('pointerdown',{bubbles:true,pointerType:'mouse'}));
+                    el.dispatchEvent(new MouseEvent('mousedown',{bubbles:true}));
+                    el.dispatchEvent(new PointerEvent('pointerup',{bubbles:true,pointerType:'mouse'}));
+                    el.dispatchEvent(new MouseEvent('mouseup',{bubbles:true}));
+                    el.click();
+                }"""
+            ))
+        except Exception as exc:
+            LOGGER.debug("NodriverElement.click failed: %s", exc)
+
+    def send_keys(self, text: str) -> None:
+        """Type text into the element character by character via CDP Input events."""
+        import nodriver as uc  # type: ignore[import-untyped]
+        cdp = uc.cdp
+        # Focus the element first
+        try:
+            _run_sync(self._elem.apply("(el) => { el.focus(); }"))
+        except Exception:
+            pass
+        time.sleep(0.05)
+        for char in text:
+            try:
+                _run_sync(self._tab.send(
+                    cdp.input_.dispatch_key_event(
+                        type_="keyDown",
+                        key=char,
+                        text=char,
+                    )
+                ))
+                _run_sync(self._tab.send(
+                    cdp.input_.dispatch_key_event(
+                        type_="keyUp",
+                        key=char,
+                        text=char,
+                    )
+                ))
+            except Exception as exc:
+                LOGGER.debug("send_keys CDP key event failed for char %r: %s — skipping", char, exc)
+            time.sleep(random.uniform(0.04, 0.12))
+
+    # --- find children -----------------------------------------------------
+
+    def find_element(self, by: str, value: str) -> "NodriverElement":
+        """Find first child element matching selector. Raises on not found."""
+        results = self.find_elements(by, value)
+        if not results:
+            raise RuntimeError(f"NoSuchElement: {by}={value!r}")
+        return results[0]
+
+    def find_elements(self, by: str, value: str) -> list["NodriverElement"]:
+        """Find all child elements matching CSS selector."""
+        css = _by_to_css(by, value)
+        if css is None:
+            return []
+        try:
+            # Use nodriver's query_selector_all on the element (async)
+            elems = _run_sync(self._elem.query_selector_all(css))
+            if not elems:
+                return []
+            return [NodriverElement(e, self._tab) for e in elems]
+        except Exception as exc:
+            LOGGER.debug("NodriverElement.find_elements failed: %s", exc)
+            return []
+
+    # --- internal ----------------------------------------------------------
+
+    def _unwrap(self):
+        """Return the underlying nodriver Element object."""
+        return self._elem
+
+
+# ---------------------------------------------------------------------------
+# Main browser class
+# ---------------------------------------------------------------------------
+
+class NodriverBrowser:
+    """
+    Synchronous wrapper around a nodriver browser + main tab.
+
+    Designed to be a drop-in replacement for Selenium Chrome in the Google
+    extraction runners. Also provides enough duck-typing for the PAA suggestions
+    runner which accesses driver.find_elements / driver.execute_script.
+    """
+
+    def __init__(self, browser, tab) -> None:
+        self._browser = browser
+        self._tab = tab
+
+    # --- navigation --------------------------------------------------------
+
+    def navigate(self, url: str) -> None:
+        """Navigate to URL and wait for load."""
+        _run_sync(self._tab.get(url))
+
+    # Alias used by existing code that calls driver.get(url)
+    def get(self, url: str) -> None:
+        self.navigate(url)
+
+    # --- URL ---------------------------------------------------------------
+
+    @property
+    def current_url(self) -> str:
+        try:
+            result = _run_sync(self._tab.evaluate("window.location.href"))
+            return str(result or "")
+        except Exception:
+            return ""
+
+    # --- JS execution ------------------------------------------------------
+
+    def execute_script(self, script: str, *args) -> Any:
+        """
+        Execute JavaScript in the page context, returning the result.
+
+        When NodriverElement objects are passed as args, the script is called
+        via CDP call_function_on so the element is available as arguments[0],
+        arguments[1], etc. — matching the Selenium convention.
+
+        When no element args are present, uses tab.evaluate() directly.
+        """
+        import nodriver as uc  # type: ignore[import-untyped]
+        cdp = uc.cdp
+
+        # Separate element args from plain value args
+        nodriver_elements = []
+        plain_args = []
+        for arg in args:
+            if isinstance(arg, NodriverElement):
+                nodriver_elements.append(arg._elem)
+            else:
+                plain_args.append(arg)
+
+        if nodriver_elements:
+            # Use the first element as the target for call_function_on.
+            # Wrap the script so it receives remaining elements as extra args.
+            primary_elem = nodriver_elements[0]
+
+            async def _call_on_elem():
+                # Resolve the element to get its remote object id
+                import cdp as cdp_mod  # type: ignore[import-not-found]
+                remote = await self._tab.send(
+                    cdp.dom.resolve_node(backend_node_id=primary_elem.backend_node_id)
+                )
+                object_id = remote.object_id
+
+                # Build call arguments — primary element first, then any remaining elements
+                call_args = [cdp.runtime.CallArgument(object_id=object_id)]
+                for extra_elem in nodriver_elements[1:]:
+                    extra_remote = await self._tab.send(
+                        cdp.dom.resolve_node(backend_node_id=extra_elem.backend_node_id)
+                    )
+                    call_args.append(
+                        cdp.runtime.CallArgument(object_id=extra_remote.object_id)
+                    )
+                # Plain value args
+                for val in plain_args:
+                    call_args.append(cdp.runtime.CallArgument(value=val))
+
+                # Wrap the script as a function that receives all args positionally
+                # (matches Selenium's arguments[0], arguments[1], ... convention)
+                fn = f"function(){{ {script} }}"
+                result, exc_details = await self._tab.send(
+                    cdp.runtime.call_function_on(
+                        fn,
+                        object_id=object_id,
+                        arguments=call_args,
+                        return_by_value=True,
+                        user_gesture=True,
+                        await_promise=True,
+                    )
+                )
+                if exc_details:
+                    LOGGER.debug("execute_script exception: %s", exc_details)
+                    return None
+                return result.value if result else None
+
+            return _run_sync(_call_on_elem())
+        else:
+            # No element arguments — use tab.evaluate() with inline args if needed
+            if plain_args:
+                # Inject plain args as a self-calling wrapper (Selenium compat)
+                import json
+                args_json = json.dumps(plain_args)
+                wrapped = (
+                    f"(function(){{ "
+                    f"  var arguments = {args_json}; "
+                    f"  {script} "
+                    f"}})()"
+                )
+                try:
+                    return _run_sync(self._tab.evaluate(wrapped))
+                except Exception:
+                    # Try without wrapping (script might already be a return expression)
+                    return _run_sync(self._tab.evaluate(script))
+            else:
+                return _run_sync(self._tab.evaluate(script))
+
+    # Stub for Selenium CDP cmd — stealth is applied at startup.
+    def execute_cdp_cmd(self, cmd: str, params: dict) -> None:
+        pass
+
+    # --- window size -------------------------------------------------------
+
+    def set_window_size(self, width: int, height: int) -> None:
+        try:
+            import nodriver as uc  # type: ignore[import-untyped]
+            cdp = uc.cdp
+            _run_sync(self._tab.send(
+                cdp.browser.set_window_bounds(
+                    window_id=1,
+                    bounds=cdp.browser.Bounds(
+                        width=width,
+                        height=height,
+                    ),
+                )
+            ))
+            LOGGER.debug("Window resized to %sx%s via CDP.", width, height)
+        except Exception as exc:
+            LOGGER.debug("set_window_size via CDP failed: %s — trying JS.", exc)
+            try:
+                _run_sync(self._tab.evaluate(f"window.resizeTo({width},{height});"))
+            except Exception as exc2:
+                LOGGER.debug("set_window_size JS fallback failed: %s", exc2)
+
+    # --- element finding ---------------------------------------------------
+
+    def find_elements_by_css(self, css: str) -> list[NodriverElement]:
+        """Find all elements matching a CSS selector."""
+        return self._query_css(css)
+
+    def _query_css(self, css: str) -> list[NodriverElement]:
+        try:
+            elems = _run_sync(self._tab.query_selector_all(css))
+            if not elems:
+                return []
+            return [NodriverElement(e, self._tab) for e in elems]
+        except Exception as exc:
+            LOGGER.debug("find_elements_by_css(%r) failed: %s", css, exc)
+            return []
+
+    # Selenium-compatible aliases used by PAA suggestions runner
+    def find_elements(self, by: str, value: str) -> list[NodriverElement]:
+        css = _by_to_css(by, value)
+        if css is None:
+            return []
+        return self._query_css(css)
+
+    def find_element(self, by: str, value: str) -> NodriverElement:
+        results = self.find_elements(by, value)
+        if not results:
+            raise RuntimeError(f"NoSuchElement: {by}={value!r}")
+        return results[0]
+
+    # --- quit --------------------------------------------------------------
+
+    def quit(self) -> None:
+        try:
+            _run_sync(self._browser.stop())
+        except Exception as exc:
+            LOGGER.debug("Browser quit failed (non-fatal): %s", exc)
+
+
+# ---------------------------------------------------------------------------
+# By constants shim (so callers don't need to import from selenium)
+# ---------------------------------------------------------------------------
+
+class By:
+    CSS_SELECTOR = "css selector"
+    XPATH = "xpath"
+    ID = "id"
+    NAME = "name"
+    TAG_NAME = "tag name"
+    CLASS_NAME = "class name"
+    LINK_TEXT = "link text"
+    PARTIAL_LINK_TEXT = "partial link text"
+
+
+def _by_to_css(by: str, value: str) -> str | None:
+    """Convert a Selenium By strategy + value to a CSS selector string."""
+    by_lower = by.lower()
+    if "css" in by_lower:
+        return value
+    if by_lower in ("id", "by.id"):
+        return f"#{value}"
+    if by_lower in ("name", "by.name"):
+        return f"[name='{value}']"
+    if by_lower in ("tag name", "tag_name", "by.tag_name"):
+        return value
+    if by_lower in ("class name", "class_name", "by.class_name"):
+        return f".{value}"
+    # XPATH is not supported via CSS — return None so callers get an empty list
+    if by_lower in ("xpath", "by.xpath"):
+        LOGGER.debug("XPath selector not supported in NodriverBrowser: %r", value)
+        return None
+    return value
+
+
+# ---------------------------------------------------------------------------
+# Public factory
+# ---------------------------------------------------------------------------
+
+def build_nodriver_browser(
     *,
     headless: bool = False,
-    user_data_dir: str | None = None,
     proxy_url: str | None = None,
-) -> Chrome:
+) -> NodriverBrowser:
     """
-    Build a Chrome driver configured for Google extraction with stealth patches.
+    Build and return a NodriverBrowser ready for Google extraction.
 
-    proxy_url: full proxy URL, e.g. ``http://user:pass@host:port``.
-               When provided, uses selenium-wire to authenticate the proxy.
-               Falls back to plain undetected_chromedriver if selenium-wire
-               is unavailable.
+    - Fresh temp profile on every call (no persistent state).
+    - Proxy auth via CDP Fetch.AuthRequired (no Chrome extension).
+    - navigator.webdriver override injected via addScriptToEvaluateOnNewDocument.
+    - Window resized to VNC_SCREEN dimensions if set.
     """
-    user_agent, stealth_platform = random.choice(_CHROME_USER_AGENTS)
+    user_agent = random.choice(_CHROME_USER_AGENTS)
     LOGGER.info(
-        "Building Google Chrome driver. proxy=%s headless=%s ua=%s",
+        "Building nodriver browser. proxy=%s headless=%s ua=%s",
         "yes" if proxy_url else "no",
         headless,
-        user_agent[:60],
+        user_agent[:80],
     )
 
-    driver = _create_driver(
+    t0 = time.time()
+    browser, tab = _run_sync(_start_nodriver(
         headless=headless,
-        user_data_dir=user_data_dir,
         proxy_url=proxy_url,
         user_agent=user_agent,
+    ))
+    LOGGER.info("nodriver browser started in %.1fs.", time.time() - t0)
+
+    nb = NodriverBrowser(browser, tab)
+
+    # Resize window to VNC display dimensions.
+    vnc_screen = os.getenv("VNC_SCREEN", "")
+    if vnc_screen:
+        try:
+            parts = vnc_screen.split("x")
+            w, h = int(parts[0]), int(parts[1])
+            nb.set_window_size(w, h)
+            LOGGER.info("Window resized to VNC screen: %sx%s", w, h)
+        except Exception as exc:
+            LOGGER.debug("Window resize failed (non-fatal): %s", exc)
+
+    LOGGER.info("nodriver browser ready.")
+    return nb
+
+
+async def _start_nodriver(
+    *,
+    headless: bool,
+    proxy_url: str | None,
+    user_agent: str,
+):
+    """Async coroutine: start nodriver with the given config."""
+    import nodriver as uc  # type: ignore[import-untyped]
+    cdp = uc.cdp
+
+    browser_args = [
+        "--no-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-gpu",
+        f"--user-agent={user_agent}",
+        f"--window-size={random.randint(1280, 1920)},{random.randint(720, 1080)}",
+    ]
+    if headless:
+        browser_args.append("--headless=new")
+
+    # Proxy server arg (auth handled via CDP Fetch below)
+    proxy_username: str | None = None
+    proxy_password: str | None = None
+    if proxy_url:
+        parsed = urllib.parse.urlparse(proxy_url)
+        host = parsed.hostname or ""
+        port = parsed.port or 8080
+        proxy_username = urllib.parse.unquote(parsed.username or "")
+        proxy_password = urllib.parse.unquote(parsed.password or "")
+        proxy_host_port = f"{host}:{port}"
+        browser_args.append(f"--proxy-server=http://{proxy_host_port}")
+        LOGGER.info("Proxy configured: %s (credentials: %s)", proxy_host_port, "yes" if proxy_username else "no")
+
+    # Do NOT pass user_data_dir — let nodriver create a fresh temp profile.
+    # sandbox=False is required when running as root (e.g. Fly.io workers).
+    # Note: the parameter is `sandbox` (not `no_sandbox`) — passing `no_sandbox=True`
+    # is silently swallowed via **kwargs and has no effect.
+    browser = await uc.start(
+        headless=headless,
+        browser_args=browser_args,
+        sandbox=False,
     )
-    _apply_stealth(driver, user_agent=user_agent, platform=stealth_platform)
-    return driver
+    tab = browser.main_tab
+
+    # Proxy auth via CDP Fetch.AuthRequired
+    if proxy_url and proxy_username is not None:
+        _username = proxy_username
+        _password = proxy_password or ""
+
+        async def _handle_auth(event) -> None:
+            asyncio.get_event_loop().create_task(tab.send(
+                cdp.fetch.continue_with_auth(
+                    request_id=event.request_id,
+                    auth_challenge_response=cdp.fetch.AuthChallengeResponse(
+                        response="ProvideCredentials",
+                        username=_username,
+                        password=_password,
+                    ),
+                )
+            ))
+
+        tab.add_handler(cdp.fetch.AuthRequired, _handle_auth)
+        await tab.send(cdp.fetch.enable(handle_auth_requests=True))
+        LOGGER.info("CDP Fetch auth handler registered for proxy.")
+
+    # Inject navigator.webdriver override before any page script runs.
+    try:
+        await tab.send(
+            cdp.page.add_script_to_evaluate_on_new_document(
+                source=_WEBDRIVER_OVERRIDE_SCRIPT,
+            )
+        )
+        LOGGER.debug("navigator.webdriver CDP override injected.")
+    except Exception as exc:
+        LOGGER.debug("navigator.webdriver CDP override failed (non-fatal): %s", exc)
+
+    return browser, tab
 
 
-def warmup_google_session(driver: Chrome, warmup_url: str = "https://www.google.com") -> None:
-    """Visit the Google homepage to establish cookies before the first search."""
+# ---------------------------------------------------------------------------
+# Warmup and search helpers (sync wrappers keeping original signatures)
+# ---------------------------------------------------------------------------
+
+def warmup_google_session(browser: NodriverBrowser, warmup_url: str = "https://www.google.com") -> None:
+    """
+    Establish a natural-looking Google session before the first real search.
+
+    Steps:
+    1. Visit the homepage and pause briefly.
+    2. Dismiss any cookie consent overlays.
+    3. Type a benign warmup query into the search box character-by-character.
+    4. Submit and wait for the results page to load.
+    """
     try:
         LOGGER.info("Warming up Google session via %s", warmup_url)
-        driver.get(warmup_url)
-        time.sleep(random.uniform(2.0, 3.5))
+        browser.navigate(warmup_url)
+        time.sleep(random.uniform(1.5, 2.5))
+
+        _dismiss_google_overlays(browser)
+
+        search_box = None
+        for css in ("textarea[name='q']", "input[name='q']"):
+            elems = browser.find_elements_by_css(css)
+            if elems:
+                search_box = elems[0]
+                break
+
+        if search_box is None:
+            LOGGER.warning("Warmup: could not find search box — skipping warmup query.")
+            return
+
+        search_box.click()
+        time.sleep(random.uniform(0.3, 0.6))
+        warmup_query = random.choice(_WARMUP_QUERIES)
+        LOGGER.info("Typing warmup query: %r", warmup_query)
+        search_box.send_keys(warmup_query)
+        time.sleep(random.uniform(0.4, 0.9))
+
+        # Press Enter
+        _press_enter(browser)
+        time.sleep(random.uniform(2.5, 4.0))
+        LOGGER.info("Warmup search complete.")
     except Exception as exc:
         LOGGER.warning("Session warmup failed (non-fatal): %s", exc)
 
 
-# ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
+def search_via_box(browser: NodriverBrowser, query: str) -> None:
+    """
+    Submit a search by navigating to the Google homepage and typing into the
+    search box character by character.
+
+    Always returns to the homepage before searching so we get a clean,
+    reliably interactable search textarea.
+    """
+    LOGGER.info("search_via_box: navigating to google.com homepage.")
+    browser.navigate("https://www.google.com")
+    time.sleep(random.uniform(1.2, 2.0))
+    _dismiss_google_overlays(browser)
+
+    search_box = None
+    for css in ("textarea[name='q']", "input[name='q']"):
+        elems = browser.find_elements_by_css(css)
+        if elems:
+            search_box = elems[0]
+            break
+
+    if search_box is None:
+        raise RuntimeError("search_via_box: could not find Google search box")
+
+    search_box.click()
+    time.sleep(random.uniform(0.3, 0.6))
+
+    LOGGER.info("search_via_box: typing query (%d chars).", len(query))
+    search_box.send_keys(query)
+    time.sleep(random.uniform(0.4, 0.8))
+
+    _press_enter(browser)
+    # Brief pause for results to start loading.
+    time.sleep(random.uniform(1.5, 2.5))
 
 
-def _create_driver(
-    *,
-    headless: bool,
-    user_data_dir: str | None,
-    proxy_url: str | None,
-    user_agent: str,
-) -> Chrome:
-    common_args = [
-        "--no-sandbox",
-        "--disable-dev-shm-usage",
-        "--disable-blink-features=AutomationControlled",
-        "--disable-gpu",
-        f"--window-size={random.randint(1880, 1920)},{random.randint(1060, 1080)}",
-        f"--user-agent={user_agent}",
-    ]
-    if headless:
-        common_args.append("--headless=new")
-
-    # Try with proxy (selenium-wire + undetected_chromedriver)
-    if proxy_url:
-        driver = _try_seleniumwire_uc(
-            common_args=common_args,
-            user_data_dir=user_data_dir,
-            proxy_url=proxy_url,
-        )
-        if driver is not None:
-            return driver
-        LOGGER.warning("selenium-wire unavailable — falling back to driver without proxy.")
-
-    # Try without proxy (undetected_chromedriver)
-    driver = _try_undetected_uc(
-        common_args=common_args,
-        user_data_dir=user_data_dir,
-    )
-    if driver is not None:
-        return driver
-
-    # Final fallback: plain Selenium Chrome
-    LOGGER.warning("Falling back to standard webdriver.Chrome (no stealth).")
-    options = Options()
-    for arg in common_args:
-        options.add_argument(arg)
-    if user_data_dir:
-        options.add_argument(f"--user-data-dir={user_data_dir}")
-    return webdriver.Chrome(options=options)
-
-
-def _try_seleniumwire_uc(
-    *,
-    common_args: list[str],
-    user_data_dir: str | None,
-    proxy_url: str,
-) -> Chrome | None:
+def _press_enter(browser: NodriverBrowser) -> None:
+    """Send a Return keypress via CDP Input."""
     try:
-        import seleniumwire.undetected_chromedriver as sw_uc
-
-        options = sw_uc.ChromeOptions()
-        for arg in common_args:
-            options.add_argument(arg)
-
-        sw_options: dict[str, Any] = {
-            "proxy": {
-                "http": proxy_url,
-                "https": proxy_url,
-                "no_proxy": "localhost,127.0.0.1",
-            }
-        }
-
-        kwargs: dict[str, Any] = {"seleniumwire_options": sw_options}
-        if user_data_dir:
-            kwargs["user_data_dir"] = user_data_dir
-        chrome_major = detect_chrome_major_version()
-        if chrome_major:
-            kwargs["version_main"] = chrome_major
-
-        LOGGER.info("Using selenium-wire + undetected_chromedriver with proxy.")
-        return sw_uc.Chrome(options=options, **kwargs)
-    except (ImportError, ModuleNotFoundError) as exc:
-        LOGGER.debug("selenium-wire not available: %s", exc)
-        return None
-    except SessionNotCreatedException as exc:
-        LOGGER.warning("selenium-wire session failed (%s).", first_line(str(exc)))
-        return None
-
-
-def _try_undetected_uc(
-    *,
-    common_args: list[str],
-    user_data_dir: str | None,
-) -> Chrome | None:
-    try:
-        uc = _import_uc()
-        options = uc.ChromeOptions()
-        for arg in common_args:
-            options.add_argument(arg)
-
-        kwargs: dict[str, Any] = {}
-        if user_data_dir:
-            kwargs["user_data_dir"] = user_data_dir
-        chrome_major = detect_chrome_major_version()
-        if chrome_major:
-            kwargs["version_main"] = chrome_major
-
-        LOGGER.info("Using undetected_chromedriver (no proxy).")
-        return uc.Chrome(options=options, **kwargs)
-    except (ImportError, ModuleNotFoundError) as exc:
-        LOGGER.warning("undetected_chromedriver not available: %s", exc)
-        return None
-    except SessionNotCreatedException as exc:
-        LOGGER.warning("undetected_chromedriver session failed (%s).", first_line(str(exc)))
-        return None
-
-
-def _apply_stealth(driver: Chrome, *, user_agent: str, platform: str) -> None:
-    # Inject navigator.webdriver override before any page script runs.
-    try:
-        driver.execute_cdp_cmd(
-            "Page.addScriptToEvaluateOnNewDocument",
-            {"source": _WEBDRIVER_OVERRIDE_SCRIPT},
-        )
+        import nodriver as uc  # type: ignore[import-untyped]
+        cdp = uc.cdp
+        _run_sync(browser._tab.send(
+            cdp.input_.dispatch_key_event(
+                type_="keyDown",
+                key="Return",
+                text="\r",
+                windows_virtual_key_code=13,
+                native_virtual_key_code=13,
+            )
+        ))
+        _run_sync(browser._tab.send(
+            cdp.input_.dispatch_key_event(
+                type_="keyUp",
+                key="Return",
+                text="\r",
+                windows_virtual_key_code=13,
+                native_virtual_key_code=13,
+            )
+        ))
     except Exception as exc:
-        LOGGER.debug("CDP navigator.webdriver override failed: %s — falling back to execute_script", exc)
+        LOGGER.debug("_press_enter CDP failed: %s — trying JS submit.", exc)
         try:
-            driver.execute_script(_WEBDRIVER_OVERRIDE_SCRIPT)
+            _run_sync(browser._tab.evaluate(
+                "const f=document.activeElement&&document.activeElement.form;if(f)f.submit();"
+            ))
         except Exception:
             pass
 
-    # selenium-stealth: patches plugins, languages, WebGL, window.chrome, etc.
-    try:
-        from selenium_stealth import stealth  # type: ignore[import-untyped]
 
-        stealth(
-            driver,
-            languages=["en-US", "en"],
-            vendor="Google Inc.",
-            platform=platform,
-            webgl_vendor="Intel Inc.",
-            renderer="Intel Iris OpenGL Engine",
-            fix_hairline=True,
-        )
-        LOGGER.debug("selenium-stealth patches applied.")
-    except ImportError:
-        LOGGER.debug("selenium-stealth not installed — skipping fingerprint patches.")
+def _dismiss_google_overlays(browser: NodriverBrowser) -> None:
+    """Click through Google's cookie consent / sign-in prompts if visible."""
+    try:
+        _CONSENT_TEXTS = ["Accept all", "Reject all", "I agree", "Agree"]
+        buttons = browser.find_elements_by_css("button")
+        for btn in buttons:
+            btn_text = btn.text.strip()
+            if any(t.lower() in btn_text.lower() for t in _CONSENT_TEXTS):
+                LOGGER.info("Dismissing Google overlay button: %r", btn_text[:40])
+                btn.click()
+                time.sleep(random.uniform(0.5, 1.0))
+                break
     except Exception as exc:
-        LOGGER.debug("selenium-stealth failed (non-fatal): %s", exc)
+        LOGGER.debug("Overlay dismissal (non-fatal): %s", exc)
 
 
-def _import_uc():
-    """Import undetected_chromedriver, working around setuptools distutils shim."""
-    try:
-        import undetected_chromedriver as uc
-
-        return uc
-    except ModuleNotFoundError as error:
-        if error.name != "distutils":
-            raise
-        try:
-            import setuptools._distutils as distutils_module
-            import setuptools._distutils.version as distutils_version_module
-        except ModuleNotFoundError:
-            raise error
-        sys.modules.setdefault("distutils", distutils_module)
-        sys.modules.setdefault("distutils.version", distutils_version_module)
-        import undetected_chromedriver as uc
-
-        return uc
-
+# ---------------------------------------------------------------------------
+# Proxy helpers (kept for extraction.py compatibility)
+# ---------------------------------------------------------------------------
 
 def resolve_proxy_url(use_proxy: bool) -> str | None:
     """Return the proxy URL to use, or None if proxying is disabled."""
@@ -280,4 +716,32 @@ def resolve_proxy_url(use_proxy: bool) -> str | None:
     if not url:
         LOGGER.warning("use_proxy=True but GOOGLE_PROXY_URL env var is not set — running without proxy.")
         return None
+    LOGGER.info("Proxy URL resolved from GOOGLE_PROXY_URL. host=%s", url.split("@")[-1] if "@" in url else url)
+    _verify_proxy_ip(url)
     return url
+
+
+def _verify_proxy_ip(proxy_url: str) -> None:
+    """Make a quick HTTP request through the proxy to log the exit IP. Non-fatal."""
+    try:
+        import requests
+
+        resp = requests.get(
+            "https://api.ipify.org",
+            proxies={"http": proxy_url, "https": proxy_url},
+            timeout=10,
+        )
+        LOGGER.info("Proxy exit IP: %s", resp.text.strip())
+    except Exception as exc:
+        LOGGER.warning("Proxy IP verification failed (non-fatal): %s", exc)
+
+
+# ---------------------------------------------------------------------------
+# Legacy alias — kept so any remaining internal import of build_google_driver
+# raises a clear error rather than an AttributeError.
+# ---------------------------------------------------------------------------
+
+def build_google_driver(**kwargs):  # type: ignore[no-untyped-def]
+    raise RuntimeError(
+        "build_google_driver() has been removed. Use build_nodriver_browser() instead."
+    )
