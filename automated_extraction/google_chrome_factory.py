@@ -32,6 +32,7 @@ import tempfile
 import threading
 import time
 import urllib.parse
+import urllib.request
 from typing import Any
 
 LOGGER = logging.getLogger(__name__)
@@ -238,9 +239,10 @@ class NodriverBrowser:
     runner which accesses driver.find_elements / driver.execute_script.
     """
 
-    def __init__(self, browser, tab) -> None:
+    def __init__(self, browser, tab, proxy_server=None) -> None:
         self._browser = browser
         self._tab = tab
+        self._proxy_server = proxy_server
 
     # --- navigation --------------------------------------------------------
 
@@ -414,6 +416,14 @@ class NodriverBrowser:
             _run_sync(self._browser.stop())
         except Exception as exc:
             LOGGER.debug("Browser quit failed (non-fatal): %s", exc)
+        if self._proxy_server is not None:
+            try:
+                loop = _get_or_create_loop()
+                asyncio.run_coroutine_threadsafe(
+                    _close_server(self._proxy_server), loop
+                ).result(timeout=5)
+            except Exception as exc:
+                LOGGER.debug("Local proxy server close failed (non-fatal): %s", exc)
 
 
 # ---------------------------------------------------------------------------
@@ -477,14 +487,14 @@ def build_nodriver_browser(
     )
 
     t0 = time.time()
-    browser, tab = _run_sync(_start_nodriver(
+    browser, tab, proxy_server = _run_sync(_start_nodriver(
         headless=headless,
         proxy_url=proxy_url,
         user_agent=user_agent,
     ))
     LOGGER.info("nodriver browser started in %.1fs.", time.time() - t0)
 
-    nb = NodriverBrowser(browser, tab)
+    nb = NodriverBrowser(browser, tab, proxy_server=proxy_server)
 
     # Resize window to VNC display dimensions.
     vnc_screen = os.getenv("VNC_SCREEN", "")
@@ -501,44 +511,98 @@ def build_nodriver_browser(
     return nb
 
 
-def _build_proxy_auth_extension(username: str, password: str) -> str:
-    """
-    Write a minimal MV2 Chrome extension to a temp dir and return its path.
+async def _close_server(server: asyncio.Server) -> None:
+    server.close()
+    await server.wait_closed()
 
-    The extension uses webRequest.onAuthRequired (blocking) to inject proxy
-    credentials for every authentication challenge.  This is the only reliable
-    mechanism for proxy auth in Chrome when credentials are not embedded in the
-    proxy URL — CDP Fetch.AuthRequired does not intercept the CONNECT tunnel
-    authentication that HTTPS proxies require.
-    """
-    manifest = {
-        "version": "1.0.0",
-        "manifest_version": 2,
-        "name": "Proxy Auth",
-        "permissions": ["webRequest", "webRequestBlocking", "<all_urls>"],
-        "background": {"scripts": ["background.js"]},
-    }
-    background_js = f"""
-chrome.webRequest.onAuthRequired.addListener(
-  function(details) {{
-    return {{
-      authCredentials: {{
-        username: {json.dumps(username)},
-        password: {json.dumps(password)}
-      }}
-    }};
-  }},
-  {{urls: ["<all_urls>"]}},
-  ["blocking"]
-);
-""".strip()
 
-    ext_dir = tempfile.mkdtemp(prefix="chrome_proxy_auth_ext_")
-    with open(os.path.join(ext_dir, "manifest.json"), "w") as f:
-        json.dump(manifest, f)
-    with open(os.path.join(ext_dir, "background.js"), "w") as f:
-        f.write(background_js)
-    return ext_dir
+async def _start_local_auth_proxy(
+    upstream_host: str,
+    upstream_port: int,
+    username: str,
+    password: str,
+    local_port: int,
+) -> asyncio.Server:
+    """
+    Start a minimal HTTP CONNECT proxy on 127.0.0.1:local_port that adds
+    Basic auth when forwarding CONNECT tunnels to the upstream proxy.
+
+    Chrome connects to this local proxy without needing credentials; the local
+    proxy injects the Proxy-Authorization header for every CONNECT request.
+    This avoids all MV2 extension / CDP Fetch issues with proxy auth.
+    """
+    import base64
+    auth_value = "Basic " + base64.b64encode(f"{username}:{password}".encode()).decode()
+
+    async def _pipe(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        try:
+            while True:
+                data = await reader.read(65536)
+                if not data:
+                    break
+                writer.write(data)
+                await writer.drain()
+        except Exception:
+            pass
+        finally:
+            try:
+                writer.close()
+            except Exception:
+                pass
+
+    async def _handle(client_r: asyncio.StreamReader, client_w: asyncio.StreamWriter) -> None:
+        try:
+            req_line = await asyncio.wait_for(client_r.readline(), timeout=10)
+            if not req_line:
+                return
+            parts = req_line.decode(errors="replace").split()
+            if len(parts) < 2 or parts[0].upper() != "CONNECT":
+                client_w.write(b"HTTP/1.1 405 Method Not Allowed\r\n\r\n")
+                await client_w.drain()
+                return
+            target = parts[1]
+            while True:
+                line = await asyncio.wait_for(client_r.readline(), timeout=5)
+                if not line or line in (b"\r\n", b"\n"):
+                    break
+            up_r, up_w = await asyncio.wait_for(
+                asyncio.open_connection(upstream_host, upstream_port), timeout=10
+            )
+            connect_req = (
+                f"CONNECT {target} HTTP/1.1\r\n"
+                f"Host: {target}\r\n"
+                f"Proxy-Authorization: {auth_value}\r\n"
+                f"\r\n"
+            )
+            up_w.write(connect_req.encode())
+            await up_w.drain()
+            status_line = await asyncio.wait_for(up_r.readline(), timeout=10)
+            while True:
+                line = await asyncio.wait_for(up_r.readline(), timeout=5)
+                if not line or line in (b"\r\n", b"\n"):
+                    break
+            if b"200" in status_line:
+                client_w.write(b"HTTP/1.1 200 Connection established\r\n\r\n")
+                await client_w.drain()
+                await asyncio.gather(_pipe(client_r, up_w), _pipe(up_r, client_w))
+            else:
+                LOGGER.debug("Upstream proxy refused CONNECT: %s", status_line)
+                client_w.write(b"HTTP/1.1 502 Bad Gateway\r\n\r\n")
+                await client_w.drain()
+                up_w.close()
+        except Exception as exc:
+            LOGGER.debug("Local proxy handler error: %s", exc)
+            try:
+                client_w.close()
+            except Exception:
+                pass
+
+    server = await asyncio.start_server(_handle, "127.0.0.1", local_port)
+    LOGGER.info(
+        "Local auth proxy listening on 127.0.0.1:%s → %s:%s",
+        local_port, upstream_host, upstream_port,
+    )
+    return server
 
 
 async def _wait_for_chrome_debug_port(host: str, port: int, timeout: float = 30.0) -> None:
@@ -588,18 +652,26 @@ async def _start_nodriver(
     if headless:
         browser_args.append("--headless=new")
 
-    # Proxy server arg (credentials handled via MV2 extension below)
-    proxy_username: str | None = None
-    proxy_password: str | None = None
+    # Proxy: start a local CONNECT proxy that injects Basic auth credentials.
+    # This avoids all MV2 extension / CDP Fetch issues — Chrome talks to a
+    # local proxy that requires no auth; the local proxy adds Proxy-Authorization
+    # when forwarding CONNECT tunnels to the upstream.
+    _local_proxy_server: asyncio.Server | None = None
     if proxy_url:
         parsed = urllib.parse.urlparse(proxy_url)
-        host = parsed.hostname or ""
-        port = parsed.port or 8080
+        upstream_host = parsed.hostname or ""
+        upstream_port = parsed.port or 8080
         proxy_username = urllib.parse.unquote(parsed.username or "")
         proxy_password = urllib.parse.unquote(parsed.password or "")
-        proxy_host_port = f"{host}:{port}"
-        browser_args.append(f"--proxy-server=http://{proxy_host_port}")
-        LOGGER.info("Proxy configured: %s (credentials: %s)", proxy_host_port, "yes" if proxy_username else "no")
+        local_proxy_port = uc_util.free_port()
+        _local_proxy_server = await _start_local_auth_proxy(
+            upstream_host, upstream_port, proxy_username, proxy_password or "", local_proxy_port
+        )
+        browser_args.append(f"--proxy-server=http://127.0.0.1:{local_proxy_port}")
+        LOGGER.info(
+            "Proxy configured via local auth proxy: 127.0.0.1:%s → %s:%s",
+            local_proxy_port, upstream_host, upstream_port,
+        )
 
     # Build a nodriver Config so we get the correct binary path + default args.
     # We start Chrome ourselves to bypass nodriver's 2.75s connection timeout.
@@ -608,24 +680,6 @@ async def _start_nodriver(
         sandbox=False,
         browser_args=browser_args,
     )
-
-    # Proxy auth via MV2 Chrome extension (webRequest.onAuthRequired).
-    # CDP Fetch.AuthRequired does NOT intercept the CONNECT tunnel used by HTTPS
-    # proxies, so it cannot provide proxy credentials reliably.  The MV2
-    # webRequest API can, and we load the extension before Chrome starts.
-    #
-    # Note: we start Chrome ourselves (not via Browser.start()), so nodriver's
-    # extension handling in Browser.start() never runs. We call add_extension()
-    # to get the feature flags right, then manually inject --load-extension.
-    ext_dir: str | None = None
-    if proxy_url and proxy_username is not None:
-        ext_dir = _build_proxy_auth_extension(proxy_username, proxy_password or "")
-        config.add_extension(ext_dir)
-        # Manually add --load-extension since we bypass Browser.start()
-        config._browser_args.append(  # type: ignore[attr-defined]
-            "--load-extension=%s" % ",".join(str(e) for e in config._extensions)
-        )
-        LOGGER.info("Proxy auth extension built at %s", ext_dir)
 
     debug_host = "127.0.0.1"
     debug_port = uc_util.free_port()
@@ -665,7 +719,7 @@ async def _start_nodriver(
     except Exception as exc:
         LOGGER.debug("navigator.webdriver CDP override failed (non-fatal): %s", exc)
 
-    return browser, tab
+    return browser, tab, _local_proxy_server
 
 
 # ---------------------------------------------------------------------------
