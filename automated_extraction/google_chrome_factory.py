@@ -8,20 +8,27 @@ protocol, making it significantly harder to fingerprint.
 
 Key improvements over the old Selenium factory:
 - No Selenium/WebDriver fingerprint — Chrome never runs in "controlled" mode
-- Proxy auth via CDP Fetch domain (no Chrome extension required)
+- Proxy auth via MV2 Chrome extension (webRequest.onAuthRequired)
 - Fresh temp profile on every run (no accumulated bot signals)
 - navigator.webdriver override injected via Page.addScriptToEvaluateOnNewDocument
 
 The sync/async boundary is bridged by running a dedicated asyncio event loop in
 a background daemon thread. All async operations are dispatched into that loop
 via asyncio.run_coroutine_threadsafe(), keeping the callers fully synchronous.
+
+Chrome startup: we launch Chrome ourselves (rather than via uc.start) so we can
+wait up to 30 seconds for the CDP debug port.  Non-headless Chrome on Fly.io
+takes ~28s to open the port (waiting for dbus timeouts); nodriver's built-in
+retry window is only 2.75s.
 """
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import random
+import tempfile
 import threading
 import time
 import urllib.parse
@@ -494,6 +501,46 @@ def build_nodriver_browser(
     return nb
 
 
+def _build_proxy_auth_extension(username: str, password: str) -> str:
+    """
+    Write a minimal MV2 Chrome extension to a temp dir and return its path.
+
+    The extension uses webRequest.onAuthRequired (blocking) to inject proxy
+    credentials for every authentication challenge.  This is the only reliable
+    mechanism for proxy auth in Chrome when credentials are not embedded in the
+    proxy URL — CDP Fetch.AuthRequired does not intercept the CONNECT tunnel
+    authentication that HTTPS proxies require.
+    """
+    manifest = {
+        "version": "1.0.0",
+        "manifest_version": 2,
+        "name": "Proxy Auth",
+        "permissions": ["webRequest", "webRequestBlocking", "<all_urls>"],
+        "background": {"scripts": ["background.js"]},
+    }
+    background_js = f"""
+chrome.webRequest.onAuthRequired.addListener(
+  function(details) {{
+    return {{
+      authCredentials: {{
+        username: {json.dumps(username)},
+        password: {json.dumps(password)}
+      }}
+    }};
+  }},
+  {{urls: ["<all_urls>"]}},
+  ["blocking"]
+);
+""".strip()
+
+    ext_dir = tempfile.mkdtemp(prefix="chrome_proxy_auth_ext_")
+    with open(os.path.join(ext_dir, "manifest.json"), "w") as f:
+        json.dump(manifest, f)
+    with open(os.path.join(ext_dir, "background.js"), "w") as f:
+        f.write(background_js)
+    return ext_dir
+
+
 async def _wait_for_chrome_debug_port(host: str, port: int, timeout: float = 30.0) -> None:
     """Poll Chrome's debug endpoint until it responds or timeout is reached."""
     url = f"http://{host}:{port}/json/version"
@@ -541,7 +588,7 @@ async def _start_nodriver(
     if headless:
         browser_args.append("--headless=new")
 
-    # Proxy server arg (auth handled via CDP Fetch below)
+    # Proxy server arg (credentials handled via MV2 extension below)
     proxy_username: str | None = None
     proxy_password: str | None = None
     if proxy_url:
@@ -561,6 +608,25 @@ async def _start_nodriver(
         sandbox=False,
         browser_args=browser_args,
     )
+
+    # Proxy auth via MV2 Chrome extension (webRequest.onAuthRequired).
+    # CDP Fetch.AuthRequired does NOT intercept the CONNECT tunnel used by HTTPS
+    # proxies, so it cannot provide proxy credentials reliably.  The MV2
+    # webRequest API can, and we load the extension before Chrome starts.
+    #
+    # Note: we start Chrome ourselves (not via Browser.start()), so nodriver's
+    # extension handling in Browser.start() never runs. We call add_extension()
+    # to get the feature flags right, then manually inject --load-extension.
+    ext_dir: str | None = None
+    if proxy_url and proxy_username is not None:
+        ext_dir = _build_proxy_auth_extension(proxy_username, proxy_password or "")
+        config.add_extension(ext_dir)
+        # Manually add --load-extension since we bypass Browser.start()
+        config._browser_args.append(  # type: ignore[attr-defined]
+            "--load-extension=%s" % ",".join(str(e) for e in config._extensions)
+        )
+        LOGGER.info("Proxy auth extension built at %s", ext_dir)
+
     debug_host = "127.0.0.1"
     debug_port = uc_util.free_port()
     config.host = debug_host
@@ -587,27 +653,6 @@ async def _start_nodriver(
     # Connect nodriver to the already-running Chrome instance.
     browser = await uc.start(host=debug_host, port=debug_port)
     tab = browser.main_tab
-
-    # Proxy auth via CDP Fetch.AuthRequired
-    if proxy_url and proxy_username is not None:
-        _username = proxy_username
-        _password = proxy_password or ""
-
-        async def _handle_auth(event) -> None:
-            asyncio.get_event_loop().create_task(tab.send(
-                cdp.fetch.continue_with_auth(
-                    request_id=event.request_id,
-                    auth_challenge_response=cdp.fetch.AuthChallengeResponse(
-                        response="ProvideCredentials",
-                        username=_username,
-                        password=_password,
-                    ),
-                )
-            ))
-
-        tab.add_handler(cdp.fetch.AuthRequired, _handle_auth)
-        await tab.send(cdp.fetch.enable(handle_auth_requests=True))
-        LOGGER.info("CDP Fetch auth handler registered for proxy.")
 
     # Inject navigator.webdriver override before any page script runs.
     try:
