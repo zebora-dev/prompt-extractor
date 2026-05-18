@@ -323,18 +323,30 @@ make prefect-pool-uk  # creates prompt-extraction-uk
 Run these from your local machine, pointing at the hosted Prefect server:
 
 ```bash
-# US deployments (7 flows, no suffix, tagged region:us)
+# US deployments (10 flows, no suffix, tagged region:us)
 PREFECT_API_URL=https://prompt-extractor-prefect.fly.dev/api \
 PREFECT_WORK_POOL=prompt-extraction-us \
 PREFECT_WORKING_DIR=/app \
   make prefect-deploy-us
 
-# UK deployments (7 flows, -uk suffix, tagged region:uk)
+# UK deployments (10 flows, -uk suffix, tagged region:uk)
 PREFECT_API_URL=https://prompt-extractor-prefect.fly.dev/api \
 PREFECT_WORK_POOL=prompt-extraction-uk \
 PREFECT_WORKING_DIR=/app \
   make prefect-deploy-uk
 ```
+
+> **⚠️ Always set `PREFECT_WORKING_DIR=/app` when registering against the remote server.**
+> Without it, `register_deployments.py` falls back to the local repo path (e.g. `/Users/.../automated-extraction`) and the Fly.io worker will crash with `FileNotFoundError` when it tries to start a flow run — the local path does not exist on the remote machine.
+>
+> If you run the script directly instead of via `make`, include it explicitly:
+>
+> ```bash
+> PREFECT_API_URL=https://prompt-extractor-prefect.fly.dev/api \
+> PREFECT_WORK_POOL=prompt-extraction-uk \
+> PREFECT_WORKING_DIR=/app \
+>   python -m automated_extraction.workflows.register_deployments --deploy-local --region uk
+> ```
 
 ### Start workers
 
