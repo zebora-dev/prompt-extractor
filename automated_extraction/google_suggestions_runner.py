@@ -109,15 +109,6 @@ PAA_EXTRACTION_SCRIPT = r"""return (function(containerEl) {
 })(arguments[0]);
 """
 
-# JS: find a content panel by aria-controls ID (no element arg — returns bool).
-# Called as a plain string with the panel ID interpolated — no element args needed.
-def _make_panel_visible_script(panel_id: str) -> str:
-    """Return a JS snippet that checks visibility of the panel with the given ID."""
-    safe_id = panel_id.replace("'", "\\'")
-    return (
-        f"var _p=document.getElementById('{safe_id}');"
-        f"return !!(_p && (_p.offsetParent!==null||_p.offsetHeight>0));"
-    )
 
 
 @dataclass
@@ -231,7 +222,19 @@ def _capture_single_paa(
 
         # Extract text, sources, raw_html via JS
         result = driver.execute_script(PAA_EXTRACTION_SCRIPT, content_panel)
+        LOGGER.debug(
+            "[PAA %s] extraction result type=%s keys=%s",
+            idx,
+            type(result).__name__,
+            list(result.keys()) if isinstance(result, dict) else "n/a",
+        )
         if not isinstance(result, dict):
+            LOGGER.warning(
+                "[PAA %s] extraction returned non-dict (%s): %r",
+                idx,
+                type(result).__name__,
+                str(result)[:200],
+            )
             result = {}
 
         response_text = clean_text(result.get("text") or "")
@@ -283,45 +286,63 @@ def _click_trusted(driver, el) -> None:
 
 
 def _wait_for_content_panel(driver, expand_btn, question_el, wait_seconds: float):
-    """Wait until aria-expanded becomes 'true' and locate the associated content panel.
+    """Wait until the PAA content panel becomes visible and return it.
 
-    Avoids passing DOM elements through execute_script return values (CDP
-    can't serialise them back with return_by_value=True — they come back as
-    plain dicts).  Instead we use native NodriverElement.find_elements() CSS
-    queries and attribute reads, with a plain-string JS visibility check.
+    IMPORTANT: do NOT poll expand_btn.get_attribute("aria-expanded") here.
+    NodriverElement attrs are populated from the DOM snapshot taken at
+    find_elements() time — after the click they are STALE and will always
+    return the pre-click value ("false"), causing an infinite wait loop.
+
+    Instead we poll the panel's offsetHeight via pure-string JS executed
+    against the live DOM, bypassing the stale attrs cache entirely.
     """
     deadline = time.time() + wait_seconds
-    # Read aria-controls once — it's a static attribute on the expand button.
+    # aria-controls is a static attribute set at page-load time — reading
+    # it from the attrs snapshot is safe.
     aria_controls = expand_btn.get_attribute("aria-controls") or ""
 
     while time.time() < deadline:
-        expanded = (expand_btn.get_attribute("aria-expanded") or "").lower()
-        if expanded == "true":
-            panel = None
-
-            # 1. Preferred: aria-controls ID → exact panel element
-            if aria_controls:
-                panels = driver.find_elements("css selector", f"#{aria_controls}")
-                if panels:
-                    panel = panels[0]
-                    # Confirm visibility via pure-string JS (no element arg).
-                    try:
-                        vis = driver.execute_script(_make_panel_visible_script(aria_controls))
-                        if not vis:
-                            panel = None
-                    except Exception:
-                        pass  # assume visible on error
-
-            # 2. Fallback: query NRdf4c within the question container element
-            if panel is None:
-                candidates = question_el.find_elements("css selector", PAA_CONTENT_PANEL_SELECTOR)
-                if candidates:
-                    panel = candidates[0]
-
-            if panel is not None:
-                return panel
+        if aria_controls:
+            # Build a visibility check that starts with "return" so
+            # execute_script wraps it in an IIFE (top-level return is a
+            # SyntaxError in nodriver's tab.evaluate()).
+            safe_id = aria_controls.replace("\\", "\\\\").replace("'", "\\'")
+            vis_js = (
+                f"return (function(){{"
+                f"  var p = document.getElementById('{safe_id}');"
+                f"  return !!(p && (p.offsetHeight > 0 || p.offsetWidth > 0));"
+                f"}})();"
+            )
+            try:
+                vis = driver.execute_script(vis_js)
+                if vis:
+                    # Use attribute selector — safer than # for IDs that
+                    # begin with underscores or contain unusual chars.
+                    panels = driver.find_elements(
+                        "css selector", f"[id='{aria_controls}']"
+                    )
+                    if panels:
+                        LOGGER.debug("[PAA] Panel visible via aria-controls=%r", aria_controls)
+                        return panels[0]
+            except Exception as exc:
+                LOGGER.debug("[PAA] Panel visibility check error: %s", exc)
+        else:
+            # Fallback: no aria-controls — look for NRdf4c panel inside the
+            # question element (Google always sets aria-controls, but just in case).
+            candidates = question_el.find_elements(
+                "css selector", PAA_CONTENT_PANEL_SELECTOR
+            )
+            if candidates:
+                LOGGER.debug("[PAA] Panel found via NRdf4c fallback query")
+                return candidates[0]
 
         time.sleep(0.3)
+
+    LOGGER.debug(
+        "[PAA] Panel timed out after %.1fs. aria-controls=%r",
+        wait_seconds,
+        aria_controls,
+    )
     return None
 
 
