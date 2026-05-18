@@ -501,6 +501,14 @@ def run_google_ai_mode_extraction_job(
                     country=resolved_country,
                     language=resolved_language,
                 )
+                # Record proxy bytes for cost attribution.
+                proxy_bytes = runner.browser.take_proxy_bytes() if runner.browser else 0
+                if isinstance(output.get("output_metadata"), dict):
+                    output["output_metadata"]["proxy_usage"] = {
+                        "bytes_transferred": proxy_bytes,
+                        "use_proxy": bool(proxy_url),
+                        "provider": "dataimpulse" if proxy_url else None,
+                    }
                 saved = api.save_prompt_output(output)
                 saved_count += 1
                 saved_output = normalize_saved_output(saved, output)
@@ -711,6 +719,14 @@ def run_google_ai_overview_extraction_job(
                     country=resolved_country,
                     language=resolved_language,
                 )
+                # Record proxy bytes for cost attribution.
+                proxy_bytes = runner.browser.take_proxy_bytes() if runner.browser else 0
+                if isinstance(output.get("output_metadata"), dict):
+                    output["output_metadata"]["proxy_usage"] = {
+                        "bytes_transferred": proxy_bytes,
+                        "use_proxy": bool(proxy_url),
+                        "provider": "dataimpulse" if proxy_url else None,
+                    }
                 saved = api.save_prompt_output(output)
                 saved_count += 1
                 saved_output = normalize_saved_output(saved, output)

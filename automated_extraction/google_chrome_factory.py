@@ -37,6 +37,40 @@ from typing import Any
 
 LOGGER = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Proxy byte tracking
+# ---------------------------------------------------------------------------
+
+class ProxyBytesTracker:
+    """
+    Thread-safe counter that accumulates bytes piped through the local CONNECT
+    proxy.  Call take() to read the current total and reset to zero in one
+    atomic operation — ideal for per-prompt attribution.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._bytes = 0
+
+    def add(self, n: int) -> None:
+        """Add n bytes to the running total."""
+        with self._lock:
+            self._bytes += n
+
+    def take(self) -> int:
+        """Return the current total and reset to zero."""
+        with self._lock:
+            val = self._bytes
+            self._bytes = 0
+            return val
+
+    @property
+    def total(self) -> int:
+        """Peek at the current total without resetting."""
+        with self._lock:
+            return self._bytes
+
+
 # Chrome 135-137 on Windows/macOS — updated May 2026.
 _CHROME_USER_AGENTS: list[str] = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36",
@@ -239,10 +273,11 @@ class NodriverBrowser:
     runner which accesses driver.find_elements / driver.execute_script.
     """
 
-    def __init__(self, browser, tab, proxy_server=None) -> None:
+    def __init__(self, browser, tab, proxy_server=None, bytes_tracker: "ProxyBytesTracker | None" = None) -> None:
         self._browser = browser
         self._tab = tab
         self._proxy_server = proxy_server
+        self._bytes_tracker = bytes_tracker
 
     # --- navigation --------------------------------------------------------
 
@@ -404,6 +439,17 @@ class NodriverBrowser:
             except Exception as exc2:
                 LOGGER.debug("set_window_size JS fallback failed: %s", exc2)
 
+    def take_proxy_bytes(self) -> int:
+        """
+        Return bytes transferred through the proxy since the last call (or since
+        the browser started) and reset the counter to zero.
+
+        Returns 0 if no proxy is configured.
+        """
+        if self._bytes_tracker is None:
+            return 0
+        return self._bytes_tracker.take()
+
     # --- element finding ---------------------------------------------------
 
     def find_elements_by_css(self, css: str) -> list[NodriverElement]:
@@ -542,15 +588,19 @@ def build_nodriver_browser(
         user_agent[:80],
     )
 
+    # Create a bytes tracker only when a proxy is configured.
+    bytes_tracker: ProxyBytesTracker | None = ProxyBytesTracker() if proxy_url else None
+
     t0 = time.time()
     browser, tab, proxy_server = _run_sync(_start_nodriver(
         headless=headless,
         proxy_url=proxy_url,
         user_agent=user_agent,
+        tracker=bytes_tracker,
     ))
     LOGGER.info("nodriver browser started in %.1fs.", time.time() - t0)
 
-    nb = NodriverBrowser(browser, tab, proxy_server=proxy_server)
+    nb = NodriverBrowser(browser, tab, proxy_server=proxy_server, bytes_tracker=bytes_tracker)
 
     # Resize window to VNC display dimensions.
     vnc_screen = os.getenv("VNC_SCREEN", "")
@@ -578,6 +628,7 @@ async def _start_local_auth_proxy(
     username: str,
     password: str,
     local_port: int,
+    tracker: "ProxyBytesTracker | None" = None,
 ) -> asyncio.Server:
     """
     Start a minimal HTTP CONNECT proxy on 127.0.0.1:local_port that adds
@@ -596,6 +647,8 @@ async def _start_local_auth_proxy(
                 data = await reader.read(65536)
                 if not data:
                     break
+                if tracker is not None:
+                    tracker.add(len(data))
                 writer.write(data)
                 await writer.drain()
         except Exception:
@@ -685,6 +738,7 @@ async def _start_nodriver(
     headless: bool,
     proxy_url: str | None,
     user_agent: str,
+    tracker: "ProxyBytesTracker | None" = None,
 ):
     """Async coroutine: start nodriver with the given config.
 
@@ -721,7 +775,8 @@ async def _start_nodriver(
         proxy_password = urllib.parse.unquote(parsed.password or "")
         local_proxy_port = uc_util.free_port()
         _local_proxy_server = await _start_local_auth_proxy(
-            upstream_host, upstream_port, proxy_username, proxy_password or "", local_proxy_port
+            upstream_host, upstream_port, proxy_username, proxy_password or "", local_proxy_port,
+            tracker,
         )
         browser_args.append(f"--proxy-server=http://127.0.0.1:{local_proxy_port}")
         LOGGER.info(
