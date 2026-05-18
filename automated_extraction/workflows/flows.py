@@ -37,6 +37,7 @@ def prompt_extraction_batch_flow(
     capture_entities: bool = False,
     delay_seconds: int = 120,
     max_prompts: int | None = None,
+    startup_delay_seconds: int = 0,
 ) -> dict[str, Any]:
     """
     Sequentially run prompt-extraction until the currently remaining prompt set
@@ -45,6 +46,9 @@ def prompt_extraction_batch_flow(
 
     max_prompts: when set by the dispatcher, caps the total number of prompts
     this worker processes and skips the mop-up pass.
+
+    startup_delay_seconds: stagger delay set by the dispatcher (worker_index *
+    stagger_seconds) so all workers don't hit external APIs simultaneously.
     """
     flow_logger = get_run_logger()
     flow_logger.info("WORKER machine_id=%s", os.getenv("FLY_MACHINE_ID", "local"))
@@ -52,6 +56,9 @@ def prompt_extraction_batch_flow(
         raise ValueError("batch_id is required")
     if limit <= 0:
         raise ValueError("limit must be greater than 0")
+    if startup_delay_seconds > 0:
+        flow_logger.info("Staggered startup: waiting %ss before beginning work.", startup_delay_seconds)
+        time.sleep(startup_delay_seconds)
 
     settings = Settings.from_env(require_api_key=True, require_auto_login_credentials=False)
     api = ApiClient(
@@ -390,6 +397,7 @@ def google_ai_mode_extraction_batch_flow(
     language: str | None = None,
     use_proxy: bool = False,
     max_prompts: int | None = None,
+    startup_delay_seconds: int = 0,
 ) -> dict[str, Any]:
     """
     Sequentially run google-ai-mode-extraction until all remaining prompts in
@@ -398,6 +406,9 @@ def google_ai_mode_extraction_batch_flow(
 
     max_prompts: when set by the dispatcher, caps the total number of prompts
     this worker processes and skips the mop-up pass.
+
+    startup_delay_seconds: stagger delay set by the dispatcher (worker_index *
+    stagger_seconds) so workers don't all launch Chrome and hit Google at once.
     """
     flow_logger = get_run_logger()
     flow_logger.info("WORKER machine_id=%s", os.getenv("FLY_MACHINE_ID", "local"))
@@ -405,6 +416,9 @@ def google_ai_mode_extraction_batch_flow(
         raise ValueError("batch_id is required")
     if limit <= 0:
         raise ValueError("limit must be greater than 0")
+    if startup_delay_seconds > 0:
+        flow_logger.info("Staggered startup: waiting %ss before beginning work.", startup_delay_seconds)
+        time.sleep(startup_delay_seconds)
 
     settings = Settings.from_env(require_api_key=True, require_auto_login_credentials=False)
     api = ApiClient(
@@ -552,6 +566,7 @@ def google_ai_overview_extraction_batch_flow(
     language: str | None = None,
     use_proxy: bool = False,
     max_prompts: int | None = None,
+    startup_delay_seconds: int = 0,
 ) -> dict[str, Any]:
     """
     Sequentially run google-ai-overview-extraction until all remaining prompts
@@ -561,6 +576,9 @@ def google_ai_overview_extraction_batch_flow(
     max_prompts: when set by the dispatcher, caps the total number of prompts
     this worker processes and skips the mop-up pass (the dispatcher ensures
     full coverage across workers without overlap).
+
+    startup_delay_seconds: stagger delay set by the dispatcher (worker_index *
+    stagger_seconds) so workers don't all launch Chrome and hit Google at once.
     """
     flow_logger = get_run_logger()
     flow_logger.info("WORKER machine_id=%s", os.getenv("FLY_MACHINE_ID", "local"))
@@ -568,6 +586,9 @@ def google_ai_overview_extraction_batch_flow(
         raise ValueError("batch_id is required")
     if limit <= 0:
         raise ValueError("limit must be greater than 0")
+    if startup_delay_seconds > 0:
+        flow_logger.info("Staggered startup: waiting %ss before beginning work.", startup_delay_seconds)
+        time.sleep(startup_delay_seconds)
 
     settings = Settings.from_env(require_api_key=True, require_auto_login_credentials=False)
     api = ApiClient(

@@ -57,6 +57,7 @@ def get_flows():
                 "capture_products": False,
                 "capture_entities": False,
                 "delay_seconds": 120,
+                "startup_delay_seconds": 0,
             },
         },
         "prompt-extraction": {
@@ -120,6 +121,7 @@ def get_flows():
                 "capture_entities": False,
                 "auto_scale": False,
                 "scale_wait_seconds": 30,
+                "stagger_seconds": 15,
             },
         },
         "scale-workers": {
@@ -165,6 +167,7 @@ def get_flows():
                 "country": None,
                 "language": None,
                 "use_proxy": False,
+                "startup_delay_seconds": 0,
             },
         },
         "google-ai-overview-extraction-batch": {
@@ -180,6 +183,7 @@ def get_flows():
                 "country": None,
                 "language": None,
                 "use_proxy": False,
+                "startup_delay_seconds": 0,
             },
         },
         "google-ai-mode-extraction": {

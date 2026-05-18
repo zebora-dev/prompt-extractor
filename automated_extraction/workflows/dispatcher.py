@@ -161,6 +161,8 @@ def dispatch_extraction_flow(
     # Dynamic scaling
     auto_scale: bool = False,
     scale_wait_seconds: int = 30,
+    # Worker staggering
+    stagger_seconds: int = 15,
 ) -> dict[str, Any]:
     """
     Dispatch extraction work across N workers automatically.
@@ -188,6 +190,11 @@ def dispatch_extraction_flow(
                         Requires FLY_API_TOKEN secret to be set on the app.
     scale_wait_seconds: Seconds to wait after scaling for new Prefect workers
                         to connect before flows are submitted (default 30).
+    stagger_seconds   : Per-worker startup delay. Worker i sleeps i *
+                        stagger_seconds before launching Chrome. Spreads 20
+                        workers over ~5 min at the default of 15s, preventing
+                        simultaneous Google requests that trigger rate-limiting.
+                        Set to 0 to disable staggering.
     """
     flow_logger = get_run_logger()
 
@@ -306,6 +313,7 @@ def dispatch_extraction_flow(
             **base_params,
             "skip": skip,
             "max_prompts": chunk_size,
+            "startup_delay_seconds": i * stagger_seconds,
         }
         try:
             run_id = _submit_worker_run(prefect_api_url, deployment_full_name, worker_params)
