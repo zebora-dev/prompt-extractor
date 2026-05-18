@@ -334,30 +334,47 @@ class NodriverBrowser:
 
             return _run_sync(_call_on_elem())
         else:
-            # No element arguments — use tab.evaluate() with inline args if needed
+            # No element arguments — use tab.evaluate() with inline args if needed.
+            #
+            # Two issues to solve:
+            # 1. Top-level `return` is a SyntaxError in nodriver's tab.evaluate()
+            #    (which runs JS as a module expression, not inside a function body).
+            #    Fix: wrap in an IIFE so `return` is valid.
+            # 2. nodriver's CDP serialisation converts JS plain objects to
+            #    [[key, {type, value}], ...] pairs instead of Python dicts.
+            #    Fix: JSON.stringify the IIFE result so nodriver receives a string;
+            #    we json.loads() it back to a proper Python value.
             if plain_args:
-                # Inject plain args as a self-calling wrapper (Selenium compat)
-                import json
                 args_json = json.dumps(plain_args)
-                wrapped = (
-                    f"(function(){{ "
-                    f"  var arguments = {args_json}; "
-                    f"  {script} "
-                    f"}})()"
+                js = (
+                    f"JSON.stringify((function(){{"
+                    f"  var arguments = {args_json};"
+                    f"  {script}"
+                    f"}}()))"
                 )
                 try:
-                    return _run_sync(self._tab.evaluate(wrapped))
+                    raw = _run_sync(self._tab.evaluate(js))
+                    return json.loads(raw) if isinstance(raw, str) else raw
                 except Exception:
-                    # Try without wrapping (script might already be a return expression)
-                    return _run_sync(self._tab.evaluate(script))
+                    # Fallback: plain IIFE without JSON wrapper
+                    plain = (
+                        f"(function(){{"
+                        f"  var arguments = {args_json};"
+                        f"  {script}"
+                        f"}}())"
+                    )
+                    return _run_sync(self._tab.evaluate(plain))
             else:
-                # Wrap in an IIFE when the script starts with `return` so that
-                # Selenium-style scripts (e.g. `return document.title`) work
-                # correctly.  nodriver's tab.evaluate() runs JS as a module-level
-                # expression where top-level `return` is a SyntaxError.
                 if script.lstrip().startswith("return"):
-                    wrapped = f"(function(){{ {script} }})()"
-                    return _run_sync(self._tab.evaluate(wrapped))
+                    # JSON.stringify bypasses CDP deep-serialisation and guarantees
+                    # a plain Python value after json.loads().
+                    js = f"JSON.stringify((function(){{ {script} }}()))"
+                    try:
+                        raw = _run_sync(self._tab.evaluate(js))
+                        return json.loads(raw) if isinstance(raw, str) else raw
+                    except Exception:
+                        # Fallback: IIFE without JSON wrapper
+                        return _run_sync(self._tab.evaluate(f"(function(){{ {script} }}())"))
                 return _run_sync(self._tab.evaluate(script))
 
     # Stub for Selenium CDP cmd — stealth is applied at startup.
