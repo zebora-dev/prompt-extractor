@@ -36,11 +36,15 @@ def prompt_extraction_batch_flow(
     capture_products: bool = False,
     capture_entities: bool = False,
     delay_seconds: int = 120,
+    max_prompts: int | None = None,
 ) -> dict[str, Any]:
     """
     Sequentially run prompt-extraction until the currently remaining prompt set
     has been chunked into `limit`-sized runs, with a configurable delay between
     each run. Sources are always captured; products and entities are opt-in.
+
+    max_prompts: when set by the dispatcher, caps the total number of prompts
+    this worker processes and skips the mop-up pass.
     """
     flow_logger = get_run_logger()
     flow_logger.info("WORKER machine_id=%s", os.getenv("FLY_MACHINE_ID", "local"))
@@ -72,8 +76,10 @@ def prompt_extraction_batch_flow(
     )
     remaining_count = max(0, len(remaining_prompts) - skip)
     run_count = math.ceil(remaining_count / limit) if remaining_count else 0
+    if max_prompts is not None:
+        run_count = min(run_count, math.ceil(max_prompts / limit))
     flow_logger.info(
-        "Starting sequential prompt extraction batch. batch_id=%s brand_id=%s model_filter=%s remaining_count=%s skip=%s limit_per_run=%s planned_runs=%s auto_login=%s capture_products=%s capture_entities=%s delay_seconds=%s",
+        "Starting sequential prompt extraction batch. batch_id=%s brand_id=%s model_filter=%s remaining_count=%s skip=%s limit_per_run=%s planned_runs=%s auto_login=%s capture_products=%s capture_entities=%s delay_seconds=%s max_prompts=%s",
         batch_id,
         brand_id,
         model_filter or "any",
@@ -85,6 +91,7 @@ def prompt_extraction_batch_flow(
         capture_products,
         capture_entities,
         delay_seconds,
+        max_prompts,
     )
 
     run_results: list[dict[str, Any]] = []
@@ -92,17 +99,18 @@ def prompt_extraction_batch_flow(
     stopped_reason: str | None = None
     for run_index in range(1, run_count + 1):
         run_skip = skip if run_index == 1 else 0
+        effective_limit = min(limit, max_prompts - (run_index - 1) * limit) if max_prompts is not None else limit
         flow_logger.info(
             "Starting sequential prompt-extraction run %s/%s. batch_id=%s limit=%s skip=%s",
             run_index,
             run_count,
             batch_id,
-            limit,
+            effective_limit,
             run_skip,
         )
         result = prompt_extraction_flow(
             batch_id=batch_id,
-            limit=limit,
+            limit=effective_limit,
             skip=run_skip,
             llm_model_filter=model_filter,
             auto_login=auto_login,
@@ -144,10 +152,10 @@ def prompt_extraction_batch_flow(
     failed_count = sum(int(r.get("failed_count") or 0) for r in run_results)
     skipped_count = sum(int(r.get("skipped_count") or 0) for r in run_results)
 
-    # Mop-up pass — only run if not stopped by consecutive failures
+    # Mop-up pass — skipped when max_prompts is set (dispatcher ensures full coverage).
     mop_up_results: list[dict[str, Any]] = []
     mop_up_count = 0
-    if stopped_reason is None:
+    if stopped_reason is None and max_prompts is None:
         mop_up_remaining = api.get_prompts(
             batch_id,
             str(brand_id),
@@ -234,6 +242,7 @@ def prompt_extraction_batch_flow(
         "capture_products": capture_products,
         "capture_entities": capture_entities,
         "delay_seconds": delay_seconds,
+        "max_prompts": max_prompts,
         "initial_remaining_count": remaining_count,
         "limit_per_run": limit,
         "planned_runs": run_count,
@@ -380,11 +389,15 @@ def google_ai_mode_extraction_batch_flow(
     country: str | None = None,
     language: str | None = None,
     use_proxy: bool = False,
+    max_prompts: int | None = None,
 ) -> dict[str, Any]:
     """
     Sequentially run google-ai-mode-extraction until all remaining prompts in
     the batch are processed, chunked into `limit`-sized runs with a configurable
     delay between each run.
+
+    max_prompts: when set by the dispatcher, caps the total number of prompts
+    this worker processes and skips the mop-up pass.
     """
     flow_logger = get_run_logger()
     flow_logger.info("WORKER machine_id=%s", os.getenv("FLY_MACHINE_ID", "local"))
@@ -416,10 +429,12 @@ def google_ai_mode_extraction_batch_flow(
     )
     remaining_count = max(0, len(remaining_prompts) - skip)
     run_count = math.ceil(remaining_count / limit) if remaining_count else 0
+    if max_prompts is not None:
+        run_count = min(run_count, math.ceil(max_prompts / limit))
     flow_logger.info(
-        "Starting sequential Google AI Mode batch. batch_id=%s brand_id=%s model_filter=%s remaining_count=%s skip=%s limit_per_run=%s planned_runs=%s delay_seconds=%s country=%s language=%s",
+        "Starting sequential Google AI Mode batch. batch_id=%s brand_id=%s model_filter=%s remaining_count=%s skip=%s limit_per_run=%s planned_runs=%s delay_seconds=%s country=%s language=%s max_prompts=%s",
         batch_id, brand_id, model_filter or "any", remaining_count, skip, limit, run_count, delay_seconds,
-        country or "<env>", language or "<env>",
+        country or "<env>", language or "<env>", max_prompts,
     )
 
     run_results: list[dict[str, Any]] = []
@@ -427,9 +442,10 @@ def google_ai_mode_extraction_batch_flow(
     stopped_reason: str | None = None
     for run_index in range(1, run_count + 1):
         run_skip = skip if run_index == 1 else 0
-        flow_logger.info("Starting Google AI Mode run %s/%s. batch_id=%s limit=%s skip=%s", run_index, run_count, batch_id, limit, run_skip)
+        effective_limit = min(limit, max_prompts - (run_index - 1) * limit) if max_prompts is not None else limit
+        flow_logger.info("Starting Google AI Mode run %s/%s. batch_id=%s limit=%s skip=%s", run_index, run_count, batch_id, effective_limit, run_skip)
         result = google_ai_mode_extraction_flow(
-            batch_id=batch_id, limit=limit, skip=run_skip,
+            batch_id=batch_id, limit=effective_limit, skip=run_skip,
             llm_model_filter=model_filter, force_rerun=False,
             country=country, language=language, use_proxy=use_proxy,
         )
@@ -461,10 +477,10 @@ def google_ai_mode_extraction_batch_flow(
     failed_count = sum(int(r.get("failed_count") or 0) for r in run_results)
     skipped_count = sum(int(r.get("skipped_count") or 0) for r in run_results)
 
-    # Mop-up pass — only run if not stopped by blocking
+    # Mop-up pass — skipped when max_prompts is set (dispatcher ensures full coverage).
     mop_up_results: list[dict[str, Any]] = []
     mop_up_count = 0
-    if stopped_reason is None:
+    if stopped_reason is None and max_prompts is None:
         mop_up_remaining = api.get_prompts(batch_id, str(brand_id), only_remaining=True, llm_model_filter=model_filter)
         mop_up_count = len(mop_up_remaining)
         flow_logger.info("Batch-check: %s prompt(s) still remaining after initial run. batch_id=%s", mop_up_count, batch_id)
@@ -509,6 +525,7 @@ def google_ai_mode_extraction_batch_flow(
         "status": status, "batch_id": batch_id, "brand_id": str(brand_id),
         "model_filter": model_filter, "skip": skip, "delay_seconds": delay_seconds,
         "country": country, "language": language, "use_proxy": use_proxy,
+        "max_prompts": max_prompts,
         "initial_remaining_count": remaining_count, "limit_per_run": limit,
         "planned_runs": run_count, "completed_runs": len(run_results),
         "mop_up_remaining_count": mop_up_count, "mop_up_runs": len(mop_up_results),
@@ -534,11 +551,16 @@ def google_ai_overview_extraction_batch_flow(
     country: str | None = None,
     language: str | None = None,
     use_proxy: bool = False,
+    max_prompts: int | None = None,
 ) -> dict[str, Any]:
     """
     Sequentially run google-ai-overview-extraction until all remaining prompts
     in the batch are processed, chunked into `limit`-sized runs with a
     configurable delay between each run.
+
+    max_prompts: when set by the dispatcher, caps the total number of prompts
+    this worker processes and skips the mop-up pass (the dispatcher ensures
+    full coverage across workers without overlap).
     """
     flow_logger = get_run_logger()
     flow_logger.info("WORKER machine_id=%s", os.getenv("FLY_MACHINE_ID", "local"))
@@ -570,10 +592,12 @@ def google_ai_overview_extraction_batch_flow(
     )
     remaining_count = max(0, len(remaining_prompts) - skip)
     run_count = math.ceil(remaining_count / limit) if remaining_count else 0
+    if max_prompts is not None:
+        run_count = min(run_count, math.ceil(max_prompts / limit))
     flow_logger.info(
-        "Starting sequential Google AI Overview batch. batch_id=%s brand_id=%s model_filter=%s remaining_count=%s skip=%s limit_per_run=%s planned_runs=%s delay_seconds=%s country=%s language=%s use_proxy=%s",
+        "Starting sequential Google AI Overview batch. batch_id=%s brand_id=%s model_filter=%s remaining_count=%s skip=%s limit_per_run=%s planned_runs=%s delay_seconds=%s country=%s language=%s use_proxy=%s max_prompts=%s",
         batch_id, brand_id, model_filter or "any", remaining_count, skip, limit, run_count, delay_seconds,
-        country or "<env>", language or "<env>", use_proxy,
+        country or "<env>", language or "<env>", use_proxy, max_prompts,
     )
 
     run_results: list[dict[str, Any]] = []
@@ -581,9 +605,10 @@ def google_ai_overview_extraction_batch_flow(
     stopped_reason: str | None = None
     for run_index in range(1, run_count + 1):
         run_skip = skip if run_index == 1 else 0
-        flow_logger.info("Starting Google AI Overview run %s/%s. batch_id=%s limit=%s skip=%s", run_index, run_count, batch_id, limit, run_skip)
+        effective_limit = min(limit, max_prompts - (run_index - 1) * limit) if max_prompts is not None else limit
+        flow_logger.info("Starting Google AI Overview run %s/%s. batch_id=%s limit=%s skip=%s", run_index, run_count, batch_id, effective_limit, run_skip)
         result = google_ai_overview_extraction_flow(
-            batch_id=batch_id, limit=limit, skip=run_skip,
+            batch_id=batch_id, limit=effective_limit, skip=run_skip,
             llm_model_filter=model_filter, force_rerun=False,
             country=country, language=language, use_proxy=use_proxy,
         )
@@ -615,10 +640,11 @@ def google_ai_overview_extraction_batch_flow(
     failed_count = sum(int(r.get("failed_count") or 0) for r in run_results)
     skipped_count = sum(int(r.get("skipped_count") or 0) for r in run_results)
 
-    # Mop-up pass — only run if not stopped by blocking
+    # Mop-up pass — skipped when max_prompts is set (dispatcher ensures full
+    # coverage; mop-up would risk overlapping with other workers' ranges).
     mop_up_results: list[dict[str, Any]] = []
     mop_up_count = 0
-    if stopped_reason is None:
+    if stopped_reason is None and max_prompts is None:
         mop_up_remaining = api.get_prompts(batch_id, str(brand_id), only_remaining=True, llm_model_filter=model_filter)
         mop_up_count = len(mop_up_remaining)
         flow_logger.info("Batch-check: %s prompt(s) still remaining after initial run. batch_id=%s", mop_up_count, batch_id)
@@ -663,6 +689,7 @@ def google_ai_overview_extraction_batch_flow(
         "status": status, "batch_id": batch_id, "brand_id": str(brand_id),
         "model_filter": model_filter, "skip": skip, "delay_seconds": delay_seconds,
         "country": country, "language": language, "use_proxy": use_proxy,
+        "max_prompts": max_prompts,
         "initial_remaining_count": remaining_count, "limit_per_run": limit,
         "planned_runs": run_count, "completed_runs": len(run_results),
         "mop_up_remaining_count": mop_up_count, "mop_up_runs": len(mop_up_results),

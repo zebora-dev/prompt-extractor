@@ -27,6 +27,7 @@ REGIONS = {
 
 
 def get_flows():
+    from automated_extraction.workflows.dispatcher import dispatch_extraction_flow
     from automated_extraction.workflows.flows import (
         google_ai_mode_extraction_batch_flow,
         google_ai_mode_extraction_flow,
@@ -86,6 +87,31 @@ def get_flows():
                 "brand_id": None,
                 "prompt_id": None,
                 "limit": 50,
+            },
+        },
+        "dispatch-extraction": {
+            "flow": dispatch_extraction_flow,
+            "tags": ["dispatcher", "extraction", "orchestration"],
+            "description": (
+                "Automatically split a batch across N workers. "
+                "Counts remaining prompts, divides into equal chunks, and submits "
+                "one batch flow run per worker — then exits. "
+                "Supports google-ai-overview, google-ai-mode, and chatgpt."
+            ),
+            "parameters": {
+                "batch_id": None,
+                "extraction_type": "google-ai-overview",
+                "worker_count": 4,
+                "region": "uk",
+                "limit": 5,
+                "delay_seconds": 60,
+                "use_proxy": False,
+                "country": None,
+                "language": None,
+                "auto_login": False,
+                "login_email": None,
+                "capture_products": False,
+                "capture_entities": False,
             },
         },
         "google-ai-mode-extraction-batch": {
