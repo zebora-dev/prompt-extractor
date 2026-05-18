@@ -5,10 +5,6 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-from selenium.common.exceptions import WebDriverException
-from selenium.webdriver import ActionChains, Chrome
-from selenium.webdriver.common.by import By
-
 from .google_ai_mode_runner import clean_google_url, clean_text
 
 LOGGER = logging.getLogger(__name__)
@@ -113,6 +109,16 @@ PAA_EXTRACTION_SCRIPT = r"""return (function(containerEl) {
 })(arguments[0]);
 """
 
+# JS: find a content panel by aria-controls ID (no element arg — returns bool).
+# Called as a plain string with the panel ID interpolated — no element args needed.
+def _make_panel_visible_script(panel_id: str) -> str:
+    """Return a JS snippet that checks visibility of the panel with the given ID."""
+    safe_id = panel_id.replace("'", "\\'")
+    return (
+        f"var _p=document.getElementById('{safe_id}');"
+        f"return !!(_p && (_p.offsetParent!==null||_p.offsetHeight>0));"
+    )
+
 
 @dataclass
 class PAASuggestionCapture:
@@ -136,14 +142,16 @@ class PAASectionCapture:
         return len(self.suggestions)
 
 
-def capture_people_also_ask(driver: Chrome, *, max_questions: int = 20, wait_seconds: float = 4.0) -> PAASectionCapture:
+def capture_people_also_ask(driver, *, max_questions: int = 20, wait_seconds: float = 4.0) -> PAASectionCapture:
     """Click every PAA accordion, expand with Show more, and capture each answer.
 
     Returns a PAASectionCapture with one entry per question found.
+    Works with NodriverBrowser (and remains compatible with the Selenium Chrome
+    duck-type for the ChatGPT runner, which still uses Selenium).
     """
     try:
-        questions = driver.find_elements(By.CSS_SELECTOR, PAA_QUESTION_SELECTOR)
-    except WebDriverException as exc:
+        questions = driver.find_elements("css selector", PAA_QUESTION_SELECTOR)
+    except Exception as exc:
         LOGGER.warning("Could not locate PAA questions: %s", exc)
         return PAASectionCapture(capture_method="paa_dom", error=str(exc))
 
@@ -183,20 +191,18 @@ def capture_people_also_ask(driver: Chrome, *, max_questions: int = 20, wait_sec
 
 
 def _capture_single_paa(
-    driver: Chrome, question_el, idx: int, question_text: str, wait_seconds: float
+    driver, question_el, idx: int, question_text: str, wait_seconds: float
 ) -> PAASuggestionCapture:
     try:
         # Scroll the question into view
         driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", question_el)
         time.sleep(0.2)
 
-        # Find and click the expand button (role=button) inside the question row
-        expand_btn = None
-        try:
-            expand_btn = question_el.find_element(By.CSS_SELECTOR, PAA_EXPAND_BUTTON_SELECTOR)
-        except WebDriverException:
-            # Fallback: click the question element itself
-            expand_btn = question_el
+        # Find the expand button inside the question row via native CSS query.
+        # Never pass DOM elements through execute_script return values — CDP
+        # serialises them as plain dicts (return_by_value=True limitation).
+        expand_btns = question_el.find_elements("css selector", PAA_EXPAND_BUTTON_SELECTOR)
+        expand_btn = expand_btns[0] if expand_btns else question_el
 
         aria_expanded = (expand_btn.get_attribute("aria-expanded") or "").lower()
         if aria_expanded == "true":
@@ -207,7 +213,7 @@ def _capture_single_paa(
         _click_trusted(driver, expand_btn)
 
         # Wait for content panel to become visible
-        content_panel = _wait_for_content_panel(driver, expand_btn, wait_seconds)
+        content_panel = _wait_for_content_panel(driver, expand_btn, question_el, wait_seconds)
         if content_panel is None:
             return PAASuggestionCapture(
                 index=idx,
@@ -259,66 +265,70 @@ def _capture_single_paa(
         )
 
 
-def _click_trusted(driver: Chrome, el) -> None:
+def _click_trusted(driver, el) -> None:
+    """Click an element via JS dispatched pointer/mouse events."""
     driver.execute_script("arguments[0].scrollIntoView({block: 'center', inline: 'center'});", el)
     time.sleep(0.1)
-    try:
-        ActionChains(driver).move_to_element(el).click().perform()
-    except Exception:
-        driver.execute_script(
-            """
-            const e = arguments[0];
-            e.dispatchEvent(new PointerEvent('pointerdown', {bubbles: true, pointerType: 'mouse'}));
-            e.dispatchEvent(new MouseEvent('mousedown', {bubbles: true}));
-            e.dispatchEvent(new PointerEvent('pointerup', {bubbles: true, pointerType: 'mouse'}));
-            e.dispatchEvent(new MouseEvent('mouseup', {bubbles: true}));
-            e.click();
-            """,
-            el,
-        )
+    driver.execute_script(
+        """
+        const e = arguments[0];
+        e.dispatchEvent(new PointerEvent('pointerdown', {bubbles: true, pointerType: 'mouse'}));
+        e.dispatchEvent(new MouseEvent('mousedown', {bubbles: true}));
+        e.dispatchEvent(new PointerEvent('pointerup', {bubbles: true, pointerType: 'mouse'}));
+        e.dispatchEvent(new MouseEvent('mouseup', {bubbles: true}));
+        e.click();
+        """,
+        el,
+    )
 
 
-def _wait_for_content_panel(driver: Chrome, expand_btn, wait_seconds: float):
-    """Wait until aria-expanded becomes 'true' and locate the associated content panel."""
-    aria_controls = (expand_btn.get_attribute("aria-controls") or "").strip()
+def _wait_for_content_panel(driver, expand_btn, question_el, wait_seconds: float):
+    """Wait until aria-expanded becomes 'true' and locate the associated content panel.
+
+    Avoids passing DOM elements through execute_script return values (CDP
+    can't serialise them back with return_by_value=True — they come back as
+    plain dicts).  Instead we use native NodriverElement.find_elements() CSS
+    queries and attribute reads, with a plain-string JS visibility check.
+    """
     deadline = time.time() + wait_seconds
+    # Read aria-controls once — it's a static attribute on the expand button.
+    aria_controls = expand_btn.get_attribute("aria-controls") or ""
+
     while time.time() < deadline:
         expanded = (expand_btn.get_attribute("aria-expanded") or "").lower()
         if expanded == "true":
-            # Try aria-controls id first
+            panel = None
+
+            # 1. Preferred: aria-controls ID → exact panel element
             if aria_controls:
-                try:
-                    panel = driver.find_element(By.ID, aria_controls)
-                    vis = driver.execute_script(
-                        "return arguments[0].offsetParent !== null || arguments[0].offsetHeight > 0;", panel
-                    )
-                    if vis:
-                        return panel
-                except WebDriverException:
-                    pass
-            # Fallback: sibling NRdf4c
-            try:
-                panel = expand_btn.find_element(By.XPATH, "following-sibling::div[@jsname='NRdf4c']")
+                panels = driver.find_elements("css selector", f"#{aria_controls}")
+                if panels:
+                    panel = panels[0]
+                    # Confirm visibility via pure-string JS (no element arg).
+                    try:
+                        vis = driver.execute_script(_make_panel_visible_script(aria_controls))
+                        if not vis:
+                            panel = None
+                    except Exception:
+                        pass  # assume visible on error
+
+            # 2. Fallback: query NRdf4c within the question container element
+            if panel is None:
+                candidates = question_el.find_elements("css selector", PAA_CONTENT_PANEL_SELECTOR)
+                if candidates:
+                    panel = candidates[0]
+
+            if panel is not None:
                 return panel
-            except WebDriverException:
-                pass
-            # Fallback 2: parent's NRdf4c child
-            try:
-                parent = expand_btn.find_element(
-                    By.XPATH, "ancestor::div[@class and contains(@class,'related-question-pair')]"
-                )
-                panel = parent.find_element(By.CSS_SELECTOR, PAA_CONTENT_PANEL_SELECTOR)
-                return panel
-            except WebDriverException:
-                pass
+
         time.sleep(0.3)
     return None
 
 
-def _click_show_more_in_panel(driver: Chrome, panel) -> None:
+def _click_show_more_in_panel(driver, panel) -> None:
     """Click the 'Show more' button inside an expanded PAA panel if present."""
     try:
-        candidates = panel.find_elements(By.CSS_SELECTOR, PAA_SHOW_MORE_SELECTOR)
+        candidates = panel.find_elements("css selector", PAA_SHOW_MORE_SELECTOR)
         for el in candidates:
             text = (el.text or el.get_attribute("textContent") or "").strip().lower()
             if "show more" in text:
@@ -326,7 +336,7 @@ def _click_show_more_in_panel(driver: Chrome, panel) -> None:
                 time.sleep(0.4)
                 LOGGER.debug("Clicked 'Show more' inside PAA panel.")
                 return
-    except WebDriverException:
+    except Exception:
         pass
 
 
