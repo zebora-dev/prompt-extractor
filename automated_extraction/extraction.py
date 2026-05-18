@@ -524,7 +524,7 @@ def run_google_ai_mode_extraction_job(
                     len(capture.sources or []),
                     capture.capture_state,
                 )
-                _capture_and_save_suggestions(
+                suggestion_count = _capture_and_save_suggestions(
                     api=api,
                     driver=runner.driver,
                     saved_output=saved_output,
@@ -534,6 +534,14 @@ def run_google_ai_mode_extraction_job(
                     index=index,
                     total=len(prompts),
                 )
+                if suggestion_count > 0:
+                    current_metadata = output.get("output_metadata") if isinstance(output.get("output_metadata"), dict) else {}
+                    try:
+                        api.update_prompt_output(saved_output, {
+                            "output_metadata": {**current_metadata, "suggestion_count": suggestion_count},
+                        })
+                    except Exception as patch_exc:
+                        LOGGER.warning("[%s/%s] Could not patch suggestion_count for prompt %s: %s", index, len(prompts), prompt_id, patch_exc)
             except Exception as exc:
                 failed_count += 1
                 failure = {"prompt_id": prompt_id, "brand_id": prompt_brand_id, "error": str(exc)}
@@ -742,7 +750,7 @@ def run_google_ai_overview_extraction_job(
                     len(capture.sources or []),
                     capture.capture_state,
                 )
-                _capture_and_save_suggestions(
+                suggestion_count = _capture_and_save_suggestions(
                     api=api,
                     driver=runner.driver,
                     saved_output=saved_output,
@@ -752,6 +760,14 @@ def run_google_ai_overview_extraction_job(
                     index=index,
                     total=len(prompts),
                 )
+                if suggestion_count > 0:
+                    current_metadata = output.get("output_metadata") if isinstance(output.get("output_metadata"), dict) else {}
+                    try:
+                        api.update_prompt_output(saved_output, {
+                            "output_metadata": {**current_metadata, "suggestion_count": suggestion_count},
+                        })
+                    except Exception as patch_exc:
+                        LOGGER.warning("[%s/%s] Could not patch suggestion_count for prompt %s: %s", index, len(prompts), prompt_id, patch_exc)
             except Exception as exc:
                 failed_count += 1
                 failure = {"prompt_id": prompt_id, "brand_id": prompt_brand_id, "error": str(exc)}
@@ -930,6 +946,9 @@ def build_prompt_output(
             "app_version": "1.0.0",
             "prompt_source": "batch" if batch_id else "local",
             "worker_name": os.getenv("FLY_MACHINE_ID") or os.getenv("FLY_APP_NAME"),
+            "worker_app": os.getenv("FLY_APP_NAME"),
+            "worker_pool": os.getenv("PREFECT_WORK_POOL"),
+            "suggestion_count": 0,
         },
     }
 
@@ -998,7 +1017,6 @@ def build_google_ai_mode_prompt_output(
             "ai_mode_triggered": ai_mode_triggered,
             "capture_state": capture_state,
             "capture_error": error,
-            "google_url": url,
             "google_country": country,
             "google_language": language,
         },
@@ -1076,7 +1094,6 @@ def build_google_ai_overview_prompt_output(
             "ai_overview_triggered": ai_overview_triggered,
             "capture_state": capture_state,
             "capture_error": error,
-            "google_url": url,
             "google_country": country,
             "google_language": language,
         },
@@ -1098,21 +1115,24 @@ def _capture_and_save_suggestions(
     llm_model: str,
     index: int,
     total: int,
-) -> None:
-    """Capture PAA suggestions from the current page and save them to Supabase."""
+) -> int:
+    """Capture PAA suggestions from the current page and save them to Supabase.
+
+    Returns the number of suggestions saved (0 if none found or on error).
+    """
     if not driver:
-        return
+        return 0
     output_id = saved_output.get("output_id") or saved_output.get("id")
     prompt_id = str(prompt.get("id") or "")
     brand_id = str(prompt.get("brand_id") or saved_output.get("brand_id") or "")
     resolved_batch = batch_id or str(prompt.get("batch_id") or "")
     if not output_id or not prompt_id or not brand_id:
-        return
+        return 0
     try:
         paa = capture_people_also_ask(driver)
         if not paa.suggestions:
             LOGGER.info("[%s/%s] No PAA suggestions found for prompt %s.", index, total, prompt_id)
-            return
+            return 0
 
         rows = [
             {
@@ -1148,6 +1168,7 @@ def _capture_and_save_suggestions(
             prompt_id,
             output_id,
         )
+        return len(rows)
     except Exception as exc:
         LOGGER.warning(
             "[%s/%s] PAA suggestion capture/save failed for prompt %s: %s",
@@ -1156,6 +1177,7 @@ def _capture_and_save_suggestions(
             prompt_id,
             exc,
         )
+        return 0
 
 
 def build_flyout_summary_patch(
