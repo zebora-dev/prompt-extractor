@@ -142,8 +142,8 @@ def _submit_worker_run(
     log_prints=True,
 )
 def dispatch_extraction_flow(
-    batch_id: str,
-    extraction_type: str,
+    batch_id: str | None = None,
+    extraction_type: str | None = None,
     worker_count: int = 4,
     region: str = "uk",
     # Inner-run tuning (passed through to each batch flow)
@@ -184,6 +184,10 @@ def dispatch_extraction_flow(
     flow_logger = get_run_logger()
 
     # -- Validate inputs -------------------------------------------------------
+    if not batch_id:
+        raise ValueError("batch_id is required")
+    if not extraction_type:
+        raise ValueError("extraction_type is required")
     if extraction_type not in _EXTRACTION_TYPES:
         raise ValueError(
             f"Unknown extraction_type {extraction_type!r}. "
