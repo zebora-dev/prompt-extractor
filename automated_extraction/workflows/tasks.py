@@ -5,6 +5,11 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
+# Ensure INFO-level logs from all automated_extraction submodules flow through
+# to Prefect's log handler. The root logger defaults to WARNING in Prefect
+# workers, which silently drops LOGGER.info() calls in extraction code.
+logging.getLogger("automated_extraction").setLevel(logging.INFO)
+
 from prefect import task
 from prefect.logging import get_run_logger
 

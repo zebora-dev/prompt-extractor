@@ -6,15 +6,17 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import quote_plus, urlsplit
 
-from selenium.common.exceptions import WebDriverException
-from selenium.webdriver import ActionChains, Chrome
-from selenium.webdriver.common.by import By
-
-from .google_chrome_factory import build_google_driver, warmup_google_session
+from .google_chrome_factory import (
+    NodriverBrowser,
+    build_nodriver_browser,
+    search_via_box,
+    warmup_google_session,
+)
 from .google_ai_mode_runner import (
     clean_google_url,
     clean_markdown,
     clean_text,
+    first_line,
     has_meaningful_content,
 )
 
@@ -69,12 +71,18 @@ class GoogleAIOverviewRunner:
     ) -> None:
         self.google_url = google_url
         self.headless = headless
-        self.chrome_user_data_dir = chrome_user_data_dir
+        self.chrome_user_data_dir = chrome_user_data_dir  # ignored — nodriver always uses a fresh profile
         self.response_timeout_seconds = response_timeout_seconds
         self.country = country
         self.language = language
         self.proxy_url = proxy_url
-        self.driver: Chrome | None = None
+        self.browser: NodriverBrowser | None = None
+
+    # Expose self.driver as an alias for self.browser so that extraction.py's
+    # _capture_and_save_suggestions(driver=runner.driver) keeps working.
+    @property
+    def driver(self) -> NodriverBrowser | None:
+        return self.browser
 
     def __enter__(self) -> GoogleAIOverviewRunner:
         self.start()
@@ -84,30 +92,46 @@ class GoogleAIOverviewRunner:
         self.close()
 
     def start(self) -> None:
-        self.driver = build_google_driver(
+        LOGGER.info(
+            "Starting GoogleAIOverviewRunner. headless=%s proxy=%s country=%s language=%s",
+            self.headless,
+            "yes" if self.proxy_url else "no",
+            self.country or "<env>",
+            self.language,
+        )
+        self.browser = build_nodriver_browser(
             headless=self.headless,
-            user_data_dir=self.chrome_user_data_dir,
             proxy_url=self.proxy_url,
         )
-        warmup_google_session(self.driver)
+        warmup_google_session(self.browser)
+        LOGGER.info("GoogleAIOverviewRunner ready.")
 
     def close(self) -> None:
-        if self.driver:
-            self.driver.quit()
-            self.driver = None
+        if self.browser:
+            self.browser.quit()
+            self.browser = None
 
     def run_prompt(self, prompt_text: str) -> GoogleAIOverviewCapture:
-        driver = self.require_driver()
-        search_url = self.build_search_url(prompt_text)
-        LOGGER.info("Loading Google AI Overview URL: %s", search_url)
-        driver.get(search_url)
+        browser = self.require_browser()
+        LOGGER.info("Searching via box for AI Overview: %s", prompt_text[:80])
+        t0 = time.time()
+        search_via_box(browser, prompt_text)
+        LOGGER.info("Search submitted in %.1fs. current_url=%s", time.time() - t0, browser.current_url)
 
         blocked_reason = self.detect_blocking_page()
         if blocked_reason:
+            LOGGER.warning("Blocking page detected after search: %s", blocked_reason)
             raise RuntimeError(f"Google blocked the request: {blocked_reason}")
 
+        LOGGER.info("No blocking detected — waiting for AI Overview panel.")
         result = self.wait_for_ai_overview()
-        current_url = driver.current_url
+        current_url = browser.current_url
+        LOGGER.info(
+            "AI Overview wait finished. triggered=%s state=%s sources=%s",
+            result.get("ai_overview_triggered"),
+            result.get("capture_state"),
+            len(result.get("sources") or []),
+        )
 
         if not result.get("ai_overview_triggered"):
             LOGGER.warning(
@@ -223,7 +247,7 @@ class GoogleAIOverviewRunner:
                     poll,
                     elapsed,
                     result.get("capture_state"),
-                    self.require_driver().current_url[:120],
+                    self.require_browser().current_url[:120],
                 )
                 time.sleep(1)
                 continue
@@ -261,28 +285,32 @@ class GoogleAIOverviewRunner:
             "wait_for_ai_overview: timed out after %ss with no AIO detected — final state=%s final_url=%s",
             self.response_timeout_seconds,
             last_result.get("capture_state"),
-            self.require_driver().current_url[:120],
+            self.require_browser().current_url[:120],
         )
         return last_result
 
     def click_show_more(self) -> bool:
         """Click the 'Show more AI Overview' button. Returns True if found, False otherwise."""
-        driver = self.require_driver()
+        browser = self.require_browser()
         try:
-            btn = driver.find_element(By.CSS_SELECTOR, SHOW_MORE_BTN_SELECTOR)
-            if (btn.get_attribute("aria-expanded") or "").lower() == "true":
+            btns = browser.find_elements_by_css(SHOW_MORE_BTN_SELECTOR)
+            if not btns:
+                LOGGER.info("'Show more AI Overview' button not found — panel may already be fully expanded.")
+                return False
+            btn = btns[0]
+            aria_expanded = btn.get_attribute("aria-expanded") or ""
+            if aria_expanded.lower() == "true":
                 LOGGER.debug("'Show more AI Overview' already expanded — skipping click.")
                 return True
-            driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", btn)
+            browser.execute_script(
+                "arguments[0].scrollIntoView({block: 'center'});", btn
+            )
             time.sleep(0.3)
-            try:
-                ActionChains(driver).move_to_element(btn).click().perform()
-            except Exception:
-                driver.execute_script("arguments[0].click();", btn)
+            btn.click()
             LOGGER.info("Clicked 'Show more AI Overview' button.")
             return True
-        except WebDriverException:
-            LOGGER.info("'Show more AI Overview' button not found — panel may already be fully expanded.")
+        except Exception as exc:
+            LOGGER.info("'Show more AI Overview' click failed (non-fatal): %s", exc)
             return False
 
     def _click_show_all_sidebar(self) -> bool:
@@ -291,34 +319,37 @@ class GoogleAIOverviewRunner:
         Returns True when the button was found and clicked. The extra sources
         are loaded dynamically so the caller must wait before re-extracting.
         """
-        driver = self.require_driver()
+        browser = self.require_browser()
         try:
-            btn = driver.find_element(By.CSS_SELECTOR, '[aria-label="Show all related links"]')
-            driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", btn)
+            btns = browser.find_elements_by_css('[aria-label="Show all related links"]')
+            if not btns:
+                LOGGER.debug("'Show all related links' sidebar button not found.")
+                return False
+            btn = btns[0]
+            browser.execute_script(
+                "arguments[0].scrollIntoView({block: 'center'});", btn
+            )
             time.sleep(0.2)
-            try:
-                ActionChains(driver).move_to_element(btn).click().perform()
-            except Exception:
-                driver.execute_script("arguments[0].click();", btn)
+            btn.click()
             LOGGER.info("Clicked 'Show all related links' sidebar button.")
             return True
-        except WebDriverException:
-            LOGGER.debug("'Show all related links' sidebar button not found.")
+        except Exception as exc:
+            LOGGER.debug("'Show all related links' click failed (non-fatal): %s", exc)
             return False
 
     def _extract_extra_sidebar_sources(self, existing_urls: set[str]) -> list[dict[str, Any]]:
         """Extract sidebar sources that weren't present before 'Show all' was clicked."""
         try:
-            result = self.require_driver().execute_script(SIDEBAR_EXTRA_SOURCES_SCRIPT, list(existing_urls))
+            result = self.require_browser().execute_script(SIDEBAR_EXTRA_SOURCES_SCRIPT, list(existing_urls))
             if isinstance(result, list):
                 return result
-        except WebDriverException as exc:
+        except Exception as exc:
             LOGGER.debug("Extra sidebar source extraction failed: %s", first_line(str(exc)))
         return []
 
     def extract_ai_overview(self) -> dict[str, Any]:
         try:
-            result = self.require_driver().execute_script(AI_OVERVIEW_EXTRACTION_SCRIPT)
+            result = self.require_browser().execute_script(AI_OVERVIEW_EXTRACTION_SCRIPT)
             if isinstance(result, dict):
                 LOGGER.info(
                     "extract_ai_overview: triggered=%s state=%s text_len=%s sources=%s",
@@ -329,7 +360,7 @@ class GoogleAIOverviewRunner:
                 )
                 return result
             LOGGER.warning("extract_ai_overview: script returned non-dict: %r", result)
-        except WebDriverException as exc:
+        except Exception as exc:
             LOGGER.warning("Google AI Overview extraction script failed: %s", first_line(str(exc)))
         return {
             "ai_overview_triggered": False,
@@ -338,23 +369,27 @@ class GoogleAIOverviewRunner:
         }
 
     def detect_blocking_page(self) -> str:
-        driver = self.require_driver()
-        current_url = (driver.current_url or "").lower()
+        browser = self.require_browser()
+        current_url = (browser.current_url or "").lower()
         if any(pattern in current_url for pattern in BLOCKING_URL_PATTERNS):
             return current_url
         try:
-            body_text = driver.find_element(By.TAG_NAME, "body").text.lower()
-        except WebDriverException:
+            body_text = str(browser.execute_script("return document.body.innerText") or "").lower()
+        except Exception:
             return ""
         for pattern in BLOCKING_TEXT_PATTERNS:
             if pattern in body_text:
                 return pattern
         return ""
 
-    def require_driver(self) -> Chrome:
-        if not self.driver:
+    def require_browser(self) -> NodriverBrowser:
+        if not self.browser:
             raise RuntimeError("Browser has not been started")
-        return self.driver
+        return self.browser
+
+    # Legacy alias kept so any code holding a reference to require_driver() still works.
+    def require_driver(self) -> NodriverBrowser:
+        return self.require_browser()
 
 
 # Extracts sidebar sources that are NEW since the last extraction pass.

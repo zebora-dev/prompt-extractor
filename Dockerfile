@@ -49,6 +49,7 @@ COPY requirements.txt pyproject.toml README.md ./
 COPY automated_extraction ./automated_extraction
 
 RUN python -m pip install --upgrade pip \
+    && python -m pip install --upgrade setuptools wheel \
     && python -m pip install -r requirements.txt \
     && python -m pip install -e .
 

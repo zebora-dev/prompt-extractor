@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import logging
 import os
+import random
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -530,9 +532,12 @@ def run_google_ai_mode_extraction_job(
                 failures.append(failure)
                 LOGGER.exception("[%s/%s] Google AI Mode prompt %s failed: %s", index, len(prompts), prompt_id, exc)
 
-        if debug_pause_seconds > 0:
-            import time
+            if index < len(prompts):
+                delay = random.uniform(3.0, 7.0)
+                LOGGER.info("[%s/%s] Pausing %.1fs before next prompt.", index, len(prompts), delay)
+                time.sleep(delay)
 
+        if debug_pause_seconds > 0:
             LOGGER.info("Debug pause: browser staying open for %s seconds. Inspect at will.", debug_pause_seconds)
             time.sleep(debug_pause_seconds)
 
@@ -737,9 +742,12 @@ def run_google_ai_overview_extraction_job(
                 failures.append(failure)
                 LOGGER.exception("[%s/%s] Google AI Overview prompt %s failed: %s", index, len(prompts), prompt_id, exc)
 
-        if debug_pause_seconds > 0:
-            import time
+            if index < len(prompts):
+                delay = random.uniform(3.0, 7.0)
+                LOGGER.info("[%s/%s] Pausing %.1fs before next prompt.", index, len(prompts), delay)
+                time.sleep(delay)
 
+        if debug_pause_seconds > 0:
             LOGGER.info("Debug pause: browser staying open for %s seconds. Inspect at will.", debug_pause_seconds)
             time.sleep(debug_pause_seconds)
 

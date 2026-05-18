@@ -1,10 +1,24 @@
 # Prefect Operations Guide
 
-This app can run the existing ChatGPT extraction process as a Prefect flow. Prefect gives us observable runs, parameters, logs, duration, state, retry hooks, and a UI for triggering and inspecting work.
+This app runs extraction as Prefect flows, giving us observable runs, parameters, logs, duration, state, retry hooks, and a UI for triggering and inspecting work.
 
 Batch, prompt, and prompt-output create/read/update/exists operations go directly through the Python Supabase client.
 
-The flow is:
+## Flows
+
+Seven flows are registered across two regional work pools. UK deployments have a `-uk` suffix.
+
+| Flow | Pool (US) | Pool (UK) |
+|---|---|---|
+| `prompt-extraction-batch` | `prompt-extraction-us` | `prompt-extraction-uk` |
+| `prompt-extraction` | `prompt-extraction-us` | `prompt-extraction-uk` |
+| `google-ai-mode-extraction-batch` | `prompt-extraction-us` | `prompt-extraction-uk` |
+| `google-ai-mode-extraction` | `prompt-extraction-us` | `prompt-extraction-uk` |
+| `google-ai-overview-extraction-batch` | `prompt-extraction-us` | `prompt-extraction-uk` |
+| `google-ai-overview-extraction` | `prompt-extraction-us` | `prompt-extraction-uk` |
+| `prompt-output-processing` | `prompt-extraction-us` | `prompt-extraction-uk` |
+
+The ChatGPT flow is:
 
 ```text
 prompt-extraction
@@ -249,29 +263,45 @@ prefect deployment run 'prompt-extraction/prompt-extraction' \
   --param dry_run=true
 ```
 
-## 5. Option B: Deploy to a Process Work Pool
+## 5. Option B: Deploy to Process Work Pools (multi-region)
 
-Use this mode when you want the server and worker lifecycle separated.
+Use this mode when you want the server and worker lifecycle separated. Two regional work pools route work to the correct Fly.io worker.
 
-Terminal 2, create the work pool:
-
-```bash
-make prefect-pool
-```
-
-Register the deployment:
+### Create work pools (one-time)
 
 ```bash
-make prefect-deploy
+make prefect-pool     # creates prompt-extraction-us
+make prefect-pool-uk  # creates prompt-extraction-uk
 ```
 
-Start a worker:
+### Register deployments
+
+Run these from your local machine, pointing at the hosted Prefect server:
 
 ```bash
-make prefect-worker
+# US deployments (7 flows, no suffix, tagged region:us)
+PREFECT_API_URL=https://prompt-extractor-prefect.fly.dev/api \
+PREFECT_WORK_POOL=prompt-extraction-us \
+PREFECT_WORKING_DIR=/app \
+  make prefect-deploy-us
+
+# UK deployments (7 flows, -uk suffix, tagged region:uk)
+PREFECT_API_URL=https://prompt-extractor-prefect.fly.dev/api \
+PREFECT_WORK_POOL=prompt-extraction-uk \
+PREFECT_WORKING_DIR=/app \
+  make prefect-deploy-uk
 ```
 
-Trigger from the UI or CLI as above. The worker process must run on a machine that has:
+### Start workers
+
+Workers are managed by Fly.io and start automatically. To run a worker locally for development:
+
+```bash
+make prefect-worker     # polls prompt-extraction-us
+make prefect-worker-uk  # polls prompt-extraction-uk
+```
+
+The worker process must have:
 
 - this repo checked out
 - dependencies installed
@@ -432,3 +462,24 @@ python -m automated_extraction --batch-id <batch-id> --limit 1 --sources-panel-p
 ```
 
 The logs should show whether the button, panel, links, or extraction step failed.
+
+### Worker does not pick up UK runs
+
+Make sure the deployment name has the `-uk` suffix and the run was submitted against the `prompt-extraction-uk` pool. Check that the UK worker is running and polling the correct pool:
+
+```bash
+fly status -a prompt-extractor-uk
+fly logs -a prompt-extractor-uk
+```
+
+### Google batch stops with `stopped_reason=google_blocked_consecutive`
+
+The worker's datacenter IP is being blocked by Google. Re-trigger the same batch with `use_proxy=True`:
+
+```bash
+prefect deployment run 'google-ai-mode-extraction-batch/google-ai-mode-extraction-batch-uk' \
+  --param batch_id=<uuid> \
+  --param use_proxy=true
+```
+
+This requires `GOOGLE_PROXY_URL` to be set as a secret on the worker. See [MULTI_REGION.md](MULTI_REGION.md) for proxy setup details.

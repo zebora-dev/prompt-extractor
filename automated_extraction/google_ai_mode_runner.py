@@ -7,11 +7,12 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import parse_qsl, quote_plus, urlencode, urlsplit, urlunsplit
 
-from selenium.common.exceptions import WebDriverException
-from selenium.webdriver import Chrome
-from selenium.webdriver.common.by import By
-
-from .google_chrome_factory import build_google_driver, warmup_google_session
+from .google_chrome_factory import (
+    NodriverBrowser,
+    build_nodriver_browser,
+    search_via_box,
+    warmup_google_session,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -26,6 +27,10 @@ BLOCKING_TEXT_PATTERNS = [
     "verify you are human",
     "captcha",
 ]
+
+
+def first_line(value: str) -> str:
+    return (value or "").split("\n")[0][:200]
 
 
 @dataclass
@@ -61,14 +66,20 @@ class GoogleAIModeRunner:
     ) -> None:
         self.google_url = google_url
         self.headless = headless
-        self.chrome_user_data_dir = chrome_user_data_dir
+        self.chrome_user_data_dir = chrome_user_data_dir  # ignored — nodriver always uses a fresh profile
         self.response_timeout_seconds = response_timeout_seconds
         self.country = country
         self.language = language
         self.use_ai_mode_param = use_ai_mode_param
         self.use_advanced_ai_param = use_advanced_ai_param
         self.proxy_url = proxy_url
-        self.driver: Chrome | None = None
+        self.browser: NodriverBrowser | None = None
+
+    # Expose self.driver as an alias for self.browser so that extraction.py's
+    # _capture_and_save_suggestions(driver=runner.driver) keeps working.
+    @property
+    def driver(self) -> NodriverBrowser | None:
+        return self.browser
 
     def __enter__(self) -> GoogleAIModeRunner:
         self.start()
@@ -78,30 +89,58 @@ class GoogleAIModeRunner:
         self.close()
 
     def start(self) -> None:
-        self.driver = build_google_driver(
+        LOGGER.info(
+            "Starting GoogleAIModeRunner. headless=%s proxy=%s country=%s language=%s",
+            self.headless,
+            "yes" if self.proxy_url else "no",
+            self.country or "<env>",
+            self.language,
+        )
+        self.browser = build_nodriver_browser(
             headless=self.headless,
-            user_data_dir=self.chrome_user_data_dir,
             proxy_url=self.proxy_url,
         )
-        warmup_google_session(self.driver)
+        warmup_google_session(self.browser)
+        LOGGER.info("GoogleAIModeRunner ready.")
 
     def close(self) -> None:
-        if self.driver:
-            self.driver.quit()
-            self.driver = None
+        if self.browser:
+            self.browser.quit()
+            self.browser = None
 
     def run_prompt(self, prompt_text: str) -> GoogleAIModeCapture:
-        driver = self.require_driver()
-        search_url = self.build_search_url(prompt_text)
-        LOGGER.info("Loading Google AI Mode URL: %s", search_url)
-        driver.get(search_url)
+        browser = self.require_browser()
+        LOGGER.info("Searching via box for AI Mode: %s", prompt_text[:80])
+        t0 = time.time()
+        search_via_box(browser, prompt_text)
+        LOGGER.info("Search submitted in %.1fs. current_url=%s", time.time() - t0, browser.current_url)
 
         blocked_reason = self.detect_blocking_page()
         if blocked_reason:
+            LOGGER.warning("Blocking page detected after search: %s", blocked_reason)
             raise RuntimeError(f"Google blocked the request: {blocked_reason}")
 
+        # Switch to AI Mode via JS navigation (less detectable than direct navigate).
+        # Builds the udm=50 URL from the current landed URL so hl/gl params are preserved.
+        ai_mode_url = self.build_search_url(prompt_text)
+        LOGGER.info("Switching to AI Mode via JS: %s", ai_mode_url)
+        browser.execute_script("window.location.assign(arguments[0]);", ai_mode_url)
+        time.sleep(2.0)
+
+        blocked_reason = self.detect_blocking_page()
+        if blocked_reason:
+            LOGGER.warning("Blocking page detected after AI Mode switch: %s", blocked_reason)
+            raise RuntimeError(f"Google blocked the request: {blocked_reason}")
+
+        LOGGER.info("No blocking detected — waiting for AI Mode panel.")
         result = self.wait_for_ai_mode()
-        current_url = driver.current_url
+        current_url = browser.current_url
+        LOGGER.info(
+            "AI Mode wait finished. triggered=%s state=%s sources=%s",
+            result.get("ai_mode_triggered"),
+            result.get("capture_state"),
+            len(result.get("sources") or []),
+        )
         if not result.get("ai_mode_triggered"):
             return GoogleAIModeCapture(
                 response="",
@@ -155,23 +194,13 @@ class GoogleAIModeRunner:
     def capture_markdown_via_copy_button(self) -> tuple[str, str]:
         """Click the AI Mode 'Copy text' button and return (markdown, capture_method).
 
-        Uses a three-layer clipboard interception strategy and ActionChains for a
-        trusted click. Returns ('', reason) on any failure — the caller leaves
-        the markdown field blank rather than falling back to DOM extraction.
+        Uses a three-layer clipboard interception strategy with JS dispatched events
+        for the click. Returns ('', reason) on any failure.
         """
-        driver = self.require_driver()
+        browser = self.require_browser()
         try:
-            # Grant clipboard permissions via CDP (best-effort — may not work with uc)
-            try:
-                driver.execute_cdp_cmd(
-                    "Browser.grantPermissions",
-                    {"permissions": ["clipboardReadWrite", "clipboardSanitizedWrite"], "origin": driver.current_url},
-                )
-            except Exception:
-                pass
-
             # Intercept all three clipboard write paths before the click fires
-            driver.execute_script(
+            browser.execute_script(
                 """
                 window.__clipboardCapture = null;
 
@@ -211,39 +240,30 @@ class GoogleAIModeRunner:
                 """
             )
 
-            buttons = driver.find_elements(By.CSS_SELECTOR, 'button[aria-label="Copy text"]')
+            buttons = browser.find_elements_by_css('button[aria-label="Copy text"]')
             if not buttons:
                 LOGGER.debug("Copy text button not found.")
                 return "", "copy_button_not_found"
 
             button = buttons[0]
-            driver.execute_script("arguments[0].scrollIntoView({block: 'center', inline: 'center'});", button)
-            time.sleep(0.3)
-
-            # Use ActionChains for a trusted (isTrusted=true) browser click — JS .click()
-            # produces isTrusted=false which Google's JSAction framework may ignore
-            from selenium.webdriver import ActionChains
-
-            try:
-                ActionChains(driver).move_to_element(button).click().perform()
-            except Exception:
-                # Fallback: full pointer/mouse event sequence
-                driver.execute_script(
-                    """
-                    const el = arguments[0];
-                    el.dispatchEvent(new PointerEvent('pointerdown', {bubbles: true, pointerType: 'mouse'}));
-                    el.dispatchEvent(new MouseEvent('mousedown', {bubbles: true}));
-                    el.dispatchEvent(new PointerEvent('pointerup', {bubbles: true, pointerType: 'mouse'}));
-                    el.dispatchEvent(new MouseEvent('mouseup', {bubbles: true}));
-                    el.click();
-                    """,
-                    button,
-                )
+            # Use JS dispatched pointer/mouse events — ActionChains is Selenium-specific
+            browser.execute_script(
+                """
+                const el = arguments[0];
+                el.scrollIntoView({block: 'center', inline: 'center'});
+                el.dispatchEvent(new PointerEvent('pointerdown', {bubbles: true, pointerType: 'mouse'}));
+                el.dispatchEvent(new MouseEvent('mousedown', {bubbles: true}));
+                el.dispatchEvent(new PointerEvent('pointerup', {bubbles: true, pointerType: 'mouse'}));
+                el.dispatchEvent(new MouseEvent('mouseup', {bubbles: true}));
+                el.click();
+                """,
+                button,
+            )
 
             # Poll for any of the three intercept paths to fire
             deadline = time.time() + 5
             while time.time() < deadline:
-                text = driver.execute_script("return window.__clipboardCapture;")
+                text = browser.execute_script("return window.__clipboardCapture;")
                 if text and str(text).strip():
                     LOGGER.info("Captured markdown via copy button (%s chars).", len(text))
                     return clean_markdown(str(text)), "copy_button_clipboard"
@@ -307,10 +327,10 @@ class GoogleAIModeRunner:
 
     def extract_ai_mode(self) -> dict[str, Any]:
         try:
-            result = self.require_driver().execute_script(AI_MODE_EXTRACTION_SCRIPT)
+            result = self.require_browser().execute_script(AI_MODE_EXTRACTION_SCRIPT)
             if isinstance(result, dict):
                 return result
-        except WebDriverException as exc:
+        except Exception as exc:
             LOGGER.debug("Google AI Mode extraction script failed: %s", first_line(str(exc)))
         return {
             "ai_mode_triggered": False,
@@ -319,23 +339,27 @@ class GoogleAIModeRunner:
         }
 
     def detect_blocking_page(self) -> str:
-        driver = self.require_driver()
-        current_url = (driver.current_url or "").lower()
+        browser = self.require_browser()
+        current_url = (browser.current_url or "").lower()
         if any(pattern in current_url for pattern in BLOCKING_URL_PATTERNS):
             return current_url
         try:
-            body_text = driver.find_element(By.TAG_NAME, "body").text.lower()
-        except WebDriverException:
+            body_text = str(browser.execute_script("return document.body.innerText") or "").lower()
+        except Exception:
             return ""
         for pattern in BLOCKING_TEXT_PATTERNS:
             if pattern in body_text:
                 return pattern
         return ""
 
-    def require_driver(self) -> Chrome:
-        if not self.driver:
+    def require_browser(self) -> NodriverBrowser:
+        if not self.browser:
             raise RuntimeError("Browser has not been started")
-        return self.driver
+        return self.browser
+
+    # Legacy alias kept so any code holding a reference to require_driver() still works.
+    def require_driver(self) -> NodriverBrowser:
+        return self.require_browser()
 
 
 AI_MODE_EXTRACTION_SCRIPT = r"""
@@ -506,7 +530,7 @@ if (!container) {
 }
 
 const visibleText = cleanText(container.innerText || container.textContent || "");
-if (/you['’]?ve reached your daily limit/i.test(visibleText)) {
+if (/you['']?ve reached your daily limit/i.test(visibleText)) {
   return {
     ai_mode_triggered: true,
     capture_state: "quota_exhausted",

@@ -489,6 +489,36 @@ def _by_to_css(by: str, value: str) -> str | None:
 # Public factory
 # ---------------------------------------------------------------------------
 
+def _kill_stale_chrome() -> None:
+    """
+    Kill any orphaned Chrome processes left behind by a previously failed or
+    timed-out extraction run.
+
+    When Prefect's task engine times out a task it raises an exception inside
+    the Python thread but does not terminate child subprocesses that were
+    spawned by asyncio.create_subprocess_exec.  The Chrome process therefore
+    keeps running, consuming memory and the shared Xvfb display.  The next
+    extraction attempt then fails to start a fresh Chrome because the machine
+    is resource-constrained.
+
+    This is called unconditionally at the start of every browser build so we
+    always start from a clean state.
+    """
+    import subprocess
+    try:
+        result = subprocess.run(
+            ["sh", "-c", "pgrep -f 'google-chrome' | xargs -r kill -9"],
+            capture_output=True,
+            timeout=10,
+        )
+        if result.returncode == 0:
+            LOGGER.info("Killed stale Chrome process(es) before starting new browser.")
+        else:
+            LOGGER.debug("No stale Chrome processes found (clean state).")
+    except Exception as exc:
+        LOGGER.debug("Chrome pre-launch cleanup (non-fatal): %s", exc)
+
+
 def build_nodriver_browser(
     *,
     headless: bool = False,
@@ -497,11 +527,13 @@ def build_nodriver_browser(
     """
     Build and return a NodriverBrowser ready for Google extraction.
 
+    - Kills any stale Chrome processes from previous failed runs first.
     - Fresh temp profile on every call (no persistent state).
-    - Proxy auth via CDP Fetch.AuthRequired (no Chrome extension).
+    - Proxy auth via local asyncio CONNECT proxy (no Chrome extension).
     - navigator.webdriver override injected via addScriptToEvaluateOnNewDocument.
     - Window resized to VNC_SCREEN dimensions if set.
     """
+    _kill_stale_chrome()
     user_agent = random.choice(_CHROME_USER_AGENTS)
     LOGGER.info(
         "Building nodriver browser. proxy=%s headless=%s ua=%s",
@@ -722,8 +754,11 @@ async def _start_nodriver(
         stderr=asyncio.subprocess.PIPE,
     )
 
-    # Wait up to 30s for Chrome to open its debug port before connecting.
-    startup_timeout = 30.0
+    # Wait up to 60s for Chrome to open its debug port before connecting.
+    # On memory-constrained Fly.io machines (2 GB RAM, non-headless) Chrome can
+    # take longer than 30 s to bind the debug port, especially after previous
+    # runs have warmed up the disk cache.
+    startup_timeout = 60.0
     LOGGER.info("Waiting up to %.0fs for Chrome debug port %s:%s…", startup_timeout, debug_host, debug_port)
     await _wait_for_chrome_debug_port(debug_host, debug_port, timeout=startup_timeout)
     LOGGER.info("Chrome debug port ready.")
