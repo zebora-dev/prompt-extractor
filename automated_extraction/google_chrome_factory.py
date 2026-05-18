@@ -294,8 +294,8 @@ class NodriverBrowser:
             primary_elem = nodriver_elements[0]
 
             async def _call_on_elem():
-                # Resolve the element to get its remote object id
-                import cdp as cdp_mod  # type: ignore[import-not-found]
+                # Resolve the element to get its remote object id.
+                # `cdp` is already in scope from `cdp = uc.cdp` above.
                 remote = await self._tab.send(
                     cdp.dom.resolve_node(backend_node_id=primary_elem.backend_node_id)
                 )
