@@ -351,6 +351,13 @@ class NodriverBrowser:
                     # Try without wrapping (script might already be a return expression)
                     return _run_sync(self._tab.evaluate(script))
             else:
+                # Wrap in an IIFE when the script starts with `return` so that
+                # Selenium-style scripts (e.g. `return document.title`) work
+                # correctly.  nodriver's tab.evaluate() runs JS as a module-level
+                # expression where top-level `return` is a SyntaxError.
+                if script.lstrip().startswith("return"):
+                    wrapped = f"(function(){{ {script} }})()"
+                    return _run_sync(self._tab.evaluate(wrapped))
                 return _run_sync(self._tab.evaluate(script))
 
     # Stub for Selenium CDP cmd — stealth is applied at startup.
