@@ -335,6 +335,50 @@ GOOGLE_PROXY_URL="http://user:pass@host:port" \
 
 ---
 
+## Proxy Cost Attribution
+
+Proxy bytes transferred per prompt are tracked automatically and stored in `output_metadata.proxy_usage` for all Google extraction runs when `use_proxy=true`.
+
+### Stored shape
+
+```json
+{
+  "proxy_usage": {
+    "bytes_transferred": 4823041,
+    "use_proxy": true,
+    "provider": "dataimpulse"
+  }
+}
+```
+
+Bytes are counted at the CONNECT proxy layer (all TLS traffic through the tunnel), not at the application level, so the figure accurately captures all data transferred to/from Google — including page resources, images, and API calls made during the extraction session.
+
+### Per-batch cost query
+
+```sql
+SELECT
+  batch_id,
+  COUNT(*) AS prompt_count,
+  SUM((output_metadata->'proxy_usage'->>'bytes_transferred')::bigint) AS total_bytes,
+  ROUND(
+    SUM((output_metadata->'proxy_usage'->>'bytes_transferred')::bigint)
+    / 1e9 * 0.80, 4
+  ) AS estimated_cost_usd
+FROM prompts_outputs
+WHERE output_metadata->'proxy_usage' IS NOT NULL
+GROUP BY batch_id
+ORDER BY estimated_cost_usd DESC;
+```
+
+The `$0.80/GB` multiplier reflects DataImpulse's 1 TB tier. Adjust if on a different tier:
+
+- Under 1 TB: `$1.00/GB` — change `0.80` → `1.00`
+- Over 5 TB: contact DataImpulse for a custom rate
+
+Rows created before this feature was deployed will not have `proxy_usage` in their metadata. The `WHERE` clause filters these out automatically.
+
+---
+
 ## Adding a New Region
 
 1. Create a new Fly.io app and volume:

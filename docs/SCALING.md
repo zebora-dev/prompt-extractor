@@ -162,6 +162,8 @@ prefect deployment run 'scale-workers-down/scale-workers-down-uk' \
 
 The dispatcher can scale machines automatically by passing `auto_scale=True`. It calculates `effective_workers` (capped at remaining prompt count), scales up to that number, then submits the flows.
 
+Workers are staggered by `stagger_seconds` (default 15) — worker 0 starts immediately, worker 1 waits 15 s, worker 19 waits 4 m 45 s. This prevents all Chrome instances from hitting Google at the same moment, which triggers rate-limiting.
+
 ```bash
 prefect deployment run 'dispatch-extraction/dispatch-extraction-uk' \
   --param batch_id=<your-batch-id> \
@@ -170,7 +172,8 @@ prefect deployment run 'dispatch-extraction/dispatch-extraction-uk' \
   --param region=uk \
   --param use_proxy=true \
   --param auto_scale=true \
-  --param scale_wait_seconds=30
+  --param scale_wait_seconds=30 \
+  --param stagger_seconds=15
 ```
 
 The dispatcher:
@@ -196,7 +199,7 @@ prefect deployment run 'scale-workers-down/scale-workers-down-uk' \
 |---|---|---|
 | `scale-workers/scale-workers-uk` | Scale up UK machines | `target_count`, `region`, `wait_for_workers_seconds` |
 | `scale-workers-down/scale-workers-down-uk` | Scale down UK machines | `region`, `keep_count` |
-| `dispatch-extraction/dispatch-extraction-uk` | Dispatch batch across N workers | `batch_id`, `extraction_type`, `worker_count`, `auto_scale`, `scale_wait_seconds` |
+| `dispatch-extraction/dispatch-extraction-uk` | Dispatch batch across N workers | `batch_id`, `extraction_type`, `worker_count`, `auto_scale`, `scale_wait_seconds`, `stagger_seconds` |
 
 US equivalents use the `-us` suffix and `region=us`.
 

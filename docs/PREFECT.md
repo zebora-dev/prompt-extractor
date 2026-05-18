@@ -6,7 +6,7 @@ Batch, prompt, and prompt-output create/read/update/exists operations go directl
 
 ## Flows
 
-Seven flows are registered across two regional work pools. UK deployments have a `-uk` suffix.
+Ten flows are registered across two regional work pools. UK deployments have a `-uk` suffix.
 
 | Flow | Pool (US) | Pool (UK) |
 |---|---|---|
@@ -17,6 +17,50 @@ Seven flows are registered across two regional work pools. UK deployments have a
 | `google-ai-overview-extraction-batch` | `prompt-extraction-us` | `prompt-extraction-uk` |
 | `google-ai-overview-extraction` | `prompt-extraction-us` | `prompt-extraction-uk` |
 | `prompt-output-processing` | `prompt-extraction-us` | `prompt-extraction-uk` |
+| `dispatch-extraction` | `prompt-extraction-us` | `prompt-extraction-uk` |
+| `scale-workers` | `prompt-extraction-us` | `prompt-extraction-uk` |
+| `scale-workers-down` | `prompt-extraction-us` | `prompt-extraction-uk` |
+
+## Dispatcher & Scaling Flows
+
+### Dispatching a large batch (primary method)
+
+`dispatch-extraction` is the primary way to run large batches. It counts remaining prompts for a batch, splits them into equal chunks, and submits one batch flow run per worker via the Prefect REST API, then exits immediately.
+
+Always point the CLI at the hosted server by prefixing commands with `PREFECT_API_URL=https://prompt-extractor-prefect.fly.dev/api`.
+
+```bash
+PREFECT_API_URL=https://prompt-extractor-prefect.fly.dev/api \
+prefect deployment run 'dispatch-extraction/dispatch-extraction-uk' \
+  --param batch_id=<uuid> \
+  --param extraction_type=google-ai-overview \
+  --param worker_count=8 \
+  --param region=uk \
+  --param use_proxy=true \
+  --param auto_scale=true
+```
+
+`auto_scale=true` triggers automatic Fly.io machine scaling before flows are submitted. Without it you must have the required number of workers already running.
+
+**Worker staggering** — with the default `stagger_seconds=15`, worker 0 starts immediately, worker 1 after 15 s, worker 2 after 30 s, and so on. For 20 workers this spreads startup over ~5 minutes, preventing all Chrome instances from hitting Google simultaneously and triggering rate-limiting.
+
+### Scaling up manually
+
+```bash
+PREFECT_API_URL=https://prompt-extractor-prefect.fly.dev/api \
+prefect deployment run 'scale-workers/scale-workers-uk' \
+  --param target_count=8 \
+  --param region=uk
+```
+
+### Scaling down after a batch
+
+```bash
+PREFECT_API_URL=https://prompt-extractor-prefect.fly.dev/api \
+prefect deployment run 'scale-workers-down/scale-workers-down-uk' \
+  --param region=uk \
+  --param keep_count=1
+```
 
 The ChatGPT flow is:
 
@@ -325,6 +369,23 @@ PY
 ```
 
 ## 7. Parameters
+
+### Parameters — Dispatcher
+
+| Parameter | Default | Description |
+|---|---|---|
+| `batch_id` | required | BrandSight batch UUID |
+| `extraction_type` | required | `"google-ai-overview"`, `"google-ai-mode"`, or `"chatgpt"` |
+| `worker_count` | `4` | Max workers to dispatch across |
+| `region` | `"uk"` | `"uk"` or `"us"` |
+| `limit` | `5` | Prompts per inner extraction run |
+| `delay_seconds` | `60` | Seconds between inner runs on each worker |
+| `use_proxy` | `false` | Route Chrome through the regional proxy |
+| `auto_scale` | `false` | Auto scale Fly.io machines before dispatching |
+| `scale_wait_seconds` | `30` | Seconds to wait after scaling for workers to connect |
+| `stagger_seconds` | `15` | Per-worker startup delay (worker i sleeps i × stagger_seconds) |
+
+### Parameters — ChatGPT / Google extraction flows
 
 | Parameter | Type | Description |
 | --- | --- | --- |
