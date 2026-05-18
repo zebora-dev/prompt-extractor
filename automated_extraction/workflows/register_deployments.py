@@ -28,6 +28,10 @@ REGIONS = {
 
 def get_flows():
     from automated_extraction.workflows.dispatcher import dispatch_extraction_flow
+    from automated_extraction.workflows.scaler_flows import (
+        scale_workers_down_flow,
+        scale_workers_flow,
+    )
     from automated_extraction.workflows.flows import (
         google_ai_mode_extraction_batch_flow,
         google_ai_mode_extraction_flow,
@@ -96,7 +100,9 @@ def get_flows():
                 "Automatically split a batch across N workers. "
                 "Counts remaining prompts, divides into equal chunks, and submits "
                 "one batch flow run per worker — then exits. "
-                "Supports google-ai-overview, google-ai-mode, and chatgpt."
+                "Supports google-ai-overview, google-ai-mode, and chatgpt. "
+                "Set auto_scale=True to automatically scale Fly.io machines up "
+                "to worker_count before dispatching (requires FLY_API_TOKEN secret)."
             ),
             "parameters": {
                 "batch_id": None,
@@ -112,6 +118,38 @@ def get_flows():
                 "login_email": None,
                 "capture_products": False,
                 "capture_entities": False,
+                "auto_scale": False,
+                "scale_wait_seconds": 30,
+            },
+        },
+        "scale-workers": {
+            "flow": scale_workers_flow,
+            "tags": ["scaling", "infrastructure", "fly"],
+            "description": (
+                "Scale Fly.io worker machines up to target_count. "
+                "Starts stopped original machines first, then clones new ones. "
+                "Updates the Prefect work-pool concurrency limit to match. "
+                "Requires FLY_API_TOKEN secret to be set on the app."
+            ),
+            "parameters": {
+                "target_count": 4,
+                "region": "uk",
+                "work_pool": None,
+                "wait_for_workers_seconds": 30,
+            },
+        },
+        "scale-workers-down": {
+            "flow": scale_workers_down_flow,
+            "tags": ["scaling", "infrastructure", "fly"],
+            "description": (
+                "Scale Fly.io worker machines back down. "
+                "Destroys all cloned machines and stops original machines above keep_count. "
+                "Resets the Prefect work-pool concurrency limit to keep_count."
+            ),
+            "parameters": {
+                "region": "uk",
+                "keep_count": 1,
+                "work_pool": None,
             },
         },
         "google-ai-mode-extraction-batch": {

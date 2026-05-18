@@ -158,6 +158,9 @@ def dispatch_extraction_flow(
     login_email: str | None = None,
     capture_products: bool = False,
     capture_entities: bool = False,
+    # Dynamic scaling
+    auto_scale: bool = False,
+    scale_wait_seconds: int = 30,
 ) -> dict[str, Any]:
     """
     Dispatch extraction work across N workers automatically.
@@ -168,18 +171,23 @@ def dispatch_extraction_flow(
 
     Parameters
     ----------
-    batch_id        : ID of the batch to process.
-    extraction_type : One of "google-ai-overview", "google-ai-mode", "chatgpt".
-    worker_count    : Number of workers to distribute work across.
-    region          : "us" or "uk" — selects the regional deployment variant.
-    limit           : Prompts per inner extraction run (rate-limiting knob).
-    delay_seconds   : Seconds to pause between inner runs on each worker.
-    use_proxy       : (Google) Route Chrome through the regional proxy.
-    country/language: (Google) Override geo-targeting.
-    auto_login      : (ChatGPT) Enable automated login.
-    login_email     : (ChatGPT) Account to use for auto-login.
-    capture_products: (ChatGPT) Extract product entities from responses.
-    capture_entities: (ChatGPT) Extract named entities from responses.
+    batch_id          : ID of the batch to process.
+    extraction_type   : One of "google-ai-overview", "google-ai-mode", "chatgpt".
+    worker_count      : Number of workers to distribute work across.
+    region            : "us" or "uk" — selects the regional deployment variant.
+    limit             : Prompts per inner extraction run (rate-limiting knob).
+    delay_seconds     : Seconds to pause between inner runs on each worker.
+    use_proxy         : (Google) Route Chrome through the regional proxy.
+    country/language  : (Google) Override geo-targeting.
+    auto_login        : (ChatGPT) Enable automated login.
+    login_email       : (ChatGPT) Account to use for auto-login.
+    capture_products  : (ChatGPT) Extract product entities from responses.
+    capture_entities  : (ChatGPT) Extract named entities from responses.
+    auto_scale        : If True, automatically scale Fly.io machines to
+                        match worker_count before submitting flows.
+                        Requires FLY_API_TOKEN secret to be set on the app.
+    scale_wait_seconds: Seconds to wait after scaling for new Prefect workers
+                        to connect before flows are submitted (default 30).
     """
     flow_logger = get_run_logger()
 
@@ -241,6 +249,31 @@ def dispatch_extraction_flow(
         effective_workers, batch_id, extraction_type, region,
         remaining_count, chunk_size, limit, deployment_full_name,
     )
+
+    # -- Auto-scale Fly.io machines to match effective_workers -----------------
+    scale_result: dict[str, Any] | None = None
+    if auto_scale:
+        try:
+            from automated_extraction.fly_scaler import app_name_for_region, scale_up
+            fly_app = app_name_for_region(region)
+            work_pool_name = os.getenv("PREFECT_WORK_POOL", f"prompt-extraction-{region}")
+            flow_logger.info(
+                "auto_scale=True: scaling %s up to %d machines (pool=%s, wait=%ds)",
+                fly_app, effective_workers, work_pool_name, scale_wait_seconds,
+            )
+            result_obj = scale_up(
+                app_name=fly_app,
+                target_count=effective_workers,
+                prefect_api_url=prefect_api_url,
+                work_pool=work_pool_name,
+                wait_for_workers_seconds=scale_wait_seconds,
+            )
+            scale_result = result_obj.to_dict()
+            flow_logger.info("Scale-up result: %s", scale_result)
+        except Exception as exc:
+            flow_logger.warning(
+                "auto_scale failed (continuing without scaling): %s", exc,
+            )
 
     # -- Build per-worker parameters -------------------------------------------
     base_params: dict[str, Any] = {
@@ -312,6 +345,7 @@ def dispatch_extraction_flow(
         "chunk_size": chunk_size,
         "limit_per_run": limit,
         "workers": submitted,
+        "scale_result": scale_result,
     }
     flow_logger.info("Dispatch complete: %s", summary)
     return summary
