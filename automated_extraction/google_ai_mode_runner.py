@@ -158,7 +158,27 @@ class GoogleAIModeRunner:
                 error=result.get("error") or "no_ai_mode",
             )
 
+        # Capture markdown first (button is ready as soon as content is detected).
         clipboard_markdown, clipboard_method = self.capture_markdown_via_copy_button()
+
+        # Expand the sources panel ("Show all") so every source is in the DOM,
+        # then re-extract to pick up the complete source list and final raw_html.
+        self.expand_sources_panel()
+        final = self.extract_ai_mode()
+        if final.get("ai_mode_triggered"):
+            # Merge: prefer re-extracted sources & raw_html; keep original text if re-extract is empty.
+            result = {
+                **result,
+                "sources": final.get("sources") or result.get("sources") or [],
+                "raw_html": final.get("raw_html") or result.get("raw_html") or "",
+                "raw_html_capture_method": final.get("raw_html_capture_method")
+                    or result.get("raw_html_capture_method") or "",
+            }
+            LOGGER.info(
+                "Post-expand re-extraction: sources=%s raw_html_len=%s",
+                len(result["sources"]),
+                len(result["raw_html"]),
+            )
 
         markdown = clipboard_markdown
         markdown_capture_method = clipboard_method
@@ -185,11 +205,38 @@ class GoogleAIModeRunner:
             llm_model="google-ai-mode",
             url=current_url,
             sources=sources,
-            source_capture_method="ai_mode_dom_links" if sources else "none",
+            source_capture_method="aim_corroboration_panel" if sources else "none",
             ai_mode_triggered=True,
             capture_state=str(result.get("capture_state") or "complete"),
             error=None,
         )
+
+    def expand_sources_panel(self) -> bool:
+        """Click the AI Mode 'Show all' sources button and wait for the panel to expand.
+
+        Uses the stable aria-label selector. Returns True if the button was found and clicked.
+        """
+        browser = self.require_browser()
+        try:
+            buttons = browser.find_elements_by_css('[aria-label="Show all related links"]')
+            if not buttons:
+                LOGGER.info("expand_sources_panel: 'Show all' button not found — sources panel may already be expanded.")
+                return False
+            LOGGER.info("expand_sources_panel: Clicking 'Show all' button.")
+            browser.execute_script(
+                """
+                const el = arguments[0];
+                el.scrollIntoView({block: 'center', inline: 'nearest'});
+                el.click();
+                """,
+                buttons[0],
+            )
+            time.sleep(2.5)  # Wait for panel to fully expand and render all sources
+            LOGGER.info("expand_sources_panel: Done (waited 2.5s for expansion).")
+            return True
+        except Exception as exc:
+            LOGGER.warning("expand_sources_panel failed: %s", first_line(str(exc)))
+            return False
 
     def capture_markdown_via_copy_button(self) -> tuple[str, str]:
         """Click the AI Mode 'Copy text' button and return (markdown, capture_method).
@@ -198,6 +245,7 @@ class GoogleAIModeRunner:
         for the click. Returns ('', reason) on any failure.
         """
         browser = self.require_browser()
+        LOGGER.info("capture_markdown_via_copy_button: Starting clipboard capture attempt.")
         try:
             # Intercept all three clipboard write paths before the click fires
             browser.execute_script(
@@ -242,9 +290,10 @@ class GoogleAIModeRunner:
 
             buttons = browser.find_elements_by_css('button[aria-label="Copy text"]')
             if not buttons:
-                LOGGER.debug("Copy text button not found.")
+                LOGGER.info("capture_markdown_via_copy_button: Copy text button NOT found in DOM.")
                 return "", "copy_button_not_found"
 
+            LOGGER.info("capture_markdown_via_copy_button: Found %s copy button(s) — clicking.", len(buttons))
             button = buttons[0]
             # Use JS dispatched pointer/mouse events — ActionChains is Selenium-specific
             browser.execute_script(
@@ -340,12 +389,19 @@ class GoogleAIModeRunner:
                     len(result.get("sources") or []),
                 )
 
-            # Fast path: if DOM signals streaming is complete and content is meaningful, capture now.
+            # Fast path: if DOM signals streaming is complete and content is meaningful,
+            # wait 1s for any late DOM rendering then capture.
             if result.get("is_complete") and has_meaningful_content(result):
                 LOGGER.info(
-                    "wait_for_ai_mode poll#%s (%.1fs): data-complete=true and meaningful content — capturing.",
+                    "wait_for_ai_mode poll#%s (%.1fs): data-complete=true and meaningful content — "
+                    "waiting 1s for DOM to settle then capturing.",
                     poll, elapsed,
                 )
+                time.sleep(1.0)
+                # Re-extract after settle to get the most complete snapshot
+                settled = self.extract_ai_mode()
+                if settled.get("ai_mode_triggered"):
+                    result = settled
                 return {**result, "capture_state": "complete"}
 
             # Stability check — use text + sources only (markdown varies with whitespace)
@@ -502,54 +558,85 @@ function findAIModeContainer() {
   return null;
 }
 
-// Extract sources from the RHS sources panel.
-// In AI Mode the sources are in [data-container-id="rhs-col"], a sibling of main-col,
-// NOT inside the main content container.
+// Extract sources from the AI Mode corroboration (sources) panel.
+//
+// The panel container uses a stable data-xid attribute:
+//   [data-xid="aim-aside-initial-corroboration-container"]
+//
+// Inside that container, each source is an <li> containing:
+//   a.NDNGvf[target="_blank"]       ← the link (href to source page)
+//   .Nn35F span                     ← page title (stable class for the title div)
+//   [data-crb-snippet-text]         ← description snippet span
+//   .R0r5R span                     ← site/publisher name
+//
+// The "Show all" button must be clicked before calling this function
+// to ensure all sources are present in the DOM.
 function extractAiModeSources() {
   const seen = new Set();
   const sources = [];
 
-  const rhsCol = document.querySelector('[data-container-id="rhs-col"]');
-  // Fall back to full document if rhs col not present yet
-  const searchRoot = rhsCol || null;
-  if (!searchRoot) return sources;
+  // Primary: the dedicated corroboration container (stable data-xid)
+  // Fallback: rhs-col (older DOM shape) or the full document
+  const container =
+    document.querySelector('[data-xid="aim-aside-initial-corroboration-container"]') ||
+    document.querySelector('[data-container-id="rhs-col"]');
 
-  for (const link of searchRoot.querySelectorAll("a[href]")) {
+  if (!container) return sources;
+
+  // Source links use class NDNGvf — this is the standard AI Mode source link class.
+  // Fall back to any target="_blank" link if NDNGvf is absent.
+  const linkSelector = container.querySelector("a.NDNGvf")
+    ? "a.NDNGvf[target='_blank']"
+    : "a[href][target='_blank']";
+
+  for (const link of container.querySelectorAll(linkSelector)) {
     const href = link.getAttribute("href") || "";
     const url = unwrapGoogleUrl(href).replace(/#:~:text=.*$/, "");
     if (!isUsefulUrl(url) || seen.has(url)) continue;
     seen.add(url);
 
-    let title = cleanText(link.getAttribute("aria-label") || "");
-    let description = "";
-
-    // Look for title inside the parent <li>
     const li = link.closest("li");
-    if (li) {
-      // Collect non-empty span texts (avoid deeply nested script/style text)
-      const spanTexts = Array.from(li.querySelectorAll("span"))
-        .map((s) => cleanText(s.innerText || s.textContent || ""))
-        .filter((t) => t.length > 2);
-      if (!title && spanTexts.length > 0) title = spanTexts[0];
-      if (spanTexts.length > 1) description = spanTexts.slice(1, 3).join(" ");
 
-      if (!title) {
-        // Try link text itself
-        title = cleanText(link.innerText || link.textContent || "");
-      }
-    } else {
-      if (!title) title = cleanText(link.innerText || link.textContent || "");
+    // Page title: .Nn35F span (the title container div has this stable class)
+    let title = "";
+    if (li) {
+      const titleEl = li.querySelector(".Nn35F span");
+      if (titleEl) title = cleanText(titleEl.innerText || titleEl.textContent || "");
+    }
+    // Fallback: strip ". Opens in a new tab." suffix from aria-label
+    if (!title) {
+      title = cleanText(link.getAttribute("aria-label") || "")
+        .replace(/\.\s*Opens in a new tab\.?$/i, "").trim();
     }
 
-    const favicon = link.querySelector("img");
+    // Description snippet: [data-crb-snippet-text] span
+    let description = "";
+    if (li) {
+      const descEl = li.querySelector("[data-crb-snippet-text]");
+      if (descEl) description = cleanText(descEl.innerText || descEl.textContent || "");
+    }
+
+    // Publisher / site name: .R0r5R span
+    let siteName = "";
+    if (li) {
+      const siteEl = li.querySelector(".R0r5R span");
+      if (siteEl) siteName = cleanText(siteEl.innerText || siteEl.textContent || "");
+    }
+
+    const domain = domainFromUrl(url);
+    // Use Google's favicon service — avoids embedding large base64 images
+    const faviconUrl = domain
+      ? "https://www.google.com/s2/favicons?domain=" + domain + "&sz=32"
+      : null;
+
     sources.push({
       index: sources.length + 1,
       url,
-      source: domainFromUrl(url),
+      source: siteName || domain,
       title: title || url,
       description,
-      favicon_url: favicon ? (favicon.src || null) : null,
-      extraction_source: "rhs_panel",
+      favicon_url: faviconUrl,
+      extraction_source: "aim_corroboration_panel",
     });
   }
   return sources;
