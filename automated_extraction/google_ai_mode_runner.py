@@ -560,71 +560,54 @@ function findAIModeContainer() {
 
 // Extract sources from the AI Mode corroboration (sources) panel.
 //
-// The panel container uses a stable data-xid attribute:
-//   [data-xid="aim-aside-initial-corroboration-container"]
+// Stable selectors only — no dynamic CSS class names:
 //
-// Inside that container, each source is an <li> containing:
-//   a.NDNGvf[target="_blank"]       ← the link (href to source page)
-//   .Nn35F span                     ← page title (stable class for the title div)
-//   [data-crb-snippet-text]         ← description snippet span
-//   .R0r5R span                     ← site/publisher name
+//   Container: [data-xid="aim-aside-initial-corroboration-container"]   (stable data-xid)
+//   Links:     a[target="_blank"][rel="noopener"]                        (semantic HTML)
+//   Title+publisher: link aria-label "Title - Publisher. Opens in a new tab."
+//   Description: [data-crb-snippet-text]                                (stable data attr)
+//   Favicon: constructed from domain via Google favicon service
 //
 // The "Show all" button must be clicked before calling this function
-// to ensure all sources are present in the DOM.
+// so that all sources are present in the DOM.
 function extractAiModeSources() {
   const seen = new Set();
   const sources = [];
 
-  // Primary: the dedicated corroboration container (stable data-xid)
-  // Fallback: rhs-col (older DOM shape) or the full document
+  // Primary: dedicated corroboration container (stable data-xid attribute)
+  // Fallback: rhs-col (older DOM layouts)
   const container =
     document.querySelector('[data-xid="aim-aside-initial-corroboration-container"]') ||
     document.querySelector('[data-container-id="rhs-col"]');
 
   if (!container) return sources;
 
-  // Source links use class NDNGvf — this is the standard AI Mode source link class.
-  // Fall back to any target="_blank" link if NDNGvf is absent.
-  const linkSelector = container.querySelector("a.NDNGvf")
-    ? "a.NDNGvf[target='_blank']"
-    : "a[href][target='_blank']";
-
-  for (const link of container.querySelectorAll(linkSelector)) {
+  // Source links: use semantic HTML attributes only (no dynamic class names).
+  // All source links open in a new tab with noopener and carry an aria-label.
+  for (const link of container.querySelectorAll('a[target="_blank"][rel="noopener"][aria-label]')) {
     const href = link.getAttribute("href") || "";
     const url = unwrapGoogleUrl(href).replace(/#:~:text=.*$/, "");
     if (!isUsefulUrl(url) || seen.has(url)) continue;
     seen.add(url);
 
-    const li = link.closest("li");
+    // aria-label format: "Page title - Publisher name. Opens in a new tab."
+    // Both title and site name come from this one stable semantic attribute.
+    const rawLabel = cleanText(link.getAttribute("aria-label") || "");
+    const label = rawLabel.replace(/\.\s*Opens in a new tab\.?\s*$/i, "").trim();
+    const dashIdx = label.lastIndexOf(" - ");
+    const title = dashIdx >= 0 ? label.substring(0, dashIdx).trim() : label;
+    const siteName = dashIdx >= 0 ? label.substring(dashIdx + 3).trim() : "";
 
-    // Page title: .Nn35F span (the title container div has this stable class)
-    let title = "";
-    if (li) {
-      const titleEl = li.querySelector(".Nn35F span");
-      if (titleEl) title = cleanText(titleEl.innerText || titleEl.textContent || "");
-    }
-    // Fallback: strip ". Opens in a new tab." suffix from aria-label
-    if (!title) {
-      title = cleanText(link.getAttribute("aria-label") || "")
-        .replace(/\.\s*Opens in a new tab\.?$/i, "").trim();
-    }
-
-    // Description snippet: [data-crb-snippet-text] span
+    // Description snippet: [data-crb-snippet-text] is a stable data attribute
     let description = "";
+    const li = link.closest("li");
     if (li) {
       const descEl = li.querySelector("[data-crb-snippet-text]");
       if (descEl) description = cleanText(descEl.innerText || descEl.textContent || "");
     }
 
-    // Publisher / site name: .R0r5R span
-    let siteName = "";
-    if (li) {
-      const siteEl = li.querySelector(".R0r5R span");
-      if (siteEl) siteName = cleanText(siteEl.innerText || siteEl.textContent || "");
-    }
-
     const domain = domainFromUrl(url);
-    // Use Google's favicon service — avoids embedding large base64 images
+    // Use Google's favicon CDN — avoids embedding large base64 images
     const faviconUrl = domain
       ? "https://www.google.com/s2/favicons?domain=" + domain + "&sz=32"
       : null;
