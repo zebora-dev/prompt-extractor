@@ -180,12 +180,23 @@ class GoogleAIModeRunner:
                 len(result["raw_html"]),
             )
 
-        markdown = clipboard_markdown
-        markdown_capture_method = clipboard_method
+        # Prefer clipboard markdown; fall back to DOM-derived markdown from the script
+        dom_markdown = clean_markdown(result.get("markdown") or "")
+        dom_markdown_method = str(result.get("markdown_capture_method") or "ai_mode_dom_text")
+
+        if clipboard_markdown:
+            markdown = clipboard_markdown
+            markdown_capture_method = clipboard_method
+        elif dom_markdown:
+            markdown = dom_markdown
+            markdown_capture_method = dom_markdown_method
+        else:
+            markdown = ""
+            markdown_capture_method = clipboard_method or "none"
 
         if markdown:
             response = markdown
-            capture_method = clipboard_method
+            capture_method = markdown_capture_method
         else:
             response = clean_text(result.get("text"))
             capture_method = str(result.get("capture_method") or "ai_mode_dom_text")
@@ -518,7 +529,7 @@ return (function() {
 //   [data-scope-id="turn"][data-complete="true"]  — completed streaming turn
 //   [data-container-id="main-col"]               — main content column
 //   [data-xid="VpUvz"]                           — inner content area (fallback)
-//   [data-container-id="rhs-col"]                — sources sidebar
+//   [data-xid="aim-aside-initial-corroboration-container"] — sources sidebar
 
 const cleanText = (value) => (value || '').replace(/\s+/g, ' ').trim();
 
@@ -539,6 +550,7 @@ function isUsefulUrl(url) {
   if (!url || !/^https?:\/\//i.test(url)) return false;
   return !(
     url.includes("google.com/search") ||
+    url.includes("google.com/url") ||
     url.includes("accounts.google.com") ||
     url.includes("policies.google.com") ||
     url.includes("support.google.com") ||
@@ -548,6 +560,80 @@ function isUsefulUrl(url) {
 
 function domainFromUrl(url) {
   try { return new URL(url).hostname.replace(/^www\./, ""); } catch (e) { return ""; }
+}
+
+// Convert an element's subtree to Markdown-ish text.
+// Uses only stable HTML semantics — no class names or data attributes.
+function htmlToMarkdownish(el) {
+  if (!el) return "";
+
+  function processNode(node) {
+    if (node.nodeType === 3 /* TEXT_NODE */) {
+      return node.textContent || "";
+    }
+    if (node.nodeType !== 1 /* ELEMENT_NODE */) return "";
+
+    const tag = node.tagName.toLowerCase();
+
+    // Skip invisible and non-content elements
+    if (tag === 'script' || tag === 'style' || tag === 'noscript' || tag === 'svg') return "";
+    try {
+      const cs = window.getComputedStyle(node);
+      if (cs && (cs.display === 'none' || cs.visibility === 'hidden')) return "";
+    } catch (e) {}
+
+    const children = () => Array.from(node.childNodes).map(processNode).join("");
+
+    switch (tag) {
+      case 'h1': return "\n# " + children().trim() + "\n";
+      case 'h2': return "\n## " + children().trim() + "\n";
+      case 'h3': return "\n### " + children().trim() + "\n";
+      case 'h4': return "\n#### " + children().trim() + "\n";
+      case 'h5': return "\n##### " + children().trim() + "\n";
+      case 'h6': return "\n###### " + children().trim() + "\n";
+      case 'p':  return "\n" + children().trim() + "\n";
+      case 'br': return "\n";
+      case 'hr': return "\n---\n";
+      case 'strong': case 'b': return "**" + children() + "**";
+      case 'em': case 'i':     return "*" + children() + "*";
+      case 'code': return "`" + children() + "`";
+      case 'pre':  return "\n```\n" + children() + "\n```\n";
+      case 'blockquote': return "\n> " + children().trim() + "\n";
+      case 'ul': return "\n" + children() + "\n";
+      case 'ol': return "\n" + children() + "\n";
+      case 'li': {
+        // Ordered list: prepend number if parent is <ol>
+        const parent = node.parentElement;
+        if (parent && parent.tagName.toLowerCase() === 'ol') {
+          const idx = Array.from(parent.children).indexOf(node) + 1;
+          return idx + ". " + children().trim() + "\n";
+        }
+        return "- " + children().trim() + "\n";
+      }
+      case 'a': {
+        const href = node.getAttribute('href');
+        const text = children().trim();
+        if (href && !/^javascript/i.test(href) && text) {
+          return "[" + text + "](" + href + ")";
+        }
+        return text;
+      }
+      case 'img': {
+        const alt = node.getAttribute('alt') || '';
+        const src = node.getAttribute('src') || '';
+        return alt ? "![" + alt + "](" + src + ")" : "";
+      }
+      case 'table': return "\n" + children() + "\n";
+      case 'tr': return children().replace(/\t/g, ' | ') + "\n";
+      case 'th': case 'td': return "\t" + children().trim();
+      default: return children();
+    }
+  }
+
+  let md = processNode(el);
+  // Collapse 3+ consecutive newlines to 2
+  md = md.replace(/\n{3,}/g, "\n\n").trim();
+  return md;
 }
 
 // AI Mode: detect a completed streaming turn or any turn with enough content.
@@ -573,31 +659,25 @@ function findAIModeContainer() {
 
 // Extract sources from the AI Mode corroboration (sources) panel.
 //
+// Strategy: search the FULL document for source links so that sources revealed
+// by clicking "Show all" are captured regardless of which container they render in.
+//
 // Stable selectors only — no dynamic CSS class names:
-//
-//   Container: [data-xid="aim-aside-initial-corroboration-container"]   (stable data-xid)
-//   Links:     a[target="_blank"][rel="noopener"]                        (semantic HTML)
+//   Links:           a[target="_blank"][rel="noopener"][aria-label]
 //   Title+publisher: link aria-label "Title - Publisher. Opens in a new tab."
-//   Description: [data-crb-snippet-text]                                (stable data attr)
-//   Favicon: constructed from domain via Google favicon service
+//   Description:     [data-crb-snippet-text]  (stable data attribute)
+//   Favicon:         constructed from domain via Google favicon service
 //
-// The "Show all" button must be clicked before calling this function
-// so that all sources are present in the DOM.
+// The "Show all" button must be clicked before calling this function.
 function extractAiModeSources() {
   const seen = new Set();
   const sources = [];
 
-  // Primary: dedicated corroboration container (stable data-xid attribute)
-  // Fallback: rhs-col (older DOM layouts)
-  const container =
-    document.querySelector('[data-xid="aim-aside-initial-corroboration-container"]') ||
-    document.querySelector('[data-container-id="rhs-col"]');
+  // Search the full document — after "Show all" is clicked, expanded sources
+  // may render outside the initial corroboration container element.
+  const allLinks = document.querySelectorAll('a[target="_blank"][rel="noopener"][aria-label]');
 
-  if (!container) return sources;
-
-  // Source links: use semantic HTML attributes only (no dynamic class names).
-  // All source links open in a new tab with noopener and carry an aria-label.
-  for (const link of container.querySelectorAll('a[target="_blank"][rel="noopener"][aria-label]')) {
+  for (const link of allLinks) {
     const href = link.getAttribute("href") || "";
     const url = unwrapGoogleUrl(href).replace(/#:~:text=.*$/, "");
     if (!isUsefulUrl(url) || seen.has(url)) continue;
@@ -686,6 +766,8 @@ const mainCol =
 
 const rawHtml = mainCol.outerHTML || "";
 const textContent = cleanText(mainCol.innerText || mainCol.textContent || "");
+// Convert DOM to markdown — reliable even when clipboard is unavailable (headless Chrome).
+const markdownContent = htmlToMarkdownish(mainCol);
 const sources = extractAiModeSources();
 
 return {
@@ -693,11 +775,11 @@ return {
   capture_state: (textContent.length > 20 || sources.length > 0) ? "content_detected" : "empty_ai_mode_extraction",
   error: null,
   text: textContent,
-  markdown: textContent,
+  markdown: markdownContent,
   raw_html: rawHtml,
   raw_html_capture_method: "ai_mode_main_col_outer_html",
   capture_method: "ai_mode_dom_text",
-  markdown_capture_method: "ai_mode_dom_text",
+  markdown_capture_method: "ai_mode_dom_markdown",
   sources,
   copy_button_present: copyButtonPresent,
   sources_panel_present: sourcesPanelPresent,
