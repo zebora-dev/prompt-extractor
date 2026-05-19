@@ -339,13 +339,18 @@ class GoogleAIModeRunner:
         return f"{base}{separator}{encoded}"
 
     def wait_for_ai_mode(self) -> dict[str, Any]:
-        """Poll until AI Mode content is detected and stable (or a streaming fallback fires).
+        """Poll until AI Mode content is fully rendered and ready for capture.
 
-        AI Mode streams content progressively into the DOM. The stability check uses
-        text + sources only (not markdown, which can vary with whitespace normalisation).
-        If content has been present for more than 15 s and is meaningful, we capture
-        immediately rather than waiting for two identical consecutive signatures — this
-        handles the case where the stream never fully settles.
+        Rendering happens in two stages:
+          1. The main text streams in progressively (data-complete on the turn fires early).
+          2. The toolbar (copy button) and sources panel appear once rendering is finished.
+
+        Strategy:
+          - Primary signal: copy button (`button[aria-label="Copy text"]`) present in the DOM.
+            Google only injects it after the full response is rendered, making it the most
+            reliable ready indicator. We also require the sources panel to be present.
+          - Stability fallback: two consecutive polls with identical text + sources signature.
+          - Streaming fallback: content present for >30s → capture regardless.
         """
         deadline = time.time() + self.response_timeout_seconds
         start = time.time()
@@ -378,40 +383,47 @@ class GoogleAIModeRunner:
                 time.sleep(1)
                 continue
 
-            # Content first detected — record timestamp and log
+            # Record first detection time
             if first_detected_at is None:
                 first_detected_at = time.time()
-                LOGGER.info(
-                    "wait_for_ai_mode poll#%s (%.1fs): AI Mode content first detected. "
-                    "text_len=%s sources=%s",
-                    poll, elapsed,
-                    len(result.get("text") or ""),
-                    len(result.get("sources") or []),
-                )
 
-            # Fast path: if DOM signals streaming is complete and content is meaningful,
-            # wait 1s for any late DOM rendering then capture.
-            if result.get("is_complete") and has_meaningful_content(result):
+            copy_btn = result.get("copy_button_present", False)
+            sources_panel = result.get("sources_panel_present", False)
+
+            LOGGER.info(
+                "wait_for_ai_mode poll#%s (%.1fs): text_len=%s copy_btn=%s sources_panel=%s",
+                poll, elapsed,
+                len(result.get("text") or ""),
+                copy_btn, sources_panel,
+            )
+
+            # Primary ready signal: copy button rendered + meaningful content.
+            # The copy button appears only after the full response has been painted.
+            # Also require the sources panel to be present before capturing.
+            if copy_btn and sources_panel and has_meaningful_content(result):
                 LOGGER.info(
-                    "wait_for_ai_mode poll#%s (%.1fs): data-complete=true and meaningful content — "
-                    "waiting 1s for DOM to settle then capturing.",
+                    "wait_for_ai_mode poll#%s (%.1fs): copy button + sources panel ready — capturing.",
                     poll, elapsed,
                 )
-                time.sleep(1.0)
-                # Re-extract after settle to get the most complete snapshot
-                settled = self.extract_ai_mode()
-                if settled.get("ai_mode_triggered"):
-                    result = settled
                 return {**result, "capture_state": "complete"}
 
-            # Stability check — use text + sources only (markdown varies with whitespace)
+            # If copy button is present but sources panel hasn't appeared yet, keep polling
+            # (it usually appears within 1-2s of the copy button).
+            if copy_btn and not sources_panel and has_meaningful_content(result):
+                LOGGER.info(
+                    "wait_for_ai_mode poll#%s (%.1fs): copy button ready, waiting for sources panel.",
+                    poll, elapsed,
+                )
+                time.sleep(1)
+                continue
+
+            # Stability fallback: two consecutive polls with identical text + sources.
             signature = f"{result.get('text') or ''}\n---\n{result.get('sources') or []}"
             if signature and signature == last_signature and has_meaningful_content(result):
                 stable_checks += 1
                 LOGGER.info(
-                    "wait_for_ai_mode poll#%s (%.1fs): stable_checks=%s text_len=%s sources=%s",
+                    "wait_for_ai_mode poll#%s (%.1fs): stable_checks=%s (stability fallback)",
                     poll, elapsed, stable_checks,
-                    len(result.get("text") or ""), len(result.get("sources") or []),
                 )
             else:
                 if stable_checks > 0:
@@ -423,20 +435,21 @@ class GoogleAIModeRunner:
                 last_signature = signature
 
             if stable_checks >= 2:
-                LOGGER.info("wait_for_ai_mode: content stable — capturing.")
+                LOGGER.info("wait_for_ai_mode: content stable — capturing (stability fallback).")
                 return {**result, "capture_state": "complete"}
 
-            # Streaming fallback: if content has been present >15s and is meaningful,
-            # capture now rather than waiting for perfect stability.
+            # Streaming fallback: if content has been present >30s but copy button
+            # or sources panel never appeared, capture whatever we have.
             seconds_detected = time.time() - first_detected_at
-            if seconds_detected >= 15 and has_meaningful_content(result):
-                LOGGER.info(
-                    "wait_for_ai_mode poll#%s: content present for %.1fs — capturing (streaming fallback).",
-                    poll, seconds_detected,
+            if seconds_detected >= 30 and has_meaningful_content(result):
+                LOGGER.warning(
+                    "wait_for_ai_mode poll#%s: content present for %.1fs but copy_btn=%s "
+                    "sources_panel=%s — capturing (streaming fallback).",
+                    poll, seconds_detected, copy_btn, sources_panel,
                 )
                 return {**result, "capture_state": "complete"}
 
-            time.sleep(0.5)
+            time.sleep(1.0)
 
         if last_result.get("ai_mode_triggered"):
             LOGGER.warning(
@@ -625,8 +638,17 @@ function extractAiModeSources() {
   return sources;
 }
 
-// Check streaming completion flag
-const isComplete = !!document.querySelector('[data-scope-id="turn"][data-complete="true"]');
+// Readiness signals — used by wait_for_ai_mode() to decide when to capture.
+//
+// copy_button_present: Google only injects the copy button after the full response
+//   has been rendered. This is the primary "done" indicator.
+//
+// sources_panel_present: the corroboration sidebar container must be present before
+//   we attempt source extraction.
+const copyButtonPresent = !!document.querySelector('button[aria-label="Copy text"]');
+const sourcesPanelPresent = !!document.querySelector(
+  '[data-xid="aim-aside-initial-corroboration-container"]'
+);
 
 const container = findAIModeContainer();
 if (!container) {
@@ -634,7 +656,8 @@ if (!container) {
     ai_mode_triggered: false,
     capture_state: "no_ai_mode",
     error: "no_ai_mode",
-    is_complete: false,
+    copy_button_present: copyButtonPresent,
+    sources_panel_present: sourcesPanelPresent,
   };
 }
 
@@ -649,7 +672,8 @@ if (/you['']?ve reached your daily limit/i.test(visibleText)) {
     raw_html: container.outerHTML || "",
     raw_html_capture_method: "ai_mode_container_outer_html",
     sources: [],
-    is_complete: isComplete,
+    copy_button_present: copyButtonPresent,
+    sources_panel_present: sourcesPanelPresent,
   };
 }
 
@@ -675,7 +699,8 @@ return {
   capture_method: "ai_mode_dom_text",
   markdown_capture_method: "ai_mode_dom_text",
   sources,
-  is_complete: isComplete,
+  copy_button_present: copyButtonPresent,
+  sources_panel_present: sourcesPanelPresent,
 };
 
 })();
