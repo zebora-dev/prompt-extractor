@@ -290,7 +290,16 @@ class GoogleAIModeRunner:
         return f"{base}{separator}{encoded}"
 
     def wait_for_ai_mode(self) -> dict[str, Any]:
+        """Poll until AI Mode content is detected and stable (or a streaming fallback fires).
+
+        AI Mode streams content progressively into the DOM. The stability check uses
+        text + sources only (not markdown, which can vary with whitespace normalisation).
+        If content has been present for more than 15 s and is meaningful, we capture
+        immediately rather than waiting for two identical consecutive signatures — this
+        handles the case where the stream never fully settles.
+        """
         deadline = time.time() + self.response_timeout_seconds
+        start = time.time()
         last_result: dict[str, Any] = {
             "ai_mode_triggered": False,
             "capture_state": "no_ai_mode",
@@ -298,6 +307,8 @@ class GoogleAIModeRunner:
         }
         last_signature = ""
         stable_checks = 0
+        first_detected_at: float | None = None
+        poll = 0
 
         while time.time() < deadline:
             blocked_reason = self.detect_blocking_page()
@@ -306,23 +317,80 @@ class GoogleAIModeRunner:
 
             result = self.extract_ai_mode()
             last_result = result
-            if result.get("ai_mode_triggered"):
-                signature = (
-                    f"{result.get('markdown') or ''}\n---\n"
-                    f"{result.get('text') or ''}\n---\n"
-                    f"{result.get('sources') or []}"
+            poll += 1
+            elapsed = round(time.time() - start, 1)
+
+            if not result.get("ai_mode_triggered"):
+                LOGGER.info(
+                    "wait_for_ai_mode poll#%s (%.1fs): no AI Mode yet — state=%s url=%s",
+                    poll, elapsed, result.get("capture_state"),
+                    self.require_browser().current_url[:120],
                 )
-                if signature and signature == last_signature and has_meaningful_content(result):
-                    stable_checks += 1
-                else:
-                    stable_checks = 0
-                    last_signature = signature
-                if stable_checks >= 2:
-                    return {**result, "capture_state": "complete"}
-            time.sleep(1)
+                time.sleep(1)
+                continue
+
+            # Content first detected — record timestamp and log
+            if first_detected_at is None:
+                first_detected_at = time.time()
+                LOGGER.info(
+                    "wait_for_ai_mode poll#%s (%.1fs): AI Mode content first detected. "
+                    "text_len=%s sources=%s",
+                    poll, elapsed,
+                    len(result.get("text") or ""),
+                    len(result.get("sources") or []),
+                )
+
+            # Stability check — use text + sources only (markdown varies with whitespace)
+            signature = f"{result.get('text') or ''}\n---\n{result.get('sources') or []}"
+            if signature and signature == last_signature and has_meaningful_content(result):
+                stable_checks += 1
+                LOGGER.info(
+                    "wait_for_ai_mode poll#%s (%.1fs): stable_checks=%s text_len=%s sources=%s",
+                    poll, elapsed, stable_checks,
+                    len(result.get("text") or ""), len(result.get("sources") or []),
+                )
+            else:
+                if stable_checks > 0:
+                    LOGGER.info(
+                        "wait_for_ai_mode poll#%s (%.1fs): content changed — resetting stable_checks.",
+                        poll, elapsed,
+                    )
+                stable_checks = 0
+                last_signature = signature
+
+            if stable_checks >= 2:
+                LOGGER.info("wait_for_ai_mode: content stable — capturing.")
+                return {**result, "capture_state": "complete"}
+
+            # Streaming fallback: if content has been present >15s and is meaningful,
+            # capture now rather than waiting for perfect stability.
+            seconds_detected = time.time() - first_detected_at
+            if seconds_detected >= 15 and has_meaningful_content(result):
+                LOGGER.info(
+                    "wait_for_ai_mode poll#%s: content present for %.1fs — capturing (streaming fallback).",
+                    poll, seconds_detected,
+                )
+                return {**result, "capture_state": "complete"}
+
+            time.sleep(0.5)
 
         if last_result.get("ai_mode_triggered"):
+            LOGGER.warning(
+                "wait_for_ai_mode: timed out after %ss — returning timeout_partial "
+                "(text_len=%s sources=%s)",
+                self.response_timeout_seconds,
+                len(last_result.get("text") or ""),
+                len(last_result.get("sources") or []),
+            )
             return {**last_result, "capture_state": "timeout_partial"}
+
+        LOGGER.warning(
+            "wait_for_ai_mode: timed out after %ss with no AI Mode detected — "
+            "final state=%s final_url=%s",
+            self.response_timeout_seconds,
+            last_result.get("capture_state"),
+            self.require_browser().current_url[:120],
+        )
         return last_result
 
     def extract_ai_mode(self) -> dict[str, Any]:
