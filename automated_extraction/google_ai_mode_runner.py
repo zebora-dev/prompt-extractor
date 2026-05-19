@@ -440,8 +440,12 @@ class GoogleAIModeRunner:
 
 
 AI_MODE_EXTRACTION_SCRIPT = r"""
-// AI Mode uses a completely different DOM structure from AI Overview.
-// Key stable selectors (data-* attributes, not dynamic class names):
+return (function() {
+// Wrapped in an IIFE starting with `return` so execute_script() activates its
+// JSON.stringify path: (a) top-level `return` becomes valid inside the function
+// body, and (b) the result is deserialised as a proper Python dict.
+//
+// AI Mode DOM structure (stable data-* selectors):
 //   [data-scope-id="turn"][data-complete="true"]  — completed streaming turn
 //   [data-container-id="main-col"]               — main content column
 //   [data-xid="VpUvz"]                           — inner content area (fallback)
@@ -603,6 +607,8 @@ return {
   sources,
   is_complete: isComplete,
 };
+
+})();
 """
 
 
