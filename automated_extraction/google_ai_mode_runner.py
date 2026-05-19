@@ -340,6 +340,14 @@ class GoogleAIModeRunner:
                     len(result.get("sources") or []),
                 )
 
+            # Fast path: if DOM signals streaming is complete and content is meaningful, capture now.
+            if result.get("is_complete") and has_meaningful_content(result):
+                LOGGER.info(
+                    "wait_for_ai_mode poll#%s (%.1fs): data-complete=true and meaningful content — capturing.",
+                    poll, elapsed,
+                )
+                return {**result, "capture_state": "complete"}
+
             # Stability check — use text + sources only (markdown varies with whitespace)
             signature = f"{result.get('text') or ''}\n---\n{result.get('sources') or []}"
             if signature and signature == last_signature and has_meaningful_content(result):
@@ -398,8 +406,9 @@ class GoogleAIModeRunner:
             result = self.require_browser().execute_script(AI_MODE_EXTRACTION_SCRIPT)
             if isinstance(result, dict):
                 return result
+            LOGGER.warning("Google AI Mode extraction script returned unexpected type: %s", type(result))
         except Exception as exc:
-            LOGGER.debug("Google AI Mode extraction script failed: %s", first_line(str(exc)))
+            LOGGER.warning("Google AI Mode extraction script failed: %s", first_line(str(exc)))
         return {
             "ai_mode_triggered": False,
             "capture_state": "extraction_error",
@@ -431,38 +440,14 @@ class GoogleAIModeRunner:
 
 
 AI_MODE_EXTRACTION_SCRIPT = r"""
+// AI Mode uses a completely different DOM structure from AI Overview.
+// Key stable selectors (data-* attributes, not dynamic class names):
+//   [data-scope-id="turn"][data-complete="true"]  — completed streaming turn
+//   [data-container-id="main-col"]               — main content column
+//   [data-xid="VpUvz"]                           — inner content area (fallback)
+//   [data-container-id="rhs-col"]                — sources sidebar
+
 const cleanText = (value) => (value || '').replace(/\s+/g, ' ').trim();
-
-function findAIModeContainer() {
-  const byAttr =
-    document.querySelector('[data-subtree="aimc"]') ||
-    document.querySelector('[data-attrid="ai_overview"]');
-  if (byAttr) return byAttr;
-
-  const headings = document.querySelectorAll("h2, h3, [role='heading']");
-  for (const heading of headings) {
-    if (/ai overview/i.test(heading.textContent || "")) {
-      let node = heading.parentElement;
-      for (let i = 0; i < 6 && node; i++) {
-        if (node.querySelectorAll("p, li, span, a").length >= 3) return node;
-        node = node.parentElement;
-      }
-      return heading.parentElement;
-    }
-  }
-
-  const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
-  let textNode;
-  while ((textNode = walker.nextNode())) {
-    if (!/ai overview/i.test(textNode.textContent || "")) continue;
-    let node = textNode.parentElement;
-    for (let i = 0; i < 8 && node; i++) {
-      if (node.querySelectorAll("p, li, span, a").length >= 3) return node;
-      node = node.parentElement;
-    }
-  }
-  return null;
-}
 
 function unwrapGoogleUrl(href) {
   if (!href) return "";
@@ -472,7 +457,7 @@ function unwrapGoogleUrl(href) {
       return url.searchParams.get("q") || url.searchParams.get("url") || href;
     }
     return url.href;
-  } catch {
+  } catch (e) {
     return href;
   }
 }
@@ -488,105 +473,86 @@ function isUsefulUrl(url) {
   );
 }
 
-function classifyLink(link) {
-  // Citation: superscript badge at end of a sentence, inside jscontroller="udAs2b"
-  const citationSpan = link.closest('[jscontroller="udAs2b"]');
-  if (citationSpan) {
-    const button = citationSpan.querySelector('button[data-amic="true"]');
-    const ariaLabel = button ? (button.getAttribute("aria-label") || "") : "";
-    const match = ariaLabel.match(/\+(\d+)/);
-    return { extractionSource: "citation", citationCount: match ? parseInt(match[1]) : null };
-  }
-  // Inline: hyperlinked word/phrase embedded in the prose text
-  if (link.classList.contains("H23r4e")) {
-    return { extractionSource: "inline", citationCount: null };
-  }
-  return { extractionSource: "more_links", citationCount: null };
+function domainFromUrl(url) {
+  try { return new URL(url).hostname.replace(/^www\./, ""); } catch (e) { return ""; }
 }
 
-function extractSources(container) {
+// AI Mode: detect a completed streaming turn or any turn with enough content.
+function findAIModeContainer() {
+  // Primary: completed turn (data-complete="true" set when streaming finishes)
+  const completedTurn = document.querySelector('[data-scope-id="turn"][data-complete="true"]');
+  if (completedTurn) return completedTurn;
+
+  // Secondary: any turn that has meaningful content (still streaming but readable)
+  const anyTurn = document.querySelector('[data-scope-id="turn"]');
+  if (anyTurn && (anyTurn.innerText || "").trim().length > 50) return anyTurn;
+
+  // Tertiary: main content column is present even before turn wrapper is set
+  const mainCol = document.querySelector('[data-container-id="main-col"]');
+  if (mainCol && (mainCol.innerText || "").trim().length > 50) return mainCol;
+
+  // Quaternary: stable xid content area
+  const xidArea = document.querySelector('[data-xid="VpUvz"]');
+  if (xidArea && (xidArea.innerText || "").trim().length > 50) return xidArea;
+
+  return null;
+}
+
+// Extract sources from the RHS sources panel.
+// In AI Mode the sources are in [data-container-id="rhs-col"], a sibling of main-col,
+// NOT inside the main content container.
+function extractAiModeSources() {
   const seen = new Set();
   const sources = [];
-  for (const link of container.querySelectorAll("a[href]")) {
-    const url = unwrapGoogleUrl(link.getAttribute("href") || "").replace(/#:~:text=.*$/, "");
+
+  const rhsCol = document.querySelector('[data-container-id="rhs-col"]');
+  // Fall back to full document if rhs col not present yet
+  const searchRoot = rhsCol || null;
+  if (!searchRoot) return sources;
+
+  for (const link of searchRoot.querySelectorAll("a[href]")) {
+    const href = link.getAttribute("href") || "";
+    const url = unwrapGoogleUrl(href).replace(/#:~:text=.*$/, "");
     if (!isUsefulUrl(url) || seen.has(url)) continue;
     seen.add(url);
 
-    const { extractionSource, citationCount } = classifyLink(link);
+    let title = cleanText(link.getAttribute("aria-label") || "");
+    let description = "";
 
-    const lines = cleanText(link.innerText || link.textContent || "")
-      .split(/\n+/)
-      .map((line) => cleanText(line))
-      .filter(Boolean);
-    let source = lines[0] || "";
-    let title = lines[1] || "";
-    let description = lines.slice(2).join(" ");
+    // Look for title inside the parent <li>
+    const li = link.closest("li");
+    if (li) {
+      // Collect non-empty span texts (avoid deeply nested script/style text)
+      const spanTexts = Array.from(li.querySelectorAll("span"))
+        .map((s) => cleanText(s.innerText || s.textContent || ""))
+        .filter((t) => t.length > 2);
+      if (!title && spanTexts.length > 0) title = spanTexts[0];
+      if (spanTexts.length > 1) description = spanTexts.slice(1, 3).join(" ");
 
-    let parent = link.parentElement;
-    for (let i = 0; i < 3 && parent && (!title || !description); i++) {
-      const parentLines = (parent.innerText || "")
-        .split(/\n+/)
-        .map((line) => cleanText(line))
-        .filter(Boolean);
-      if (!title && parentLines.length > 0) title = parentLines.find((line) => line !== source) || "";
-      if (!description && parentLines.length > 1) description = parentLines.slice(1, 4).join(" ");
-      parent = parent.parentElement;
+      if (!title) {
+        // Try link text itself
+        title = cleanText(link.innerText || link.textContent || "");
+      }
+    } else {
+      if (!title) title = cleanText(link.innerText || link.textContent || "");
     }
 
-    const entry = {
+    const favicon = link.querySelector("img");
+    sources.push({
       index: sources.length + 1,
       url,
-      source,
-      title,
+      source: domainFromUrl(url),
+      title: title || url,
       description,
-      favicon_url: link.querySelector("img")?.src || null,
-      extraction_source: extractionSource,
-    };
-    if (citationCount !== null) entry.citation_count = citationCount;
-    sources.push(entry);
+      favicon_url: favicon ? (favicon.src || null) : null,
+      extraction_source: "rhs_panel",
+    });
   }
   return sources;
 }
 
-function stripForContent(container) {
-  const clone = container.cloneNode(true);
-  clone.querySelectorAll("style, script, noscript, template, svg, button, [role='button']").forEach((node) => node.remove());
-  clone.querySelectorAll("[data-subtree='aimba'], img[src^='data:']").forEach((node) => node.remove());
-  const firstHeading = clone.querySelector("h2, h3, [role='heading']");
-  if (firstHeading && /ai overview/i.test(firstHeading.textContent || "")) firstHeading.remove();
-  return clone;
-}
-
-function htmlToMarkdownish(root) {
-  const lines = [];
-  const visit = (node) => {
-    if (node.nodeType === Node.TEXT_NODE) {
-      const text = cleanText(node.textContent || "");
-      if (text) lines.push(text);
-      return;
-    }
-    if (node.nodeType !== Node.ELEMENT_NODE) return;
-    const tag = node.tagName.toLowerCase();
-    if (tag === "a" && node.href && isUsefulUrl(node.href)) {
-      const text = cleanText(node.innerText || node.textContent || node.href);
-      lines.push(`[${text}](${unwrapGoogleUrl(node.href)})`);
-      return;
-    }
-    if (["p", "li", "h2", "h3", "h4", "div"].includes(tag)) {
-      const before = lines.length;
-      for (const child of node.childNodes) visit(child);
-      if (lines.length > before) lines.push("");
-      return;
-    }
-    for (const child of node.childNodes) visit(child);
-  };
-  visit(root);
-  return lines
-    .join("\n")
-    .replace(/\n{3,}/g, "\n\n")
-    .replace(/[ \t]+\n/g, "\n")
-    .trim();
-}
+// Check streaming completion flag
+const isComplete = !!document.querySelector('[data-scope-id="turn"][data-complete="true"]');
 
 const container = findAIModeContainer();
 if (!container) {
@@ -594,6 +560,7 @@ if (!container) {
     ai_mode_triggered: false,
     capture_state: "no_ai_mode",
     error: "no_ai_mode",
+    is_complete: false,
   };
 }
 
@@ -608,24 +575,33 @@ if (/you['']?ve reached your daily limit/i.test(visibleText)) {
     raw_html: container.outerHTML || "",
     raw_html_capture_method: "ai_mode_container_outer_html",
     sources: [],
+    is_complete: isComplete,
   };
 }
 
-const contentRoot = container.querySelector('[data-container-id="main-col"]') || container;
-const cleaned = stripForContent(contentRoot);
-const markdown = htmlToMarkdownish(cleaned);
-const sources = extractSources(container);
+// Prefer the main-col sub-element for raw_html to avoid capturing the full turn shell.
+// Fall back to container itself if main-col is not a child (it may be a sibling).
+const mainCol =
+  container.querySelector('[data-container-id="main-col"]') ||
+  document.querySelector('[data-container-id="main-col"]') ||
+  container;
+
+const rawHtml = mainCol.outerHTML || "";
+const textContent = cleanText(mainCol.innerText || mainCol.textContent || "");
+const sources = extractAiModeSources();
+
 return {
   ai_mode_triggered: true,
-  capture_state: markdown || sources.length ? "content_detected" : "empty_ai_mode_extraction",
-  error: markdown || sources.length ? null : "empty_ai_mode_extraction",
-  text: cleanText(cleaned.innerText || cleaned.textContent || ""),
-  markdown,
-  raw_html: container.outerHTML || "",
-  raw_html_capture_method: "ai_mode_container_outer_html",
+  capture_state: (textContent.length > 20 || sources.length > 0) ? "content_detected" : "empty_ai_mode_extraction",
+  error: null,
+  text: textContent,
+  markdown: textContent,
+  raw_html: rawHtml,
+  raw_html_capture_method: "ai_mode_main_col_outer_html",
   capture_method: "ai_mode_dom_text",
-  markdown_capture_method: "ai_mode_dom_markdownish",
+  markdown_capture_method: "ai_mode_dom_text",
   sources,
+  is_complete: isComplete,
 };
 """
 
