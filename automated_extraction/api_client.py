@@ -136,6 +136,36 @@ class ApiClient:
     def update_prompt_output(self, output: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any] | None:
         return self.supabase.update_prompt_output(output, patch)
 
+    # ── Prompt claiming ────────────────────────────────────────────────────────
+
+    def try_claim_prompt(
+        self,
+        prompt_id: str,
+        batch_id: str,
+        brand_id: str,
+        llm_model: str,
+        worker_id: str,
+        ttl_minutes: int = 20,
+    ) -> bool:
+        """Atomically claim a prompt. Returns True if this worker holds the claim."""
+        return self.supabase.try_claim_prompt(
+            prompt_id, batch_id, brand_id, llm_model, worker_id, ttl_minutes
+        )
+
+    def release_claim(
+        self,
+        prompt_id: str,
+        batch_id: str,
+        llm_model: str,
+        error_message: str | None = None,
+    ) -> None:
+        """Mark a claim failed so the prompt is available for retry."""
+        self.supabase.release_claim(prompt_id, batch_id, llm_model, error_message=error_message)
+
+    def complete_claim(self, prompt_id: str, batch_id: str, llm_model: str) -> None:
+        """Delete a claim after successful processing."""
+        self.supabase.complete_claim(prompt_id, batch_id, llm_model)
+
     @property
     def supabase(self) -> SupabasePromptOutputRepository:
         if not self.supabase_url:

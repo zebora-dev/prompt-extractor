@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import asdict, dataclass, fields
+from datetime import datetime, timezone
 from typing import Any
 
 from supabase import Client, create_client
@@ -233,6 +234,7 @@ class SupabasePromptOutputRepository:
         return remaining
 
     def completed_prompt_ids(self, *, batch_id: str, brand_id: str, llm_model_filter: str | None = "gpt") -> set[str]:
+        # Prompts that already have a saved output record
         query = (
             self.client.table(self.table_name)
             .select("prompt_id")
@@ -242,11 +244,119 @@ class SupabasePromptOutputRepository:
         )
         if llm_model_filter:
             query = query.ilike("llm_model", f"%{llm_model_filter}%")
-
         response = query.execute()
-        return {
-            str(row.get("prompt_id")) for row in response.data or [] if isinstance(row, dict) and row.get("prompt_id")
+        done_ids = {
+            str(row.get("prompt_id")) for row in response.data or []
+            if isinstance(row, dict) and row.get("prompt_id")
         }
+
+        # Prompts currently being processed by another worker (active pending claim).
+        # Including these prevents multiple workers loading the same prompt simultaneously.
+        try:
+            now_iso = datetime.now(timezone.utc).isoformat()
+            claims_query = (
+                self.client.table("prompt_claims")
+                .select("prompt_id")
+                .eq("batch_id", batch_id)
+                .eq("status", "pending")
+                .gt("expires_at", now_iso)
+            )
+            if llm_model_filter:
+                claims_query = claims_query.ilike("llm_model", f"%{llm_model_filter}%")
+            claims_response = claims_query.execute()
+            claimed_ids = {
+                str(row.get("prompt_id")) for row in claims_response.data or []
+                if isinstance(row, dict) and row.get("prompt_id")
+            }
+            if claimed_ids:
+                LOGGER.info(
+                    "completed_prompt_ids: %s prompt(s) excluded due to active claims. batch_id=%s llm_model_filter=%s",
+                    len(claimed_ids), batch_id, llm_model_filter or "any",
+                )
+            return done_ids | claimed_ids
+        except Exception as exc:
+            LOGGER.warning(
+                "completed_prompt_ids: could not load active claims (table may not exist yet) — "
+                "falling back to outputs-only filter. batch_id=%s error=%s",
+                batch_id, exc,
+            )
+            return done_ids
+
+    def try_claim_prompt(
+        self,
+        prompt_id: str,
+        batch_id: str,
+        brand_id: str,
+        llm_model: str,
+        worker_id: str,
+        ttl_minutes: int = 20,
+    ) -> bool:
+        """Atomically claim a prompt for processing via the try_claim_prompt RPC.
+
+        Returns True if this worker successfully holds the claim, False if another
+        worker already has an active (pending, non-expired) claim on this prompt.
+
+        Fails open (returns True) if the RPC is unavailable so that existing
+        deployments without the migration still work — the concurrent-output
+        check before saving acts as a secondary safety net in that case.
+        """
+        try:
+            response = self.client.rpc("try_claim_prompt", {
+                "p_prompt_id": str(prompt_id),
+                "p_batch_id": str(batch_id),
+                "p_brand_id": str(brand_id),
+                "p_llm_model": llm_model,
+                "p_worker_id": worker_id,
+                "p_ttl_minutes": ttl_minutes,
+            }).execute()
+            return bool(response.data)
+        except Exception as exc:
+            LOGGER.warning(
+                "try_claim_prompt RPC unavailable for prompt %s — failing open. "
+                "Run docs/migrations/001_prompt_claims.sql to enable claiming. error=%s",
+                prompt_id, exc,
+            )
+            return True  # Fail-open: allow processing; concurrent-output check is the fallback
+
+    def release_claim(
+        self,
+        prompt_id: str,
+        batch_id: str,
+        llm_model: str,
+        error_message: str | None = None,
+    ) -> None:
+        """Mark a claim as failed so the prompt is available for retry."""
+        try:
+            self.client.table("prompt_claims") \
+                .update({"status": "failed", "error_message": (error_message or "")[:1000]}) \
+                .eq("prompt_id", str(prompt_id)) \
+                .eq("batch_id", str(batch_id)) \
+                .eq("llm_model", llm_model) \
+                .eq("status", "pending") \
+                .execute()
+        except Exception as exc:
+            LOGGER.warning("release_claim failed for prompt %s: %s", prompt_id, exc)
+
+    def complete_claim(
+        self,
+        prompt_id: str,
+        batch_id: str,
+        llm_model: str,
+    ) -> None:
+        """Delete a claim after successful processing.
+
+        The prompts_outputs record is the source of truth for completion — the
+        claim row is no longer needed once the output is saved.
+        """
+        try:
+            self.client.table("prompt_claims") \
+                .delete() \
+                .eq("prompt_id", str(prompt_id)) \
+                .eq("batch_id", str(batch_id)) \
+                .eq("llm_model", llm_model) \
+                .execute()
+        except Exception as exc:
+            LOGGER.warning("complete_claim failed for prompt %s: %s", prompt_id, exc)
 
     def prompt_output_exists(
         self,

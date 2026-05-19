@@ -5,6 +5,7 @@ import logging
 import os
 import random
 import time
+import uuid as _uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -18,6 +19,15 @@ from .google_ai_overview_runner import GoogleAIOverviewRunner
 from .google_suggestions_runner import capture_people_also_ask
 
 LOGGER = logging.getLogger(__name__)
+
+# Stable identifier for this worker process.
+# Fly.io sets FLY_MACHINE_ID on every machine; fall back to hostname then a
+# per-process UUID so local runs also get a unique ID.
+WORKER_ID: str = (
+    os.environ.get("FLY_MACHINE_ID")
+    or os.environ.get("HOSTNAME")
+    or str(_uuid.uuid4())[:12]
+)
 
 
 @dataclass(frozen=True)
@@ -174,6 +184,21 @@ def run_extraction_job(
                 )
                 continue
 
+            # Claim the prompt so no other worker starts processing it concurrently.
+            # Skipped when force_rerun=True (intentional re-processing).
+            if not force_rerun:
+                claimed = api.try_claim_prompt(
+                    prompt_id, resolved_batch_id, prompt_brand_id,
+                    llm_model_filter or "gpt", WORKER_ID,
+                )
+                if not claimed:
+                    LOGGER.info(
+                        "[%s/%s] Prompt %s already claimed by another worker — skipping.",
+                        index, len(prompts), prompt_id,
+                    )
+                    skipped_count += 1
+                    continue
+
             text = prompt_text(prompt)
             LOGGER.info("[%s/%s] Running prompt %s", index, len(prompts), prompt_id)
 
@@ -323,11 +348,15 @@ def run_extraction_job(
                     len(products),
                     len(entities),
                 )
+                if not force_rerun:
+                    api.complete_claim(prompt_id, resolved_batch_id, llm_model_filter or "gpt")
             except Exception as exc:
                 failed_count += 1
                 failure = {"prompt_id": prompt_id, "brand_id": prompt_brand_id, "error": str(exc)}
                 failures.append(failure)
                 LOGGER.exception("[%s/%s] Prompt %s failed: %s", index, len(prompts), prompt_id, exc)
+                if not force_rerun:
+                    api.release_claim(prompt_id, resolved_batch_id, llm_model_filter or "gpt", error_message=str(exc)[:500])
 
     status = "completed" if failed_count == 0 else "completed_with_failures"
     return ExtractionRunResult(
@@ -478,6 +507,19 @@ def run_google_ai_mode_extraction_job(
                 )
                 continue
 
+            if not force_rerun:
+                claimed = api.try_claim_prompt(
+                    prompt_id, resolved_batch_id, prompt_brand_id,
+                    llm_model_filter or "google-ai-mode", WORKER_ID,
+                )
+                if not claimed:
+                    LOGGER.info(
+                        "[%s/%s] Google AI Mode prompt %s already claimed by another worker — skipping.",
+                        index, len(prompts), prompt_id,
+                    )
+                    skipped_count += 1
+                    continue
+
             text = prompt_text(prompt)
             LOGGER.info("[%s/%s] Running Google AI Mode prompt %s", index, len(prompts), prompt_id)
             try:
@@ -547,6 +589,11 @@ def run_google_ai_mode_extraction_job(
                 failure = {"prompt_id": prompt_id, "brand_id": prompt_brand_id, "error": str(exc)}
                 failures.append(failure)
                 LOGGER.exception("[%s/%s] Google AI Mode prompt %s failed: %s", index, len(prompts), prompt_id, exc)
+                if not force_rerun:
+                    api.release_claim(prompt_id, resolved_batch_id, llm_model_filter or "google-ai-mode", error_message=str(exc)[:500])
+            else:
+                if not force_rerun:
+                    api.complete_claim(prompt_id, resolved_batch_id, llm_model_filter or "google-ai-mode")
 
             if index < len(prompts):
                 delay = random.uniform(3.0, 7.0)
@@ -704,6 +751,19 @@ def run_google_ai_overview_extraction_job(
                 )
                 continue
 
+            if not force_rerun:
+                claimed = api.try_claim_prompt(
+                    prompt_id, resolved_batch_id, prompt_brand_id,
+                    llm_model_filter or "google-ai-overview", WORKER_ID,
+                )
+                if not claimed:
+                    LOGGER.info(
+                        "[%s/%s] Google AI Overview prompt %s already claimed by another worker — skipping.",
+                        index, len(prompts), prompt_id,
+                    )
+                    skipped_count += 1
+                    continue
+
             text = prompt_text(prompt)
             LOGGER.info("[%s/%s] Running Google AI Overview prompt %s", index, len(prompts), prompt_id)
             try:
@@ -773,6 +833,11 @@ def run_google_ai_overview_extraction_job(
                 failure = {"prompt_id": prompt_id, "brand_id": prompt_brand_id, "error": str(exc)}
                 failures.append(failure)
                 LOGGER.exception("[%s/%s] Google AI Overview prompt %s failed: %s", index, len(prompts), prompt_id, exc)
+                if not force_rerun:
+                    api.release_claim(prompt_id, resolved_batch_id, llm_model_filter or "google-ai-overview", error_message=str(exc)[:500])
+            else:
+                if not force_rerun:
+                    api.complete_claim(prompt_id, resolved_batch_id, llm_model_filter or "google-ai-overview")
 
             if index < len(prompts):
                 delay = random.uniform(3.0, 7.0)
