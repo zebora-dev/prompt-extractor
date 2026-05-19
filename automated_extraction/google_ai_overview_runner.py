@@ -440,6 +440,66 @@ SIDEBAR_EXTRA_SOURCES_SCRIPT = r"""return (function(existingUrls) {
 AI_OVERVIEW_EXTRACTION_SCRIPT = r"""return (function() {
   const cleanText = (v) => (v || '').replace(/\s+/g, ' ').trim();
 
+  // Convert an element's subtree to Markdown-ish text.
+  // Uses only stable HTML semantics — no class names or data attributes.
+  // Mirrors the same function in google_ai_mode_runner.py.
+  function htmlToMarkdownish(el) {
+    if (!el) return "";
+    function processNode(node) {
+      if (node.nodeType === 3 /* TEXT_NODE */) return node.textContent || "";
+      if (node.nodeType !== 1 /* ELEMENT_NODE */) return "";
+      const tag = node.tagName.toLowerCase();
+      if (tag === 'script' || tag === 'style' || tag === 'noscript' || tag === 'svg') return "";
+      try {
+        const cs = window.getComputedStyle(node);
+        if (cs && (cs.display === 'none' || cs.visibility === 'hidden')) return "";
+      } catch (e) {}
+      const children = () => Array.from(node.childNodes).map(processNode).join("");
+      switch (tag) {
+        case 'h1': return "\n# " + children().trim() + "\n";
+        case 'h2': return "\n## " + children().trim() + "\n";
+        case 'h3': return "\n### " + children().trim() + "\n";
+        case 'h4': return "\n#### " + children().trim() + "\n";
+        case 'h5': return "\n##### " + children().trim() + "\n";
+        case 'h6': return "\n###### " + children().trim() + "\n";
+        case 'p':  return "\n" + children().trim() + "\n";
+        case 'br': return "\n";
+        case 'hr': return "\n---\n";
+        case 'strong': case 'b': return "**" + children() + "**";
+        case 'em':    case 'i': return "*" + children() + "*";
+        case 'code': return "`" + children() + "`";
+        case 'pre':  return "\n```\n" + children() + "\n```\n";
+        case 'blockquote': return "\n> " + children().trim() + "\n";
+        case 'ul': return "\n" + children() + "\n";
+        case 'ol': return "\n" + children() + "\n";
+        case 'li': {
+          const parent = node.parentElement;
+          if (parent && parent.tagName.toLowerCase() === 'ol') {
+            const idx = Array.from(parent.children).indexOf(node) + 1;
+            return idx + ". " + children().trim() + "\n";
+          }
+          return "- " + children().trim() + "\n";
+        }
+        case 'a': {
+          const href = node.getAttribute('href');
+          const text = children().trim();
+          if (href && !/^javascript/i.test(href) && text) return "[" + text + "](" + href + ")";
+          return text;
+        }
+        case 'img': {
+          const alt = node.getAttribute('alt') || '';
+          const src = node.getAttribute('src') || '';
+          return alt ? "![" + alt + "](" + src + ")" : "";
+        }
+        case 'table': return "\n" + children() + "\n";
+        case 'tr':   return children().replace(/\t/g, ' | ') + "\n";
+        case 'th': case 'td': return "\t" + children().trim();
+        default: return children();
+      }
+    }
+    return processNode(el).replace(/\n{3,}/g, "\n\n").trim();
+  }
+
   function unwrapGoogleUrl(href) {
     if (!href) return '';
     try {
@@ -587,6 +647,7 @@ AI_OVERVIEW_EXTRACTION_SCRIPT = r"""return (function() {
   }
 
   const sources = extractSources(panel);
+  const markdownContent = htmlToMarkdownish(panel);
 
   return {
     ai_overview_triggered: true,
@@ -594,11 +655,11 @@ AI_OVERVIEW_EXTRACTION_SCRIPT = r"""return (function() {
     capture_state: text ? 'content_detected' : 'empty_ai_overview_extraction',
     error: text ? null : 'empty_ai_overview_extraction',
     text,
-    markdown: text,
+    markdown: markdownContent || text,
     raw_html: panel.outerHTML || '',
     raw_html_capture_method: 'panel_outer_html',
     capture_method: 'ai_overview_dom_text',
-    markdown_capture_method: 'ai_overview_dom_text',
+    markdown_capture_method: markdownContent ? 'ai_overview_dom_markdown' : 'ai_overview_dom_text',
     sources,
   };
 })()
