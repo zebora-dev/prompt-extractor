@@ -105,7 +105,7 @@ def prompt_extraction_batch_flow(
     consecutive_all_failed = 0
     stopped_reason: str | None = None
     for run_index in range(1, run_count + 1):
-        run_skip = skip + (run_index - 1) * limit
+        run_skip = skip
         effective_limit = min(limit, max_prompts - (run_index - 1) * limit) if max_prompts is not None else limit
         flow_logger.info(
             "Starting sequential prompt-extraction run %s/%s. batch_id=%s limit=%s skip=%s",
@@ -455,7 +455,7 @@ def google_ai_mode_extraction_batch_flow(
     consecutive_all_failed = 0
     stopped_reason: str | None = None
     for run_index in range(1, run_count + 1):
-        run_skip = skip + (run_index - 1) * limit
+        run_skip = skip
         effective_limit = min(limit, max_prompts - (run_index - 1) * limit) if max_prompts is not None else limit
         flow_logger.info("Starting Google AI Mode run %s/%s. batch_id=%s limit=%s skip=%s", run_index, run_count, batch_id, effective_limit, run_skip)
         result = google_ai_mode_extraction_flow(
@@ -625,7 +625,7 @@ def google_ai_overview_extraction_batch_flow(
     consecutive_all_failed = 0
     stopped_reason: str | None = None
     for run_index in range(1, run_count + 1):
-        run_skip = skip + (run_index - 1) * limit
+        run_skip = skip
         effective_limit = min(limit, max_prompts - (run_index - 1) * limit) if max_prompts is not None else limit
         flow_logger.info("Starting Google AI Overview run %s/%s. batch_id=%s limit=%s skip=%s", run_index, run_count, batch_id, effective_limit, run_skip)
         result = google_ai_overview_extraction_flow(
