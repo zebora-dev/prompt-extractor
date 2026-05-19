@@ -455,7 +455,56 @@ The flow returns a summary shaped like:
 }
 ```
 
-## 9. Troubleshooting
+## 9. Prompt Claiming
+
+When multiple workers run against the same batch, the claiming system provides atomic per-prompt locking to prevent two workers from processing the same prompt concurrently.
+
+### How it works
+
+Three layers of protection work together:
+
+1. **Excluded from the remaining list** — `completed_prompt_ids()` now also excludes prompts that have an active pending claim. Workers never even load a claimed prompt into their run queue.
+2. **Atomic claim before Chrome opens** — before opening a browser tab for a prompt, the worker calls the `try_claim_prompt` Postgres RPC. This is an atomic upsert that only succeeds when no live pending claim exists for that `(prompt_id, batch_id, llm_model)` triple. If it returns `false`, the prompt is skipped.
+3. **Complete or release on outcome** — on success, `complete_claim()` deletes the claim row. On failure, `release_claim()` marks the claim `failed` (making it retry-eligible). If the worker crashes without calling either, the TTL expires the claim automatically.
+
+### Claim status values
+
+| Status | Meaning |
+|---|---|
+| `pending` | A worker has claimed the prompt and is actively processing it (or has crashed) |
+| `failed` | The worker finished but the extraction failed — the prompt is eligible for retry |
+
+Completed prompts have their claim row deleted, not updated.
+
+### TTL and crash recovery
+
+Claims are created with a 20-minute TTL stored in the `expires_at` column. If a worker crashes mid-extraction, no cleanup is needed — the next worker that loads the prompt list will find the claim expired and treat it as available. The `completed_prompt_ids()` query filters out only claims where `expires_at > now()`.
+
+### Worker identity
+
+The worker ID recorded in each claim is resolved in order: `FLY_MACHINE_ID` env var → `HOSTNAME` env var → a fresh UUID. This is used for diagnostics only; the claiming logic does not depend on it.
+
+### Bypassing claims with `force_rerun`
+
+Passing `force_rerun=True` to any extraction flow skips the claiming system entirely and re-processes every prompt regardless of existing claims or outputs. Use this when you want to deliberately re-extract a batch from scratch.
+
+### Migration requirement
+
+The claiming system requires the `prompt_claims` table and the `try_claim_prompt` RPC to exist in Supabase. The migration is at:
+
+```
+docs/migrations/001_prompt_claims.sql
+```
+
+Run it once against your Supabase project before deploying workers that include this feature.
+
+### Fail-open behaviour
+
+If the `prompt_claims` table does not yet exist (e.g. during the migration window), all claim calls fail open — `try_claim_prompt` returns `true` and prompts are processed as if no claim system were present. This ensures existing deployments keep working until the migration is applied.
+
+---
+
+## 10. Troubleshooting
 
 ### `No module named 'prefect'`
 
@@ -547,12 +596,36 @@ fly logs -a prompt-extractor-uk
 
 ### Google batch stops with `stopped_reason=google_blocked_consecutive`
 
-The worker's datacenter IP is being blocked by Google. Re-trigger the same batch with `use_proxy=True`:
+The worker's datacenter IP is being blocked by Google. This applies to both AI Mode and AI Overview batches. Re-trigger the same batch with `use_proxy=True`:
 
 ```bash
+# AI Mode
 prefect deployment run 'google-ai-mode-extraction-batch/google-ai-mode-extraction-batch-uk' \
+  --param batch_id=<uuid> \
+  --param use_proxy=true
+
+# AI Overview
+prefect deployment run 'google-ai-overview-extraction-batch/google-ai-overview-extraction-batch-uk' \
   --param batch_id=<uuid> \
   --param use_proxy=true
 ```
 
 This requires `GOOGLE_PROXY_URL` to be set as a secret on the worker. See [MULTI_REGION.md](MULTI_REGION.md) for proxy setup details.
+
+### All workers processing the same prompts (duplicate runs)
+
+**Symptom:** Multiple workers pick up the same prompts and produce duplicate outputs, or all workers converge on the same position in the prompt list after their first inner run.
+
+**Cause:** The old dispatcher set `run_skip = 1 if run_index == 1 else 0` for inner runs beyond the first, resetting every worker's offset to 0 on their second run. All workers then raced to process whatever was at position 0.
+
+**Fix (already applied):** The dispatcher now uses `run_skip = skip` — the constant offset originally assigned to that worker. Because `get_prompts` uses `only_remaining=True`, the prompt list shrinks as other workers complete entries ahead of this position, so the constant offset naturally advances through fresh prompts on each successive inner run without causing collisions.
+
+If you observe duplicate outputs from a run before this fix was deployed, use `force_rerun=False` (the default) and let the claiming system (see [Prompt Claiming](#prompt-claiming)) handle deduplication going forward.
+
+### Workers crash on startup with `ModuleNotFoundError: No module named 'importlib_metadata'`
+
+`importlib_metadata` is required by `prefect/workers/base.py` but was missing from `requirements.txt`. It has now been added. If you are hitting this error on an older image, rebuild and redeploy the worker:
+
+```bash
+make deploy-worker-uk
+```

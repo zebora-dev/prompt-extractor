@@ -19,6 +19,7 @@ This document covers how to scale Fly.io worker machines up and down for batch e
 - [Deployments Reference](#deployments-reference)
 - [One-time Setup](#one-time-setup)
 - [Volumes and Chrome Profiles](#volumes-and-chrome-profiles)
+  - [Volume pre-creation for auto-scaled machines](#volume-pre-creation-for-auto-scaled-machines)
 - [Cost Considerations](#cost-considerations)
 - [Troubleshooting](#troubleshooting)
 
@@ -260,6 +261,28 @@ If you need ChatGPT extraction at scale:
 1. Use `auto_login=True` with `login_email` set — each clone will log in automatically on startup.
 2. Or restrict auto-scaling to Google extraction types and run ChatGPT only on the original machines.
 
+### Volume pre-creation for auto-scaled machines
+
+When `auto_scale=true` causes the dispatcher to scale beyond the 4 original machines, the newly cloned machines require Fly.io volumes before you can run `fly deploy`. Without them, deployment fails with:
+
+```
+Error: Process group 'app' needs volumes with name 'prompt_extractor_data_uk' to fulfill mounts
+```
+
+Create the required volumes manually (one per extra machine needed) before deploying:
+
+```bash
+# Example: creating 6 extra volumes for a 10-machine fleet
+for i in 1 2 3 4 5 6; do
+  fly volumes create prompt_extractor_data_uk \
+    -a prompt-extractor-uk --region lhr --size 5 --yes
+done
+```
+
+After creating the volumes, re-run `make deploy-worker-uk` to attach them.
+
+Note that cloned machines do not retain Chrome profiles across restarts — their volume starts empty. For Google extraction (`google-ai-overview`, `google-ai-mode`) this is fine because no login state is needed. For ChatGPT extraction, use `auto_login=True`.
+
 ---
 
 ## Cost Considerations
@@ -306,6 +329,25 @@ Or simply re-run `scale-workers` with the correct `target_count` — it will upd
 ### Chrome fails to start on a clone ("debug port not ready after 60s")
 
 Clones start with a fresh `/tmp/chrome-profile` and no persistent state. If this error appears consistently on clones but not originals, the machine may be under-resourced. Check that the cloned machine config has the same `vm` spec (2 GB RAM, 1 performance CPU) as the original.
+
+### Deployment fails with "needs volumes"
+
+If `fly deploy` (or `make deploy-worker-uk`) fails with:
+
+```
+Error: Process group 'app' needs volumes with name 'prompt_extractor_data_uk' to fulfill mounts
+```
+
+you have more machines than volumes. This happens when `auto_scale=true` cloned machines beyond the 4 that have permanent volumes. Create the missing volumes and redeploy:
+
+```bash
+fly volumes create prompt_extractor_data_uk \
+  -a prompt-extractor-uk --region lhr --size 5 --yes
+
+make deploy-worker-uk
+```
+
+Repeat the `fly volumes create` call once per additional machine needed. See [Volume pre-creation for auto-scaled machines](#volume-pre-creation-for-auto-scaled-machines) for a bulk example.
 
 ### `scale-workers-down` stops an original I want to keep running
 

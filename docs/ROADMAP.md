@@ -4,6 +4,19 @@ Ranked by impact / effort. Items marked **[quick win]** are low-effort and high-
 
 ---
 
+## Recently Completed
+
+### ✅ **[DONE]** Prompt claiming / concurrent worker protection
+Atomic per-prompt locking via a `prompt_claims` Supabase table and a Postgres RPC (`try_claim_prompt`). Three-layer protection: prompts with active claims are excluded from the remaining list, the RPC atomically gates Chrome opening, and claims are completed or released on outcome. 20-minute TTL provides automatic crash recovery. `force_rerun=True` bypasses claiming entirely. Migration at `docs/migrations/001_prompt_claims.sql`. Fails open if the table does not exist.
+
+### ✅ **[DONE]** DOM-based markdown extraction (AI Mode + AI Overview)
+`htmlToMarkdownish()` function converts the rendered DOM tree to structured markdown — headings, bold, unordered/ordered lists, links, and code blocks. Eliminates clipboard dependency in headless Chrome where `navigator.clipboard` is unavailable. Both `AI_MODE_EXTRACTION_SCRIPT` and `AI_OVERVIEW_EXTRACTION_SCRIPT` updated. Clipboard capture is still attempted first and used if it succeeds; `markdown_capture_method` is `"ai_mode_dom_markdown"` / `"ai_overview_dom_markdown"` to distinguish the path taken.
+
+### ✅ **[DONE]** Batch skip fix — constant offset across inner runs
+`run_skip = skip` (constant dispatcher-assigned offset) replaces the old pattern that reset skip to 0 on every inner run beyond the first. The old behaviour caused all workers to collide on position 0 during their second inner run. Because `get_prompts` uses `only_remaining=True`, the constant offset naturally advances through fresh prompts as other workers complete entries ahead of it.
+
+---
+
 ## 1. Reliability & Resilience
 
 ### 1.1 Per-prompt retry with exponential backoff
@@ -14,9 +27,9 @@ Ranked by impact / effort. Items marked **[quick win]** are low-effort and high-
 **Why:** Chrome sessions can silently die mid-batch, leading to a flood of `NoSuchWindowException` errors and partial batches.  
 **What:** Before issuing each prompt, verify the driver session is alive (`driver.current_url` guarded try/except). If dead, restart the runner and re-authenticate.
 
-### 1.3 Atomic save with conflict detection
+### ✅ **[DONE]** 1.3 Atomic save with conflict detection
 **Why:** Network interruptions mid-save can leave duplicate or partial rows in Supabase.  
-**What:** Use an upsert (insert + `on_conflict=...`) keyed on `(batch_id, prompt_id, llm_model)` for all `prompts_outputs` writes.
+**What:** The prompt claiming system (see [Recently Completed](#recently-completed)) provides atomic per-prompt locking via a Postgres RPC (`try_claim_prompt`) with a unique constraint on `(prompt_id, batch_id, llm_model)`, TTL-based crash recovery, and a full fail/complete lifecycle. The primary race condition is solved. An upsert (`on_conflict=...`) on the `prompts_outputs` write itself remains a nice-to-have for belt-and-braces protection.
 
 ### 1.4 Structured failure reporting
 **Why:** Today a failed prompt sets `failed_count` but the caller can't identify *which* prompts failed or why.  
@@ -139,7 +152,7 @@ Ranked by impact / effort. Items marked **[quick win]** are low-effort and high-
 | 5 | 4.2 Secrets scanning in CI | S | High |
 | 6 | 6.1 Shared BaseGoogleRunner | M | Medium |
 | 7 | 1.1 Per-prompt retry | M | High |
-| 8 | 1.3 Atomic upsert | M | High |
+| 8 | ~~1.3 Atomic upsert~~ ✅ done | M | High |
 | 9 | 1.4 Structured failure reporting | M | High |
 | 10 | 6.2 Pin package versions | S | High |
 | 11 | 7.1 Health-check endpoint | M | Medium |
