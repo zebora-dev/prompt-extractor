@@ -1,6 +1,22 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# ── Chrome profile restore ────────────────────────────────────────────────────
+# If CHROME_PROFILE_INDEX is set, download the matching pre-logged-in profile
+# snapshot from Supabase Storage before starting the worker.
+# Clones set this via FLY_CLONE_LABEL index; originals set it statically in
+# fly-uk.yaml / fly-us.yaml.
+if [[ -n "${CHROME_PROFILE_INDEX:-}" ]]; then
+  PROFILE_DEST="${CHATGPT_CHROME_USER_DATA_DIR:-/tmp/chrome-profile}"
+  echo "[entrypoint] Restoring Chrome profile index ${CHROME_PROFILE_INDEX} to ${PROFILE_DEST} …"
+  python -m automated_extraction.profile_manager restore \
+    --index "${CHROME_PROFILE_INDEX}" \
+    --dest  "${PROFILE_DEST}" \
+    && echo "[entrypoint] Profile restore complete." \
+    || echo "[entrypoint] WARNING: profile restore failed — starting with empty profile."
+fi
+
+# ── Display / VNC ─────────────────────────────────────────────────────────────
 if [[ "${PROMPT_EXTRACTOR_VNC:-false}" == "true" ]]; then
   Xvfb "${DISPLAY}" -screen 0 "${VNC_SCREEN:-1920x1080x24}" -ac +extension GLX +render -noreset &
   fluxbox >/tmp/fluxbox.log 2>&1 &

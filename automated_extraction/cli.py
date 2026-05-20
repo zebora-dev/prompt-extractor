@@ -45,6 +45,9 @@ def main(argv: list[str] | None = None) -> int:
     auto_login = auto_login_override if auto_login_override is not None else settings.auto_login
     login_email = args.login_email or settings.login_email
 
+    if args.capture_profile is not None:
+        return _run_capture_profile(args, settings)
+
     if args.login_only:
         if is_google_provider:
             LOGGER.info(
@@ -234,7 +237,64 @@ def build_parser() -> argparse.ArgumentParser:
         help="Enable entity flyout capture after each response. Disabled by default.",
     )
     parser.add_argument("--verbose", action="store_true", help="Enable debug logging.")
+
+    # ── Profile snapshot capture ──────────────────────────────────────────────
+    parser.add_argument(
+        "--capture-profile",
+        type=int,
+        metavar="INDEX",
+        default=None,
+        help=(
+            "Open Chrome at ChatGPT, wait for manual login, then upload the profile as "
+            "profile_{INDEX}.tar.gz to Supabase Storage. Use --chrome-user-data-dir to "
+            "specify a custom profile path (defaults to CHATGPT_CHROME_USER_DATA_DIR)."
+        ),
+    )
+
     return parser
+
+
+def _run_capture_profile(args: argparse.Namespace, settings) -> int:
+    """
+    Open Chrome (always non-headless), navigate to ChatGPT, wait for the user
+    to log in manually (including any 2FA), then snapshot and upload the profile.
+    """
+    from .chatgpt_runner import ChatGPTRunner
+    from .profile_manager import upload_profile
+
+    index = args.capture_profile
+    profile_dir = args.chrome_user_data_dir or settings.chrome_user_data_dir
+
+    LOGGER.info(
+        "=== Profile Capture Mode ===\n"
+        "  Profile index : %d\n"
+        "  Profile dir   : %s\n"
+        "  Target object : profile_%d.tar.gz\n\n"
+        "Chrome will open at ChatGPT. Log in manually (complete any 2FA), then come back "
+        "here and press Enter to snapshot and upload the profile.",
+        index,
+        profile_dir,
+        index,
+    )
+
+    # Open Chrome and navigate to ChatGPT — user logs in manually.
+    with ChatGPTRunner(
+        settings.chatgpt_url,
+        headless=False,
+        chrome_user_data_dir=profile_dir,
+        login_wait_seconds=settings.login_wait_seconds,
+        response_timeout_seconds=settings.response_timeout_seconds,
+        sources_panel_pause_seconds=0,
+        auto_login=False,
+        accounts={},
+        login_email=None,
+    ):
+        input("\n✅ Once you are logged in to ChatGPT, press Enter to snapshot the profile … ")
+
+    LOGGER.info("Chrome closed. Uploading profile %d from %s …", index, profile_dir)
+    upload_profile(index, profile_dir)
+    LOGGER.info("Profile %d captured and uploaded successfully.", index)
+    return 0
 
 
 def quiet_third_party_http_logs() -> None:

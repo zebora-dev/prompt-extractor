@@ -11,6 +11,8 @@
 #     BRANDSIGHT_API_BASE_URL=... \
 #     BRANDSIGHT_SUPABASE_URL=... \
 #     BRANDSIGHT_SUPABASE_ANON_KEY=... \
+#     BRANDSIGHT_SUPABASE_SERVICE_KEY=... \
+#     CHROME_PROFILE_TOTAL_ACCOUNTS=1 \
 #     PREFECT_API_URL=https://prompt-extractor-prefect.fly.dev/api \
 #     WORKFLOW_API_KEY=... \
 #     GOOGLE_PROXY_URL=http://user-country-gb:password@gw.dataimpulse.com:823
@@ -35,6 +37,11 @@ env:
   # Geo defaults for this worker — flows can override per-run via parameters
   GOOGLE_SEARCH_COUNTRY: GB
   GOOGLE_SEARCH_LANGUAGE: en
+  # Chrome profile snapshot index for this original machine.
+  # On startup the entrypoint downloads profile_{CHROME_PROFILE_INDEX}.tar.gz
+  # from Supabase Storage so the worker starts pre-logged-in to ChatGPT.
+  # Each original machine should have a unique index matching an uploaded profile.
+  CHROME_PROFILE_INDEX: "0"
 
 processes:
   app: python -m prefect worker start --pool prompt-extraction-uk --type process --limit 1 --install-policy never

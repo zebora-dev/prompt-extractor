@@ -130,6 +130,7 @@ class FlyMachinesClient:
         app_name: str,
         source_machine_id: str,
         clone_label: str,
+        profile_index: int | None = None,
     ) -> dict[str, Any]:
         """
         Clone a machine by copying its config.
@@ -138,6 +139,10 @@ class FlyMachinesClient:
         (Fly.io volumes are single-attach and cannot be shared between machines).
         The FLY_CLONE_LABEL env var is injected so scale-down can identify
         clones vs permanent original machines.
+
+        If profile_index is provided, CHROME_PROFILE_INDEX is injected so the
+        entrypoint restores the matching pre-logged-in Chrome profile from
+        Supabase Storage on startup.
         """
         source = self.get_machine(app_name, source_machine_id)
         config: dict[str, Any] = copy.deepcopy(source.get("config", {}))
@@ -150,6 +155,10 @@ class FlyMachinesClient:
         env[_CLONE_LABEL_ENV_KEY] = clone_label
         # Point Chrome profile to ephemeral path since /data is not mounted.
         env.setdefault("CHATGPT_CHROME_USER_DATA_DIR", "/tmp/chrome-profile")
+        # Assign a profile snapshot index so the entrypoint can restore the
+        # correct pre-logged-in profile from Supabase Storage.
+        if profile_index is not None:
+            env["CHROME_PROFILE_INDEX"] = str(profile_index)
         config["env"] = env
 
         region = source.get("region") or _APP_REGION.get(app_name, "lhr")
@@ -316,10 +325,17 @@ def scale_up(
         source = (running_originals or to_start or originals)[0]
         source_id = source["id"]
         ts = int(time.time())
+        total_accounts = int(os.getenv("CHROME_PROFILE_TOTAL_ACCOUNTS", "0"))
         for i in range(needed):
             label = f"{ts}-{i}"
-            LOGGER.info("Cloning machine %s (label=%s, %d/%d)", source_id, label, i + 1, needed)
-            new_machine = client.clone_machine(app_name, source_id, label)
+            # Assign a profile index if Chrome profile snapshots are configured.
+            # Wraps round-robin if there are fewer accounts than clones.
+            profile_index = (i % total_accounts) if total_accounts > 0 else None
+            LOGGER.info(
+                "Cloning machine %s (label=%s, profile_index=%s, %d/%d)",
+                source_id, label, profile_index, i + 1, needed,
+            )
+            new_machine = client.clone_machine(app_name, source_id, label, profile_index=profile_index)
             result.clones_created.append(new_machine["id"])
 
     # ── Wait for new machines/workers to be ready ──────────────────────────
