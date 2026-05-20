@@ -238,7 +238,7 @@ def download_profile(index: int, dest_dir: str | Path) -> bool:
                     member.name = str(Path(*parts[1:]))
                 elif member.name in {"chrome-profile", "."}:
                     continue
-                tar.extract(member, dest_dir)
+                tar.extract(member, dest_dir, filter="data")
     finally:
         tmp_path.unlink(missing_ok=True)
 
