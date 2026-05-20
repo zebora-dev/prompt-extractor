@@ -314,6 +314,35 @@ class ChatGPTRunner:
             "Timed out waiting for ChatGPT prompt input. Log in in the opened browser or set CHATGPT_CHROME_USER_DATA_DIR to a logged-in profile."
         )
 
+    def get_session_info(self) -> dict[str, Any]:
+        """
+        Detect the current ChatGPT login state and signed-in account name.
+
+        Returns a dict with:
+            logged_in     (bool)  — True if the chat input is visible and a profile
+                                    button is present (i.e. we are authenticated).
+            account_name  (str)   — Display name from the sidebar profile button,
+                                    e.g. "Grant Simmonds". Empty string if not found.
+            account_label (str)   — Full aria-label, e.g. "Grant Simmonds Plus, open
+                                    profile menu". Empty string if not found.
+        """
+        driver = self.require_driver()
+        try:
+            result = driver.execute_script("""
+                const btn = document.querySelector('[data-testid="accounts-profile-button"]');
+                if (!btn) return { logged_in: false, account_name: '', account_label: '' };
+                const nameEl = btn.querySelector('.truncate');
+                return {
+                    logged_in: true,
+                    account_name: nameEl ? nameEl.textContent.trim() : '',
+                    account_label: btn.getAttribute('aria-label') || '',
+                };
+            """)
+            return result if isinstance(result, dict) else {"logged_in": False, "account_name": "", "account_label": ""}
+        except Exception as exc:
+            LOGGER.debug("Could not detect ChatGPT session info: %s", exc)
+            return {"logged_in": False, "account_name": "", "account_label": ""}
+
     def recover_chrome_error_page(self, *, context: str, max_attempts: int = 2) -> bool:
         """
         Chrome can occasionally render its own HTTP error interstitial for chatgpt.com.

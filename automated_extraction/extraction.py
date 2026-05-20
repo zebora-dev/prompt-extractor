@@ -141,6 +141,8 @@ def run_extraction_job(
         resolved_login_email or "<unset>",
     )
 
+    chrome_profile_index: str | None = os.environ.get("CHROME_PROFILE_INDEX") or None
+
     with ChatGPTRunner(
         settings.chatgpt_url,
         headless=headless if headless is not None else settings.headless,
@@ -152,6 +154,16 @@ def run_extraction_job(
         accounts=settings.accounts,
         login_email=resolved_login_email,
     ) as runner:
+        # Detect login state and signed-in account once per session.
+        session_info = runner.get_session_info()
+        LOGGER.info(
+            "ChatGPT session info. logged_in=%s account_name=%r chrome_profile_index=%s chrome_user_data_dir=%s",
+            session_info.get("logged_in"),
+            session_info.get("account_name") or "<unknown>",
+            chrome_profile_index or "<unset>",
+            resolved_chrome_user_data_dir,
+        )
+
         for index, prompt in enumerate(prompts, start=1):
             prompt_id = str(prompt.get("id") or "")
             prompt_brand_id = str(prompt.get("brand_id") or resolved_brand_id or "")
@@ -217,6 +229,9 @@ def run_extraction_job(
                     resolved_batch_id,
                     capture.sources,
                     capture.source_capture_method,
+                    session_info=session_info,
+                    chrome_profile_index=chrome_profile_index,
+                    chrome_user_data_dir=resolved_chrome_user_data_dir,
                 )
                 LOGGER.info(
                     "[%s/%s] Core capture summary for prompt %s: response_length=%s markdown_length=%s markdown_method=%s raw_html_length=%s llm_model=%s source_count=%s source_method=%s",
@@ -953,6 +968,9 @@ def build_prompt_output(
     product_capture_method: str = "none",
     entities: list[dict[str, Any]] | None = None,
     entity_capture_method: str = "none",
+    session_info: dict[str, Any] | None = None,
+    chrome_profile_index: str | None = None,
+    chrome_user_data_dir: str | None = None,
 ) -> dict[str, Any]:
     now = datetime.now(UTC).isoformat()
     return {
@@ -1004,6 +1022,12 @@ def build_prompt_output(
                     "entity_count": len(entities or []),
                     "capture_method": entity_capture_method,
                 },
+                # Session / profile metadata
+                "logged_in": (session_info or {}).get("logged_in", False),
+                "chatgpt_account": (session_info or {}).get("account_name") or None,
+                "chatgpt_account_label": (session_info or {}).get("account_label") or None,
+                "chrome_profile_index": chrome_profile_index,
+                "chrome_user_data_dir": chrome_user_data_dir,
             },
             "site_used": "OpenAI",
             "timestamp": now,
