@@ -5,6 +5,10 @@
 # UK-tagged deployments (e.g. google-ai-mode-extraction-batch-uk) are
 # routed here rather than to the US worker.
 #
+# Architecture: 9 dedicated machines, each permanently assigned one ChatGPT
+# account.  The Chrome profile lives on a local Fly volume at /data/chrome-profile
+# — never uploaded or downloaded between runs.  Login once per machine via VNC.
+#
 # Deploy:   fly deploy -a prompt-extractor-uk -c fly-uk.yaml
 # Secrets (run once, not stored in this file):
 #   fly secrets set -a prompt-extractor-uk \
@@ -12,10 +16,14 @@
 #     BRANDSIGHT_SUPABASE_URL=... \
 #     BRANDSIGHT_SUPABASE_ANON_KEY=... \
 #     BRANDSIGHT_SUPABASE_SERVICE_KEY=... \
-#     CHROME_PROFILE_TOTAL_ACCOUNTS=1 \
 #     PREFECT_API_URL=https://prompt-extractor-prefect.fly.dev/api \
 #     WORKFLOW_API_KEY=... \
 #     GOOGLE_PROXY_URL=http://user-country-gb:password@gw.dataimpulse.com:823
+#
+# Per-machine env vars (set after creating each machine — NOT in this file):
+#   fly machine update <machine-id> -a prompt-extractor-uk \
+#     --env CHROME_PROFILE_INDEX=0 \
+#     --env CHATGPT_LOGIN_EMAIL=account@example.com
 
 app: prompt-extractor-uk
 primary_region: lhr
@@ -37,11 +45,13 @@ env:
   # Geo defaults for this worker — flows can override per-run via parameters
   GOOGLE_SEARCH_COUNTRY: GB
   GOOGLE_SEARCH_LANGUAGE: en
-  # Chrome profile snapshot index for this original machine.
-  # On startup the entrypoint downloads profile_{CHROME_PROFILE_INDEX}.tar.gz
-  # from Supabase Storage so the worker starts pre-logged-in to ChatGPT.
-  # Each original machine should have a unique index matching an uploaded profile.
-  CHROME_PROFILE_INDEX: "0"
+  # Keep a single Chrome instance alive between ChatGPT extraction runs so the
+  # session stays fresh without any profile upload/download between runs.
+  # Google extraction runners are unaffected — they always use fresh Chrome.
+  CHATGPT_PERSISTENT_CHROME: "true"
+  # CHROME_PROFILE_INDEX and CHATGPT_LOGIN_EMAIL are intentionally omitted here.
+  # Each machine has its own account set via `fly machine update --env`.
+  # See the per-machine env vars comment at the top of this file.
 
 processes:
   app: python -m prefect worker start --pool prompt-extraction-uk --type process --limit 1 --install-policy never
@@ -49,7 +59,9 @@ processes:
 mounts:
   - source: prompt_extractor_data_uk
     destination: /data
-
+    # NOTE: Each machine is attached to its own named volume at creation time.
+    # This 'source' is the default for new fly deploy creates (unused for
+    # existing machines that already have their per-profile volumes attached).
     processes:
       - app
 
@@ -58,7 +70,7 @@ http_service:
   force_https: false
   auto_stop_machines: false
   auto_start_machines: true
-  min_machines_running: 4
+  min_machines_running: 0
   sticky_sessions: true
 
   processes:

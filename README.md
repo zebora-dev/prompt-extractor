@@ -18,6 +18,7 @@ Headless browser automation that runs brand prompts through AI systems (ChatGPT,
 - [CLI Reference](#cli-reference)
 - [Prefect Orchestration](#prefect-orchestration)
 - [Fly.io Deployment](#flyio-deployment)
+- [Multi-Region & Proxy](#multi-region--proxy)
 - [Development](#development)
 
 ---
@@ -41,38 +42,48 @@ Each extraction run:
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│  Prefect Worker (Fly.io machine)                        │
-│                                                         │
-│  ┌────────────────────────────────────────────────────┐ │
-│  │  Flow: prompt-extraction-batch                     │ │
-│  │    └─ Task: extract-chatgpt-batch                  │ │
-│  │         └─ ChatGPTRunner (Selenium + undetected)   │ │
-│  │              └─ Clipboard capture / DOM fallback   │ │
-│  └────────────────────────────────────────────────────┘ │
-│                                                         │
-│  ┌────────────────────────────────────────────────────┐ │
-│  │  Flow: google-ai-mode-extraction                   │ │
-│  │    └─ Task: extract-google-ai-mode-batch           │ │
-│  │         └─ GoogleAIModeRunner (udm=50&arv=1)       │ │
-│  │              ├─ 3-way clipboard interception       │ │
-│  │              ├─ Source classification              │ │
-│  │              └─ PAA capture → suggestions table    │ │
-│  └────────────────────────────────────────────────────┘ │
-│                                                         │
-│  ┌────────────────────────────────────────────────────┐ │
-│  │  Flow: google-ai-overview-extraction               │ │
-│  │    └─ Task: extract-google-ai-overview-batch       │ │
-│  │         └─ GoogleAIOverviewRunner (organic search) │ │
-│  │              ├─ Show more expansion                │ │
-│  │              ├─ Clipboard capture                  │ │
-│  │              └─ PAA capture → suggestions table    │ │
-│  └────────────────────────────────────────────────────┘ │
-└─────────────────────────────────────────────────────────┘
-         │                          │
-         ▼                          ▼
-  Supabase (prompts_outputs)   Prefect Cloud (flow state)
-  Supabase (prompts_outputs_suggestions)
+                        Prefect Cloud
+                              │
+             ┌────────────────┴────────────────┐
+             │                                  │
+   pool: prompt-extraction-us        pool: prompt-extraction-uk
+             │                                  │
+             ▼                                  ▼
+   prompt-extractor-us (iad)        prompt-extractor-uk (lhr)
+   GOOGLE_SEARCH_COUNTRY=US         GOOGLE_SEARCH_COUNTRY=GB
+             │                                  │
+   ┌─────────┴──────────────────────────────────┴─────────┐
+   │  Prefect Worker (Fly.io machine)                      │
+   │                                                       │
+   │  ┌───────────────────────────────────────────────┐   │
+   │  │  Flow: prompt-extraction-batch                │   │
+   │  │    └─ Task: extract-chatgpt-batch             │   │
+   │  │         └─ ChatGPTRunner (undetected Chrome)  │   │
+   │  │              └─ Clipboard / DOM fallback      │   │
+   │  └───────────────────────────────────────────────┘   │
+   │                                                       │
+   │  ┌───────────────────────────────────────────────┐   │
+   │  │  Flow: google-ai-mode-extraction              │   │
+   │  │    └─ Task: extract-google-ai-mode-batch      │   │
+   │  │         └─ GoogleAIModeRunner (udm=50&arv=1)  │   │
+   │  │              ├─ Stealth + proxy layer         │   │
+   │  │              ├─ Source classification         │   │
+   │  │              └─ PAA capture                   │   │
+   │  └───────────────────────────────────────────────┘   │
+   │                                                       │
+   │  ┌───────────────────────────────────────────────┐   │
+   │  │  Flow: google-ai-overview-extraction          │   │
+   │  │    └─ Task: extract-google-ai-overview-batch  │   │
+   │  │         └─ GoogleAIOverviewRunner (organic)   │   │
+   │  │              ├─ Stealth + proxy layer         │   │
+   │  │              ├─ Show more expansion           │   │
+   │  │              └─ PAA capture                   │   │
+   │  └───────────────────────────────────────────────┘   │
+   └───────────────────────────────────────────────────────┘
+            │                           │
+            ▼                           ▼
+   Supabase (prompts_outputs)    Prefect Cloud (flow state)
+   Supabase (prompts_outputs_suggestions)
 ```
 
 ### Key modules
@@ -83,6 +94,7 @@ Each extraction run:
 | `config.py` | Settings loaded from env vars / `.env` file |
 | `extraction.py` | Job functions for all three providers |
 | `chatgpt_runner.py` | Selenium runner for `chatgpt.com` |
+| `google_chrome_factory.py` | Shared Chrome driver factory — stealth patches, user-agent rotation, proxy |
 | `google_ai_mode_runner.py` | Selenium runner for Google AI Mode (`udm=50`) |
 | `google_ai_overview_runner.py` | Selenium runner for organic AI Overview results |
 | `google_suggestions_runner.py` | PAA capture (shared across both Google runners) |
@@ -90,7 +102,7 @@ Each extraction run:
 | `supabase_prompt_outputs.py` | Typed row serialisation / deserialisation |
 | `workflows/flows.py` | Prefect flow definitions |
 | `workflows/tasks.py` | Prefect task wrappers |
-| `workflows/register_deployments.py` | Deploy / serve flows against a work pool |
+| `workflows/register_deployments.py` | Deploy / serve flows against work pools (multi-region) |
 
 ---
 
@@ -159,6 +171,7 @@ python -m automated_extraction --batch-id <batch-uuid> --limit 5
 | `GOOGLE_SEARCH_LANGUAGE` | `en` | Language code, e.g. `en`, `fr` |
 | `GOOGLE_AI_MODE_USE_UDM_50` | `true` | Add `udm=50` to trigger AI Mode |
 | `GOOGLE_AI_MODE_USE_ARV_1` | `true` | Add `arv=1` to enable advanced AI mode |
+| `GOOGLE_PROXY_URL` | — | Residential proxy URL (`http://user:pass@host:port`). Read when `use_proxy=True` is passed to a flow. Set as a Fly secret — do not commit. |
 
 ### Scoring workflow
 
@@ -336,15 +349,19 @@ python -m automated_extraction [OPTIONS]
 
 ## Prefect Orchestration
 
-Four flows are registered:
+Seven flows are registered, each deployed to both the US and UK work pools (14 deployments total). UK deployments have a `-uk` name suffix.
 
 | Flow | Description |
 |---|---|
-| `prompt-extraction-batch` | Sequentially chunks a full batch through ChatGPT with a delay between runs |
+| `prompt-extraction-batch` | Sequentially chunks a full batch through ChatGPT |
 | `prompt-extraction` | Single-run ChatGPT extraction |
+| `google-ai-mode-extraction-batch` | Sequentially chunks a batch through Google AI Mode |
 | `google-ai-mode-extraction` | Single-run Google AI Mode extraction |
+| `google-ai-overview-extraction-batch` | Sequentially chunks a batch through Google AI Overview |
 | `google-ai-overview-extraction` | Single-run Google AI Overview extraction |
 | `prompt-output-processing` | Re-process existing outputs (markdown conversion, scoring) |
+
+See [docs/PREFECT.md](docs/PREFECT.md) for full parameter reference and trigger examples.
 
 ### Local development
 
@@ -358,55 +375,83 @@ make prefect-serve
 # Open http://localhost:4200 and trigger a flow run
 ```
 
-### Deploy to a process worker
+### Deploy to workers (multi-region)
 
 ```bash
-# Create the work pool
-make prefect-pool
+# Create work pools (one-time)
+make prefect-pool     # prompt-extraction-us
+make prefect-pool-uk  # prompt-extraction-uk
 
-# Register deployments
-PREFECT_WORKING_DIR=/app make prefect-deploy
+# Register US deployments
+PREFECT_API_URL=https://prompt-extractor-prefect.fly.dev/api \
+PREFECT_WORK_POOL=prompt-extraction-us \
+PREFECT_WORKING_DIR=/app \
+  make prefect-deploy-us
 
-# Start the worker
-make prefect-worker
+# Register UK deployments
+PREFECT_API_URL=https://prompt-extractor-prefect.fly.dev/api \
+PREFECT_WORK_POOL=prompt-extraction-uk \
+PREFECT_WORKING_DIR=/app \
+  make prefect-deploy-uk
 ```
 
 ---
 
 ## Fly.io Deployment
 
-The app runs as a Prefect process worker on a Fly.io machine with a persistent volume (`/data`) for Chrome profiles, and a VNC server for browser inspection.
+Two regional workers run as Prefect process workers on Fly.io machines with persistent volumes (`/data`) for Chrome profiles and VNC servers for browser inspection.
 
-### Initial deploy
+| App | Config | Region | Work pool |
+|---|---|---|---|
+| `prompt-extractor-us` | `fly.yaml` | `iad` (Virginia) | `prompt-extraction-us` |
+| `prompt-extractor-uk` | `fly-uk.yaml` | `lhr` (London) | `prompt-extraction-uk` |
+
+### Deploy workers
 
 ```bash
-fly auth login
-fly deploy
+make deploy-worker-us   # fly deploy -a prompt-extractor-us -c fly.yaml
+make deploy-worker-uk   # fly deploy -a prompt-extractor-uk -c fly-uk.yaml
 ```
 
-### Set secrets
+### Set secrets (per worker)
 
 ```bash
-fly secrets set \
+fly secrets set -a prompt-extractor-us \
   BRANDSIGHT_SUPABASE_ANON_KEY="..." \
-  PREFECT_API_URL="https://api.prefect.cloud/api/accounts/<account-id>/workspaces/<workspace-id>" \
-  PREFECT_API_KEY="..."
+  PREFECT_API_URL="https://prompt-extractor-prefect.fly.dev/api" \
+  WORKFLOW_API_KEY="..." \
+  GOOGLE_PROXY_URL="http://login__cr.us:PASSWORD@gw.dataimpulse.com:823"
+
+fly secrets set -a prompt-extractor-uk \
+  BRANDSIGHT_SUPABASE_ANON_KEY="..." \
+  PREFECT_API_URL="https://prompt-extractor-prefect.fly.dev/api" \
+  WORKFLOW_API_KEY="..." \
+  GOOGLE_PROXY_URL="http://login__cr.gb:PASSWORD@gw.dataimpulse.com:823"
 ```
 
-### Register deployments from local machine
-
-```bash
-PREFECT_API_URL="..." PREFECT_WORKING_DIR=/app \
-  python -m automated_extraction.workflows.register_deployments --deploy-local
-```
+`GOOGLE_PROXY_URL` is only used when a flow run sets `use_proxy=True`. Set it as a secret rather than in the yaml file so credentials are never committed.
 
 ### Inspect browser via VNC
 
-The Fly machine runs a VNC server at port 6080 (noVNC web client). Access via:
+Both machines expose a noVNC web client on port 6080:
 
 ```bash
-fly proxy 6080  # then open http://localhost:6080 in your browser
+fly proxy 6080 -a prompt-extractor-us  # US worker
+fly proxy 6080 -a prompt-extractor-uk  # UK worker
+# then open http://localhost:6080
 ```
+
+---
+
+## Multi-Region & Proxy
+
+See [docs/MULTI_REGION.md](docs/MULTI_REGION.md) for the full guide covering:
+
+- How Prefect routes work to the correct regional worker via work pools
+- Google bot-detection evasion techniques (undetected-chromedriver, selenium-stealth, CDP override, user-agent rotation, session warmup)
+- Residential proxy setup (`use_proxy` flag, `GOOGLE_PROXY_URL`, consecutive failure guard)
+- Proxy provider recommendations (DataImpulse, Decodo)
+- How to add a new region
 
 ---
 

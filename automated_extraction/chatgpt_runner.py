@@ -135,6 +135,30 @@ class ChatGPTRunner:
         self.close()
 
     def start(self) -> None:
+        # ── Persistent Chrome mode ─────────────────────────────────────────────
+        # When CHATGPT_PERSISTENT_CHROME=true the entrypoint has already started
+        # a Chrome instance with --remote-debugging-port=9222.  We connect to it
+        # via CDP rather than launching a new browser.  This keeps the ChatGPT
+        # session alive between runs without needing profile upload/download.
+        #
+        # Google extraction runners are unaffected — they always use uc.Chrome().
+        if os.environ.get("CHATGPT_PERSISTENT_CHROME", "false").lower() == "true":
+            self.driver = self._connect_to_persistent_chrome()
+            self._persistent_chrome = True
+            if not self.headless:
+                vnc_screen = os.getenv("VNC_SCREEN", "1280x720x24")
+                w, h = vnc_screen.split("x")[:2]
+                try:
+                    self.driver.set_window_size(int(w), int(h))
+                except Exception:
+                    pass
+            self.driver.get(self.chatgpt_url)
+            self.recover_chrome_error_page(context="initial_chatgpt_load")
+            self.wait_for_login()
+            return
+
+        # ── Normal mode: launch a fresh Chrome per run ─────────────────────────
+        self._persistent_chrome = False
         options = Options()
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-dev-shm-usage")
@@ -165,6 +189,51 @@ class ChatGPTRunner:
         if self.auto_login:
             self.run_automated_login()
         self.wait_for_login()
+
+    def _connect_to_persistent_chrome(self, port: int = 9222, retries: int = 5) -> Chrome:
+        """
+        Connect to the already-running Chrome instance started by entrypoint.sh.
+        Retries a few times in case Chrome is still warming up.
+        """
+        import time as _time
+
+        last_exc: Exception | None = None
+        for attempt in range(1, retries + 1):
+            try:
+                options = Options()
+                options.debugger_address = f"localhost:{port}"
+                # Grant clipboard access to chatgpt.com in the existing profile
+                options.add_experimental_option(
+                    "prefs",
+                    {
+                        "profile.managed_default_content_settings.clipboard": 1,
+                        "profile.content_settings.exceptions.clipboard": {
+                            "https://chatgpt.com:443,*": {"setting": 1},
+                        },
+                    },
+                )
+                driver = webdriver.Chrome(options=options)
+                LOGGER.info(
+                    "Connected to persistent Chrome on port %s (attempt %s/%s).",
+                    port,
+                    attempt,
+                    retries,
+                )
+                return driver
+            except Exception as exc:
+                last_exc = exc
+                LOGGER.warning(
+                    "Could not connect to persistent Chrome on port %s (attempt %s/%s): %s — retrying …",
+                    port,
+                    attempt,
+                    retries,
+                    exc,
+                )
+                _time.sleep(3)
+
+        raise RuntimeError(
+            f"Failed to connect to persistent Chrome on port {port} after {retries} attempts: {last_exc}"
+        )
 
     def run_automated_login(self) -> None:
         from .chatgpt_auth import AutomatedLoginError, perform_automated_login
@@ -241,7 +310,16 @@ class ChatGPTRunner:
 
     def close(self) -> None:
         if self.driver:
-            self.driver.quit()
+            if getattr(self, "_persistent_chrome", False):
+                # In persistent mode we leave Chrome running — just drop the
+                # CDP connection.  The browser stays alive for the next run.
+                LOGGER.debug("Persistent Chrome mode: leaving Chrome open, dropping CDP connection.")
+                try:
+                    self.driver.close()   # closes the active tab only
+                except Exception:
+                    pass
+            else:
+                self.driver.quit()
             self.driver = None
 
     def run_prompt(self, prompt_text: str) -> ChatGPTCapture:
@@ -316,32 +394,66 @@ class ChatGPTRunner:
 
     def get_session_info(self) -> dict[str, Any]:
         """
-        Detect the current ChatGPT login state and signed-in account name.
+        Detect the current ChatGPT login state.
+
+        Two-signal check:
+          1. If [data-testid="login-button"] is present → definitely NOT logged in
+             (ChatGPT shows this button to unauthenticated / guest users).
+          2. If [data-testid="accounts-profile-button"] is present → logged in.
 
         Returns a dict with:
-            logged_in     (bool)  — True if the chat input is visible and a profile
-                                    button is present (i.e. we are authenticated).
-            account_name  (str)   — Display name from the sidebar profile button,
-                                    e.g. "Grant Simmonds". Empty string if not found.
-            account_label (str)   — Full aria-label, e.g. "Grant Simmonds Plus, open
-                                    profile menu". Empty string if not found.
+            logged_in     (bool)  — True only if the profile button is present AND
+                                    the login button is absent.
+            account_name  (str)   — Always empty string (detection deferred to a
+                                    future implementation).
+            account_label (str)   — The aria-label of the profile button, or empty.
+            login_button_present (bool) — True if the "Log in" button was detected.
         """
         driver = self.require_driver()
         try:
-            result = driver.execute_script("""
-                const btn = document.querySelector('[data-testid="accounts-profile-button"]');
-                if (!btn) return { logged_in: false, account_name: '', account_label: '' };
-                const nameEl = btn.querySelector('.truncate');
+            # Signal 1: login button present → guest / logged-out session
+            login_button_present = False
+            try:
+                driver.find_element(By.CSS_SELECTOR, '[data-testid="login-button"]')
+                login_button_present = True
+                LOGGER.warning(
+                    "ChatGPT login button detected — session is NOT authenticated (guest mode)."
+                )
+            except NoSuchElementException:
+                pass
+
+            if login_button_present:
                 return {
-                    logged_in: true,
-                    account_name: nameEl ? nameEl.textContent.trim() : '',
-                    account_label: btn.getAttribute('aria-label') || '',
-                };
-            """)
-            return result if isinstance(result, dict) else {"logged_in": False, "account_name": "", "account_label": ""}
+                    "logged_in": False,
+                    "account_name": "",
+                    "account_label": "",
+                    "login_button_present": True,
+                }
+
+            # Signal 2: profile button present → authenticated
+            btn = driver.find_element(By.CSS_SELECTOR, '[data-testid="accounts-profile-button"]')
+            aria_label = btn.get_attribute("aria-label") or ""
+            return {
+                "logged_in": True,
+                "account_name": "",
+                "account_label": aria_label,
+                "login_button_present": False,
+            }
+        except NoSuchElementException:
+            return {
+                "logged_in": False,
+                "account_name": "",
+                "account_label": "",
+                "login_button_present": False,
+            }
         except Exception as exc:
             LOGGER.debug("Could not detect ChatGPT session info: %s", exc)
-            return {"logged_in": False, "account_name": "", "account_label": ""}
+            return {
+                "logged_in": False,
+                "account_name": "",
+                "account_label": "",
+                "login_button_present": False,
+            }
 
     def recover_chrome_error_page(self, *, context: str, max_attempts: int = 2) -> bool:
         """
@@ -706,6 +818,7 @@ class ChatGPTRunner:
                                 copied[:200],
                             )
                             break
+                        self._kill_xclip_orphans()
                         return visible_text, copied, f"copy_button_markdown_attempt_{attempt}"
                     time.sleep(0.2)
                 LOGGER.info("Markdown copy attempt did not produce a valid clipboard payload. attempt=%s/3", attempt)
@@ -714,7 +827,30 @@ class ChatGPTRunner:
                 LOGGER.warning("Markdown copy attempt failed. attempt=%s/3 error=%s", attempt, first_line(str(exc)))
                 time.sleep(1)
 
+        self._kill_xclip_orphans()
         return visible_text, "", "copy_button_markdown_failed_after_retries"
+
+    @staticmethod
+    def _kill_xclip_orphans() -> None:
+        """Kill any lingering xclip processes left over from clipboard operations.
+
+        On Linux, pyperclip uses xclip to read/write the clipboard.  The xclip
+        process sometimes remains alive waiting for a paste, which keeps a file
+        descriptor open and — when the Prefect worker runs with ``--limit 1`` —
+        counts as a live child process and blocks the worker from picking up the
+        next flow run.
+        """
+        import platform as _platform
+        import subprocess as _sub
+
+        if _platform.system() != "Linux":
+            return
+        try:
+            result = _sub.run(["pkill", "-x", "xclip"], capture_output=True, timeout=5)
+            if result.returncode == 0:
+                LOGGER.debug("Killed lingering xclip process(es).")
+        except Exception as exc:
+            LOGGER.debug("Could not kill xclip orphans: %s", exc)
 
     def is_suspicious_copied_response(self, copied: str, visible_text: str) -> bool:
         copied_lines = [line.strip() for line in copied.splitlines() if line.strip()]

@@ -142,6 +142,8 @@ def run_extraction_job(
     )
 
     chrome_profile_index: str | None = os.environ.get("CHROME_PROFILE_INDEX") or None
+    # Email set by entrypoint.sh after acquiring a profile slot from chatgpt_profiles table.
+    chrome_profile_email: str | None = os.environ.get("CHATGPT_LOGIN_EMAIL") or None
 
     with ChatGPTRunner(
         settings.chatgpt_url,
@@ -156,8 +158,12 @@ def run_extraction_job(
     ) as runner:
         # Detect login state and signed-in account once per session.
         session_info = runner.get_session_info()
+        # Enrich with the email from the chatgpt_profiles DB (set by entrypoint).
+        # This fills chatgpt_account in output metadata without needing DOM scraping.
+        if chrome_profile_email:
+            session_info = {**session_info, "account_name": chrome_profile_email}
         LOGGER.info(
-            "ChatGPT session info. logged_in=%s account_name=%r chrome_profile_index=%s chrome_user_data_dir=%s",
+            "ChatGPT session info. logged_in=%s account_email=%r chrome_profile_index=%s chrome_user_data_dir=%s",
             session_info.get("logged_in"),
             session_info.get("account_name") or "<unknown>",
             chrome_profile_index or "<unset>",
@@ -1024,6 +1030,7 @@ def build_prompt_output(
                 },
                 # Session / profile metadata
                 "logged_in": (session_info or {}).get("logged_in", False),
+                "login_button_present": (session_info or {}).get("login_button_present", False),
                 "chatgpt_account": (session_info or {}).get("account_name") or None,
                 "chatgpt_account_label": (session_info or {}).get("account_label") or None,
                 "chrome_profile_index": chrome_profile_index,
