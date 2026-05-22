@@ -1,10 +1,13 @@
 requests>=2.32.0
 selenium>=4.23.0,<5
 undetected-chromedriver>=3.5.5
+selenium-stealth>=1.0.6
+nodriver>=0.36
 pyperclip>=1.9.0
 pyotp>=2.9.0
 python-dotenv>=1.0.1
 setuptools>=82.0.0
 prefect>=3.6.19
+importlib_metadata>=4.6.0
 httpx>=0.28.1
 supabase>=2.10.0

@@ -1,8 +1,23 @@
-# Automated ChatGPT Extraction
+# Automated Extraction
 
-Standalone automation for pulling prompts from the BrandSight API, running them in ChatGPT, capturing the answer via the ChatGPT copy button, and saving outputs back to the existing `prompt-outputs` API.
+Standalone automation for pulling prompts from the BrandSight API, running
+them through ChatGPT or Google AI (Mode / Overview), capturing the responses,
+and saving outputs back to Supabase. Scoring is triggered automatically after
+each save.
 
-This mirrors the Chrome/Firefox extension flow in `chromeApp/extension-shared/background.js`, but runs as a CLI process.
+This mirrors the Chrome/Firefox extension flow in
+`chromeApp/extension-shared/background.js`, but runs as a headless CLI process
+on a fleet of dedicated Fly.io workers.
+
+## Documentation
+
+| Doc | Contents |
+|-----|----------|
+| [docs/GPT_WORKERS.md](docs/GPT_WORKERS.md) | **ChatGPT worker fleet** — Fly.io machines, persistent Chrome, VNC login, Cloudflare handling, Slack alerts, deploy process |
+| [docs/PREFECT.md](docs/PREFECT.md) | **Prefect operations** — flows, parameters, triggering batches, troubleshooting |
+| [slack-app-manifest.json](slack-app-manifest.json) | **Slack app manifest** — upload to api.slack.com to create the BrandSight Extractor bot |
+
+---
 
 ## Setup
 

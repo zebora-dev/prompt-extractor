@@ -15,6 +15,7 @@ class ApiClient:
     prompt_outputs_table: str = "prompts_outputs"
     prompt_output_products_table: str = "prompts_outputs_products"
     prompt_output_entities_table: str = "prompts_outputs_entities"
+    prompt_output_suggestions_table: str = "prompts_outputs_suggestions"
 
     @property
     def headers(self) -> dict[str, str]:
@@ -90,6 +91,18 @@ class ApiClient:
                 time.sleep(min(60, 2**attempt))
         return []
 
+    def save_prompt_output_suggestions(
+        self, suggestions: list[dict[str, Any]], max_retries: int = 4
+    ) -> list[dict[str, Any]]:
+        for attempt in range(max_retries + 1):
+            try:
+                return self.supabase.save_prompt_output_suggestions(suggestions)
+            except Exception:
+                if attempt >= max_retries:
+                    raise
+                time.sleep(min(60, 2**attempt))
+        return []
+
     def save_prompt_output_entities(self, entities: list[dict[str, Any]], max_retries: int = 4) -> list[dict[str, Any]]:
         for attempt in range(max_retries + 1):
             try:
@@ -123,6 +136,34 @@ class ApiClient:
     def update_prompt_output(self, output: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any] | None:
         return self.supabase.update_prompt_output(output, patch)
 
+    # ── Prompt claiming ────────────────────────────────────────────────────────
+
+    def try_claim_prompt(
+        self,
+        prompt_id: str,
+        batch_id: str,
+        brand_id: str,
+        llm_model: str,
+        worker_id: str,
+        ttl_minutes: int = 20,
+    ) -> bool:
+        """Atomically claim a prompt. Returns True if this worker holds the claim."""
+        return self.supabase.try_claim_prompt(prompt_id, batch_id, brand_id, llm_model, worker_id, ttl_minutes)
+
+    def release_claim(
+        self,
+        prompt_id: str,
+        batch_id: str,
+        llm_model: str,
+        error_message: str | None = None,
+    ) -> None:
+        """Mark a claim failed so the prompt is available for retry."""
+        self.supabase.release_claim(prompt_id, batch_id, llm_model, error_message=error_message)
+
+    def complete_claim(self, prompt_id: str, batch_id: str, llm_model: str) -> None:
+        """Delete a claim after successful processing."""
+        self.supabase.complete_claim(prompt_id, batch_id, llm_model)
+
     @property
     def supabase(self) -> SupabasePromptOutputRepository:
         if not self.supabase_url:
@@ -137,6 +178,7 @@ class ApiClient:
                     table_name=self.prompt_outputs_table,
                     product_table_name=self.prompt_output_products_table,
                     entity_table_name=self.prompt_output_entities_table,
+                    suggestion_table_name=self.prompt_output_suggestions_table,
                 ),
             )
         return getattr(self, "_supabase")

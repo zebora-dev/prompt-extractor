@@ -18,6 +18,8 @@ env:
   PREFECT_WORK_POOL: prompt-extraction-us
   PROMPT_EXTRACTOR_VNC: "true"
   VNC_SCREEN: 1280x720x24
+  # Capture INFO-level logs from all automated_extraction submodules in Prefect UI
+  PREFECT_LOGGING_EXTRA_LOGGERS: automated_extraction
 
 processes:
   app: python -m prefect worker start --pool prompt-extraction-us --type process --limit 1 --install-policy never

@@ -6,15 +6,17 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
-from .chatgpt_auth import AccountsDeserializer
+from .chatgpt_auth.accounts import AccountsDeserializer
 
 DEFAULT_API_BASE_URL = "https://hmwgplzdzffivawkflci.supabase.co/functions/v1/api"
 DEFAULT_PROMPT_OUTPUTS_TABLE = "prompts_outputs"
 DEFAULT_PROMPT_OUTPUT_PRODUCTS_TABLE = "prompts_outputs_products"
 DEFAULT_PROMPT_OUTPUT_ENTITIES_TABLE = "prompts_outputs_entities"
+DEFAULT_PROMPT_OUTPUT_SUGGESTIONS_TABLE = "prompts_outputs_suggestions"
 DEFAULT_SCORE_WORKFLOW_URL = "https://workflow.zebora.io/api/workflows/score-single-output"
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CHROME_USER_DATA_DIR = PROJECT_ROOT / ".chrome-profile"
+DEFAULT_GOOGLE_CHROME_USER_DATA_DIR = PROJECT_ROOT / ".google-chrome-profile"
 DEFAULT_LOGGED_IN_ACCOUNTS_DIR = PROJECT_ROOT / ".chrome-accounts"
 
 
@@ -26,8 +28,15 @@ class Settings:
     prompt_outputs_table: str
     prompt_output_products_table: str
     prompt_output_entities_table: str
+    prompt_output_suggestions_table: str
     chatgpt_url: str
+    google_url: str
     chrome_user_data_dir: str | None
+    google_chrome_user_data_dir: str | None
+    google_country: str | None
+    google_language: str
+    google_use_ai_mode_param: bool
+    google_use_advanced_ai_param: bool
     logged_in_accounts_dir: str
     headless: bool
     login_wait_seconds: int
@@ -89,8 +98,26 @@ class Settings:
                 "BRANDSIGHT_PROMPT_OUTPUT_ENTITIES_TABLE", DEFAULT_PROMPT_OUTPUT_ENTITIES_TABLE
             ).strip()
             or DEFAULT_PROMPT_OUTPUT_ENTITIES_TABLE,
+            prompt_output_suggestions_table=os.getenv(
+                "BRANDSIGHT_PROMPT_OUTPUT_SUGGESTIONS_TABLE", DEFAULT_PROMPT_OUTPUT_SUGGESTIONS_TABLE
+            ).strip()
+            or DEFAULT_PROMPT_OUTPUT_SUGGESTIONS_TABLE,
             chatgpt_url=os.getenv("CHATGPT_URL", "https://chatgpt.com").strip(),
+            google_url=os.getenv("GOOGLE_SEARCH_URL", "https://www.google.com/search").strip(),
             chrome_user_data_dir=os.getenv("CHATGPT_CHROME_USER_DATA_DIR") or str(DEFAULT_CHROME_USER_DATA_DIR),
+            google_chrome_user_data_dir=os.getenv("GOOGLE_CHROME_USER_DATA_DIR")
+            or os.getenv("CHATGPT_CHROME_USER_DATA_DIR")
+            or str(DEFAULT_GOOGLE_CHROME_USER_DATA_DIR),
+            google_country=(os.getenv("GOOGLE_SEARCH_COUNTRY") or "").strip() or None,
+            google_language=(os.getenv("GOOGLE_SEARCH_LANGUAGE") or "en").strip() or "en",
+            google_use_ai_mode_param=parse_bool(
+                os.getenv("GOOGLE_AI_MODE_USE_UDM_50") or os.getenv("GOOGLE_AI_OVERVIEW_USE_UDM_50"),
+                default=True,
+            ),
+            google_use_advanced_ai_param=parse_bool(
+                os.getenv("GOOGLE_AI_MODE_USE_ARV_1") or os.getenv("GOOGLE_AI_OVERVIEW_USE_ARV_1"),
+                default=True,
+            ),
             logged_in_accounts_dir=os.getenv("CHATGPT_LOGGED_IN_ACCOUNTS_DIR") or str(DEFAULT_LOGGED_IN_ACCOUNTS_DIR),
             headless=parse_bool(os.getenv("CHATGPT_HEADLESS"), default=False),
             login_wait_seconds=parse_int(os.getenv("CHATGPT_LOGIN_WAIT_SECONDS"), default=180),
