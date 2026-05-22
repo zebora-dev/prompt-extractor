@@ -23,6 +23,7 @@ Scaling
 Adding workers: increase the work pool concurrency limit and pass a higher
 worker_count to this flow.  No other changes needed.
 """
+
 from __future__ import annotations
 
 import math
@@ -67,6 +68,7 @@ _REGION_SUFFIXES: dict[str, str] = {
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
 
 def _make_api_client() -> ApiClient:
     settings = Settings.from_env(require_api_key=True, require_auto_login_credentials=False)
@@ -117,8 +119,7 @@ def _submit_worker_run(
         )
         if resp.status_code == 404:
             raise RuntimeError(
-                f"Deployment not found: {deployment_full_name!r}. "
-                "Make sure it is registered for this region."
+                f"Deployment not found: {deployment_full_name!r}. Make sure it is registered for this region."
             )
         resp.raise_for_status()
         deployment_id = resp.json()["id"]
@@ -135,6 +136,7 @@ def _submit_worker_run(
 # ---------------------------------------------------------------------------
 # Dispatcher flow
 # ---------------------------------------------------------------------------
+
 
 @flow(
     name="dispatch-extraction",
@@ -204,24 +206,16 @@ def dispatch_extraction_flow(
     if not extraction_type:
         raise ValueError("extraction_type is required")
     if extraction_type not in _EXTRACTION_TYPES:
-        raise ValueError(
-            f"Unknown extraction_type {extraction_type!r}. "
-            f"Choose from: {list(_EXTRACTION_TYPES)}"
-        )
+        raise ValueError(f"Unknown extraction_type {extraction_type!r}. Choose from: {list(_EXTRACTION_TYPES)}")
     if region not in _REGION_SUFFIXES:
-        raise ValueError(
-            f"Unknown region {region!r}. Choose from: {list(_REGION_SUFFIXES)}"
-        )
+        raise ValueError(f"Unknown region {region!r}. Choose from: {list(_REGION_SUFFIXES)}")
     if worker_count < 1:
         raise ValueError("worker_count must be >= 1")
 
     type_meta = _EXTRACTION_TYPES[extraction_type]
     region_suffix = _REGION_SUFFIXES[region]
     model_filter = type_meta["model_filter"]
-    deployment_full_name = (
-        f"{type_meta['flow_name']}"
-        f"/{type_meta['deployment_base']}{region_suffix}"
-    )
+    deployment_full_name = f"{type_meta['flow_name']}/{type_meta['deployment_base']}{region_suffix}"
     prefect_api_url = os.getenv("PREFECT_API_URL", "http://localhost:4200/api")
 
     # -- Count remaining prompts -----------------------------------------------
@@ -235,7 +229,8 @@ def dispatch_extraction_flow(
     if remaining_count == 0:
         flow_logger.info(
             "No remaining prompts for batch %s (extraction_type=%s). Nothing to dispatch.",
-            batch_id, extraction_type,
+            batch_id,
+            extraction_type,
         )
         return {
             "status": "nothing_to_dispatch",
@@ -253,8 +248,14 @@ def dispatch_extraction_flow(
     flow_logger.info(
         "Dispatching %s worker(s) for batch %s. extraction_type=%s region=%s "
         "remaining=%s chunk_size=%s limit_per_run=%s deployment=%s",
-        effective_workers, batch_id, extraction_type, region,
-        remaining_count, chunk_size, limit, deployment_full_name,
+        effective_workers,
+        batch_id,
+        extraction_type,
+        region,
+        remaining_count,
+        chunk_size,
+        limit,
+        deployment_full_name,
     )
 
     # -- Auto-scale Fly.io machines to match effective_workers -----------------
@@ -262,11 +263,15 @@ def dispatch_extraction_flow(
     if auto_scale:
         try:
             from automated_extraction.fly_scaler import app_name_for_region, scale_up
+
             fly_app = app_name_for_region(region)
             work_pool_name = os.getenv("PREFECT_WORK_POOL", f"prompt-extraction-{region}")
             flow_logger.info(
                 "auto_scale=True: scaling %s up to %d machines (pool=%s, wait=%ds)",
-                fly_app, effective_workers, work_pool_name, scale_wait_seconds,
+                fly_app,
+                effective_workers,
+                work_pool_name,
+                scale_wait_seconds,
             )
             result_obj = scale_up(
                 app_name=fly_app,
@@ -279,7 +284,8 @@ def dispatch_extraction_flow(
             flow_logger.info("Scale-up result: %s", scale_result)
         except Exception as exc:
             flow_logger.warning(
-                "auto_scale failed (continuing without scaling): %s", exc,
+                "auto_scale failed (continuing without scaling): %s",
+                exc,
             )
 
     # -- Build per-worker parameters -------------------------------------------
@@ -290,20 +296,24 @@ def dispatch_extraction_flow(
     }
 
     if extraction_type in ("google-ai-overview", "google-ai-mode"):
-        base_params.update({
-            "model_filter": model_filter,
-            "use_proxy": use_proxy,
-            "country": country,
-            "language": language,
-        })
+        base_params.update(
+            {
+                "model_filter": model_filter,
+                "use_proxy": use_proxy,
+                "country": country,
+                "language": language,
+            }
+        )
     else:  # chatgpt
-        base_params.update({
-            "model_filter": model_filter,
-            "auto_login": auto_login,
-            "login_email": login_email,
-            "capture_products": capture_products,
-            "capture_entities": capture_entities,
-        })
+        base_params.update(
+            {
+                "model_filter": model_filter,
+                "auto_login": auto_login,
+                "login_email": login_email,
+                "capture_products": capture_products,
+                "capture_entities": capture_entities,
+            }
+        )
 
     # -- Submit one flow run per worker ----------------------------------------
     submitted: list[dict[str, Any]] = []
@@ -319,26 +329,37 @@ def dispatch_extraction_flow(
             run_id = _submit_worker_run(prefect_api_url, deployment_full_name, worker_params)
             flow_logger.info(
                 "Submitted worker %s/%s — flow_run_id=%s skip=%s max_prompts=%s",
-                i + 1, effective_workers, run_id, skip, chunk_size,
+                i + 1,
+                effective_workers,
+                run_id,
+                skip,
+                chunk_size,
             )
-            submitted.append({
-                "worker_index": i + 1,
-                "flow_run_id": run_id,
-                "skip": skip,
-                "max_prompts": chunk_size,
-            })
+            submitted.append(
+                {
+                    "worker_index": i + 1,
+                    "flow_run_id": run_id,
+                    "skip": skip,
+                    "max_prompts": chunk_size,
+                }
+            )
         except Exception as exc:
             flow_logger.error(
                 "Failed to submit worker %s/%s (skip=%s): %s",
-                i + 1, effective_workers, skip, exc,
+                i + 1,
+                effective_workers,
+                skip,
+                exc,
             )
-            submitted.append({
-                "worker_index": i + 1,
-                "flow_run_id": None,
-                "skip": skip,
-                "max_prompts": chunk_size,
-                "error": str(exc),
-            })
+            submitted.append(
+                {
+                    "worker_index": i + 1,
+                    "flow_run_id": None,
+                    "skip": skip,
+                    "max_prompts": chunk_size,
+                    "error": str(exc),
+                }
+            )
 
     failed_submissions = [s for s in submitted if s.get("error")]
     summary = {

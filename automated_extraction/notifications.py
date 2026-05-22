@@ -73,6 +73,7 @@ def _post(blocks: list[dict[str, Any]], text: str) -> None:
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
+
 def notify_cloudflare_challenge(
     *,
     signals: list[str],
@@ -138,16 +139,17 @@ def notify_cloudflare_challenge(
     ]
 
     if prefect_run_url:
-        blocks.append({
-            "type": "section",
-            "text": {"type": "mrkdwn", "text": f"*Prefect run*\n<{prefect_run_url}|View logs>"},
-        })
+        blocks.append(
+            {
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": f"*Prefect run*\n<{prefect_run_url}|View logs>"},
+            }
+        )
 
     blocks.append({"type": "divider"})
 
     fallback_text = (
-        f"⚠️ Cloudflare challenge on machine {machine_id} ({login_email}) "
-        f"during {context}. VNC in to resolve."
+        f"⚠️ Cloudflare challenge on machine {machine_id} ({login_email}) during {context}. VNC in to resolve."
     )
     _post(blocks, fallback_text)
 

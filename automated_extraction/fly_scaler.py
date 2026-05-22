@@ -32,6 +32,7 @@ Usage
   ...
   scale_down("prompt-extractor-uk", keep_count=1, prefect_api_url="...", work_pool="prompt-extraction-uk")
 """
+
 from __future__ import annotations
 
 import copy
@@ -59,6 +60,7 @@ _APP_REGION: dict[str, str] = {
 
 
 # ── Low-level client ─────────────────────────────────────────────────────────
+
 
 class FlyMachinesClient:
     """Thin synchronous wrapper around the Fly.io Machines REST API."""
@@ -154,7 +156,7 @@ class FlyMachinesClient:
         env: dict[str, str] = config.get("env", {}) or {}
         env[_CLONE_LABEL_ENV_KEY] = clone_label
         # Point Chrome profile to ephemeral path since /data is not mounted.
-        env.setdefault("CHATGPT_CHROME_USER_DATA_DIR", "/tmp/chrome-profile")
+        env.setdefault("CHATGPT_CHROME_USER_DATA_DIR", "/tmp/chrome-profile")  # nosec B108 — ephemeral Chrome profile on cloned machines, not user-controlled
         # Assign a profile snapshot index so the entrypoint can restore the
         # correct pre-logged-in profile from Supabase Storage.
         if profile_index is not None:
@@ -207,12 +209,14 @@ class FlyMachinesClient:
 
 # ── Helper: identify clones ──────────────────────────────────────────────────
 
+
 def _is_clone(machine: dict[str, Any]) -> bool:
     env = (machine.get("config") or {}).get("env") or {}
     return bool(env.get(_CLONE_LABEL_ENV_KEY))
 
 
 # ── Prefect work-pool concurrency update ─────────────────────────────────────
+
 
 def update_work_pool_concurrency(
     prefect_api_url: str,
@@ -231,6 +235,7 @@ def update_work_pool_concurrency(
 
 
 # ── High-level scale functions ────────────────────────────────────────────────
+
 
 @dataclass
 class ScaleResult:
@@ -295,8 +300,11 @@ def scale_up(
 
     LOGGER.info(
         "scale_up: app=%s target=%d running=%d originals=%d clones_existing=%d",
-        app_name, target_count, len(already_running),
-        len(originals), len([m for m in active if _is_clone(m)]),
+        app_name,
+        target_count,
+        len(already_running),
+        len(originals),
+        len([m for m in active if _is_clone(m)]),
     )
 
     if len(already_running) >= target_count:
@@ -333,7 +341,11 @@ def scale_up(
             profile_index = (i % total_accounts) if total_accounts > 0 else None
             LOGGER.info(
                 "Cloning machine %s (label=%s, profile_index=%s, %d/%d)",
-                source_id, label, profile_index, i + 1, needed,
+                source_id,
+                label,
+                profile_index,
+                i + 1,
+                needed,
             )
             new_machine = client.clone_machine(app_name, source_id, label, profile_index=profile_index)
             result.clones_created.append(new_machine["id"])
@@ -345,7 +357,8 @@ def scale_up(
         if wait_secs > 0:
             LOGGER.info(
                 "Waiting %ds for %d new Prefect worker(s) to connect…",
-                wait_secs, newly_added,
+                wait_secs,
+                newly_added,
             )
             time.sleep(wait_secs)
 
@@ -357,7 +370,9 @@ def scale_up(
 
     LOGGER.info(
         "scale_up complete: started_originals=%d clones_created=%d total_running=%d",
-        len(result.original_started), len(result.clones_created), result.total_running,
+        len(result.original_started),
+        len(result.clones_created),
+        result.total_running,
     )
     return result
 
@@ -414,7 +429,10 @@ def scale_down(
 
     LOGGER.info(
         "scale_down: app=%s keep=%d running_originals=%d clones=%d",
-        app_name, keep_count, len(running_originals), len(clones),
+        app_name,
+        keep_count,
+        len(running_originals),
+        len(clones),
     )
 
     # ── Destroy all clones ─────────────────────────────────────────────────
@@ -446,12 +464,15 @@ def scale_down(
 
     LOGGER.info(
         "scale_down complete: clones_destroyed=%d originals_stopped=%d remaining=%d",
-        len(result.clones_destroyed), len(result.originals_stopped), result.remaining_running,
+        len(result.clones_destroyed),
+        len(result.originals_stopped),
+        result.remaining_running,
     )
     return result
 
 
 # ── Convenience: resolve app name from region ─────────────────────────────────
+
 
 def app_name_for_region(region: str) -> str:
     """Return the Fly.io app name for a given region string."""

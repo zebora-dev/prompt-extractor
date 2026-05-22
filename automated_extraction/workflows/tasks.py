@@ -8,21 +8,22 @@ from typing import Any
 # Ensure INFO-level logs from all automated_extraction submodules flow through
 # to Prefect's log handler. The root logger defaults to WARNING in Prefect
 # workers, which silently drops LOGGER.info() calls in extraction code.
+# This must run before Prefect imports so the level is set before handlers attach.
 logging.getLogger("automated_extraction").setLevel(logging.INFO)
 
-from prefect import task
-from prefect.logging import get_run_logger
+from prefect import task  # noqa: E402
+from prefect.logging import get_run_logger  # noqa: E402
 
-from automated_extraction.config import Settings
-from automated_extraction.entity_output_processor import process_entity_outputs
-from automated_extraction.extraction import (
+from automated_extraction.config import Settings  # noqa: E402
+from automated_extraction.entity_output_processor import process_entity_outputs  # noqa: E402
+from automated_extraction.extraction import (  # noqa: E402
     run_extraction_job,
     run_google_ai_mode_extraction_job,
     run_google_ai_overview_extraction_job,
 )
-from automated_extraction.product_output_processor import process_product_outputs
-from automated_extraction.prompt_output_processor import process_prompt_outputs
-from automated_extraction.workflow_trigger import trigger_score_workflows
+from automated_extraction.product_output_processor import process_product_outputs  # noqa: E402
+from automated_extraction.prompt_output_processor import process_prompt_outputs  # noqa: E402
+from automated_extraction.workflow_trigger import trigger_score_workflows  # noqa: E402
 
 LOGGER = logging.getLogger(__name__)
 

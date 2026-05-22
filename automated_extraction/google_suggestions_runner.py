@@ -110,7 +110,6 @@ PAA_EXTRACTION_SCRIPT = r"""return (function(containerEl) {
 """
 
 
-
 @dataclass
 class PAASuggestionCapture:
     index: int
@@ -181,9 +180,7 @@ def capture_people_also_ask(driver, *, max_questions: int = 20, wait_seconds: fl
     return PAASectionCapture(suggestions=suggestions, capture_method="paa_dom")
 
 
-def _capture_single_paa(
-    driver, question_el, idx: int, question_text: str, wait_seconds: float
-) -> PAASuggestionCapture:
+def _capture_single_paa(driver, question_el, idx: int, question_text: str, wait_seconds: float) -> PAASuggestionCapture:
     try:
         # Scroll the question into view
         driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", question_el)
@@ -318,9 +315,7 @@ def _wait_for_content_panel(driver, expand_btn, question_el, wait_seconds: float
                 if vis:
                     # Use attribute selector — safer than # for IDs that
                     # begin with underscores or contain unusual chars.
-                    panels = driver.find_elements(
-                        "css selector", f"[id='{aria_controls}']"
-                    )
+                    panels = driver.find_elements("css selector", f"[id='{aria_controls}']")
                     if panels:
                         LOGGER.debug("[PAA] Panel visible via aria-controls=%r", aria_controls)
                         return panels[0]
@@ -329,9 +324,7 @@ def _wait_for_content_panel(driver, expand_btn, question_el, wait_seconds: float
         else:
             # Fallback: no aria-controls — look for NRdf4c panel inside the
             # question element (Google always sets aria-controls, but just in case).
-            candidates = question_el.find_elements(
-                "css selector", PAA_CONTENT_PANEL_SELECTOR
-            )
+            candidates = question_el.find_elements("css selector", PAA_CONTENT_PANEL_SELECTOR)
             if candidates:
                 LOGGER.debug("[PAA] Panel found via NRdf4c fallback query")
                 return candidates[0]

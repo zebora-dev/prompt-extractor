@@ -23,11 +23,7 @@ LOGGER = logging.getLogger(__name__)
 # Stable identifier for this worker process.
 # Fly.io sets FLY_MACHINE_ID on every machine; fall back to hostname then a
 # per-process UUID so local runs also get a unique ID.
-WORKER_ID: str = (
-    os.environ.get("FLY_MACHINE_ID")
-    or os.environ.get("HOSTNAME")
-    or str(_uuid.uuid4())[:12]
-)
+WORKER_ID: str = os.environ.get("FLY_MACHINE_ID") or os.environ.get("HOSTNAME") or str(_uuid.uuid4())[:12]
 
 
 @dataclass(frozen=True)
@@ -206,13 +202,18 @@ def run_extraction_job(
             # Skipped when force_rerun=True (intentional re-processing).
             if not force_rerun:
                 claimed = api.try_claim_prompt(
-                    prompt_id, resolved_batch_id, prompt_brand_id,
-                    llm_model_filter or "gpt", WORKER_ID,
+                    prompt_id,
+                    resolved_batch_id,
+                    prompt_brand_id,
+                    llm_model_filter or "gpt",
+                    WORKER_ID,
                 )
                 if not claimed:
                     LOGGER.info(
                         "[%s/%s] Prompt %s already claimed by another worker — skipping.",
-                        index, len(prompts), prompt_id,
+                        index,
+                        len(prompts),
+                        prompt_id,
                     )
                     skipped_count += 1
                     continue
@@ -377,7 +378,9 @@ def run_extraction_job(
                 failures.append(failure)
                 LOGGER.exception("[%s/%s] Prompt %s failed: %s", index, len(prompts), prompt_id, exc)
                 if not force_rerun:
-                    api.release_claim(prompt_id, resolved_batch_id, llm_model_filter or "gpt", error_message=str(exc)[:500])
+                    api.release_claim(
+                        prompt_id, resolved_batch_id, llm_model_filter or "gpt", error_message=str(exc)[:500]
+                    )
 
     status = "completed" if failed_count == 0 else "completed_with_failures"
     return ExtractionRunResult(
@@ -476,6 +479,7 @@ def run_google_ai_mode_extraction_job(
     resolved_country = country or settings.google_country
     resolved_language = language or settings.google_language
     from .google_chrome_factory import resolve_proxy_url
+
     proxy_url = resolve_proxy_url(use_proxy)
     LOGGER.info(
         "Starting Google AI Mode browser session. chrome_user_data_dir=%s headless=%s country=%s language=%s proxy=%s",
@@ -530,13 +534,18 @@ def run_google_ai_mode_extraction_job(
 
             if not force_rerun:
                 claimed = api.try_claim_prompt(
-                    prompt_id, resolved_batch_id, prompt_brand_id,
-                    llm_model_filter or "google-ai-mode", WORKER_ID,
+                    prompt_id,
+                    resolved_batch_id,
+                    prompt_brand_id,
+                    llm_model_filter or "google-ai-mode",
+                    WORKER_ID,
                 )
                 if not claimed:
                     LOGGER.info(
                         "[%s/%s] Google AI Mode prompt %s already claimed by another worker — skipping.",
-                        index, len(prompts), prompt_id,
+                        index,
+                        len(prompts),
+                        prompt_id,
                     )
                     skipped_count += 1
                     continue
@@ -598,20 +607,33 @@ def run_google_ai_mode_extraction_job(
                     total=len(prompts),
                 )
                 if suggestion_count > 0:
-                    current_metadata = output.get("output_metadata") if isinstance(output.get("output_metadata"), dict) else {}
+                    current_metadata = (
+                        output.get("output_metadata") if isinstance(output.get("output_metadata"), dict) else {}
+                    )
                     try:
-                        api.update_prompt_output(saved_output, {
-                            "output_metadata": {**current_metadata, "suggestion_count": suggestion_count},
-                        })
+                        api.update_prompt_output(
+                            saved_output,
+                            {
+                                "output_metadata": {**current_metadata, "suggestion_count": suggestion_count},
+                            },
+                        )
                     except Exception as patch_exc:
-                        LOGGER.warning("[%s/%s] Could not patch suggestion_count for prompt %s: %s", index, len(prompts), prompt_id, patch_exc)
+                        LOGGER.warning(
+                            "[%s/%s] Could not patch suggestion_count for prompt %s: %s",
+                            index,
+                            len(prompts),
+                            prompt_id,
+                            patch_exc,
+                        )
             except Exception as exc:
                 failed_count += 1
                 failure = {"prompt_id": prompt_id, "brand_id": prompt_brand_id, "error": str(exc)}
                 failures.append(failure)
                 LOGGER.exception("[%s/%s] Google AI Mode prompt %s failed: %s", index, len(prompts), prompt_id, exc)
                 if not force_rerun:
-                    api.release_claim(prompt_id, resolved_batch_id, llm_model_filter or "google-ai-mode", error_message=str(exc)[:500])
+                    api.release_claim(
+                        prompt_id, resolved_batch_id, llm_model_filter or "google-ai-mode", error_message=str(exc)[:500]
+                    )
             else:
                 if not force_rerun:
                     api.complete_claim(prompt_id, resolved_batch_id, llm_model_filter or "google-ai-mode")
@@ -722,6 +744,7 @@ def run_google_ai_overview_extraction_job(
     resolved_country = country or settings.google_country
     resolved_language = language or settings.google_language
     from .google_chrome_factory import resolve_proxy_url
+
     proxy_url = resolve_proxy_url(use_proxy)
     LOGGER.info(
         "Starting Google AI Overview browser session. chrome_user_data_dir=%s headless=%s country=%s language=%s proxy=%s",
@@ -774,13 +797,18 @@ def run_google_ai_overview_extraction_job(
 
             if not force_rerun:
                 claimed = api.try_claim_prompt(
-                    prompt_id, resolved_batch_id, prompt_brand_id,
-                    llm_model_filter or "google-ai-overview", WORKER_ID,
+                    prompt_id,
+                    resolved_batch_id,
+                    prompt_brand_id,
+                    llm_model_filter or "google-ai-overview",
+                    WORKER_ID,
                 )
                 if not claimed:
                     LOGGER.info(
                         "[%s/%s] Google AI Overview prompt %s already claimed by another worker — skipping.",
-                        index, len(prompts), prompt_id,
+                        index,
+                        len(prompts),
+                        prompt_id,
                     )
                     skipped_count += 1
                     continue
@@ -842,20 +870,36 @@ def run_google_ai_overview_extraction_job(
                     total=len(prompts),
                 )
                 if suggestion_count > 0:
-                    current_metadata = output.get("output_metadata") if isinstance(output.get("output_metadata"), dict) else {}
+                    current_metadata = (
+                        output.get("output_metadata") if isinstance(output.get("output_metadata"), dict) else {}
+                    )
                     try:
-                        api.update_prompt_output(saved_output, {
-                            "output_metadata": {**current_metadata, "suggestion_count": suggestion_count},
-                        })
+                        api.update_prompt_output(
+                            saved_output,
+                            {
+                                "output_metadata": {**current_metadata, "suggestion_count": suggestion_count},
+                            },
+                        )
                     except Exception as patch_exc:
-                        LOGGER.warning("[%s/%s] Could not patch suggestion_count for prompt %s: %s", index, len(prompts), prompt_id, patch_exc)
+                        LOGGER.warning(
+                            "[%s/%s] Could not patch suggestion_count for prompt %s: %s",
+                            index,
+                            len(prompts),
+                            prompt_id,
+                            patch_exc,
+                        )
             except Exception as exc:
                 failed_count += 1
                 failure = {"prompt_id": prompt_id, "brand_id": prompt_brand_id, "error": str(exc)}
                 failures.append(failure)
                 LOGGER.exception("[%s/%s] Google AI Overview prompt %s failed: %s", index, len(prompts), prompt_id, exc)
                 if not force_rerun:
-                    api.release_claim(prompt_id, resolved_batch_id, llm_model_filter or "google-ai-overview", error_message=str(exc)[:500])
+                    api.release_claim(
+                        prompt_id,
+                        resolved_batch_id,
+                        llm_model_filter or "google-ai-overview",
+                        error_message=str(exc)[:500],
+                    )
             else:
                 if not force_rerun:
                     api.complete_claim(prompt_id, resolved_batch_id, llm_model_filter or "google-ai-overview")

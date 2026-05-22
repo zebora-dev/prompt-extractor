@@ -172,7 +172,8 @@ class GoogleAIModeRunner:
                 "sources": final.get("sources") or result.get("sources") or [],
                 "raw_html": final.get("raw_html") or result.get("raw_html") or "",
                 "raw_html_capture_method": final.get("raw_html_capture_method")
-                    or result.get("raw_html_capture_method") or "",
+                or result.get("raw_html_capture_method")
+                or "",
             }
             LOGGER.info(
                 "Post-expand re-extraction: sources=%s raw_html_len=%s",
@@ -231,7 +232,9 @@ class GoogleAIModeRunner:
         try:
             buttons = browser.find_elements_by_css('[aria-label="Show all related links"]')
             if not buttons:
-                LOGGER.info("expand_sources_panel: 'Show all' button not found — sources panel may already be expanded.")
+                LOGGER.info(
+                    "expand_sources_panel: 'Show all' button not found — sources panel may already be expanded."
+                )
                 return False
             LOGGER.info("expand_sources_panel: Clicking 'Show all' button.")
             browser.execute_script(
@@ -388,7 +391,9 @@ class GoogleAIModeRunner:
             if not result.get("ai_mode_triggered"):
                 LOGGER.info(
                     "wait_for_ai_mode poll#%s (%.1fs): no AI Mode yet — state=%s url=%s",
-                    poll, elapsed, result.get("capture_state"),
+                    poll,
+                    elapsed,
+                    result.get("capture_state"),
                     self.require_browser().current_url[:120],
                 )
                 time.sleep(1)
@@ -403,9 +408,11 @@ class GoogleAIModeRunner:
 
             LOGGER.info(
                 "wait_for_ai_mode poll#%s (%.1fs): text_len=%s copy_btn=%s sources_panel=%s",
-                poll, elapsed,
+                poll,
+                elapsed,
                 len(result.get("text") or ""),
-                copy_btn, sources_panel,
+                copy_btn,
+                sources_panel,
             )
 
             # Primary ready signal: copy button rendered + meaningful content.
@@ -414,7 +421,8 @@ class GoogleAIModeRunner:
             if copy_btn and sources_panel and has_meaningful_content(result):
                 LOGGER.info(
                     "wait_for_ai_mode poll#%s (%.1fs): copy button + sources panel ready — capturing.",
-                    poll, elapsed,
+                    poll,
+                    elapsed,
                 )
                 return {**result, "capture_state": "complete"}
 
@@ -423,7 +431,8 @@ class GoogleAIModeRunner:
             if copy_btn and not sources_panel and has_meaningful_content(result):
                 LOGGER.info(
                     "wait_for_ai_mode poll#%s (%.1fs): copy button ready, waiting for sources panel.",
-                    poll, elapsed,
+                    poll,
+                    elapsed,
                 )
                 time.sleep(1)
                 continue
@@ -434,13 +443,16 @@ class GoogleAIModeRunner:
                 stable_checks += 1
                 LOGGER.info(
                     "wait_for_ai_mode poll#%s (%.1fs): stable_checks=%s (stability fallback)",
-                    poll, elapsed, stable_checks,
+                    poll,
+                    elapsed,
+                    stable_checks,
                 )
             else:
                 if stable_checks > 0:
                     LOGGER.info(
                         "wait_for_ai_mode poll#%s (%.1fs): content changed — resetting stable_checks.",
-                        poll, elapsed,
+                        poll,
+                        elapsed,
                     )
                 stable_checks = 0
                 last_signature = signature
@@ -456,7 +468,10 @@ class GoogleAIModeRunner:
                 LOGGER.warning(
                     "wait_for_ai_mode poll#%s: content present for %.1fs but copy_btn=%s "
                     "sources_panel=%s — capturing (streaming fallback).",
-                    poll, seconds_detected, copy_btn, sources_panel,
+                    poll,
+                    seconds_detected,
+                    copy_btn,
+                    sources_panel,
                 )
                 return {**result, "capture_state": "complete"}
 
@@ -464,8 +479,7 @@ class GoogleAIModeRunner:
 
         if last_result.get("ai_mode_triggered"):
             LOGGER.warning(
-                "wait_for_ai_mode: timed out after %ss — returning timeout_partial "
-                "(text_len=%s sources=%s)",
+                "wait_for_ai_mode: timed out after %ss — returning timeout_partial (text_len=%s sources=%s)",
                 self.response_timeout_seconds,
                 len(last_result.get("text") or ""),
                 len(last_result.get("sources") or []),
@@ -473,8 +487,7 @@ class GoogleAIModeRunner:
             return {**last_result, "capture_state": "timeout_partial"}
 
         LOGGER.warning(
-            "wait_for_ai_mode: timed out after %ss with no AI Mode detected — "
-            "final state=%s final_url=%s",
+            "wait_for_ai_mode: timed out after %ss with no AI Mode detected — final state=%s final_url=%s",
             self.response_timeout_seconds,
             last_result.get("capture_state"),
             self.require_browser().current_url[:120],

@@ -21,6 +21,7 @@ wait up to 30 seconds for the CDP debug port.  Non-headless Chrome on Fly.io
 takes ~28s to open the port (waiting for dbus timeouts); nodriver's built-in
 retry window is only 2.75s.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -28,7 +29,6 @@ import json
 import logging
 import os
 import random
-import tempfile
 import threading
 import time
 import urllib.parse
@@ -40,6 +40,7 @@ LOGGER = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Proxy byte tracking
 # ---------------------------------------------------------------------------
+
 
 class ProxyBytesTracker:
     """
@@ -130,6 +131,7 @@ def _run_sync(coro) -> Any:
 # Element wrapper
 # ---------------------------------------------------------------------------
 
+
 class NodriverElement:
     """
     Thin sync wrapper around a nodriver Element object.
@@ -153,9 +155,7 @@ class NodriverElement:
     def text(self) -> str:
         """Return element's innerText via JS apply."""
         try:
-            result = _run_sync(self._elem.apply(
-                "(el) => el.innerText || el.textContent || ''"
-            ))
+            result = _run_sync(self._elem.apply("(el) => el.innerText || el.textContent || ''"))
             return str(result or "")
         except Exception:
             # fallback to nodriver's built-in text property (direct text nodes only)
@@ -174,9 +174,7 @@ class NodriverElement:
             if val is not None:
                 return str(val)
             # Fallback: get via JS in case attrs is stale
-            result = _run_sync(self._elem.apply(
-                f"(el) => el.getAttribute({name!r})"
-            ))
+            result = _run_sync(self._elem.apply(f"(el) => el.getAttribute({name!r})"))
             return result if result is not None else None
         except Exception:
             return None
@@ -186,8 +184,9 @@ class NodriverElement:
     def click(self) -> None:
         """Click element via JS dispatched events."""
         try:
-            _run_sync(self._elem.apply(
-                """(el) => {
+            _run_sync(
+                self._elem.apply(
+                    """(el) => {
                     el.scrollIntoView({block:'center', inline:'center'});
                     el.dispatchEvent(new PointerEvent('pointerdown',{bubbles:true,pointerType:'mouse'}));
                     el.dispatchEvent(new MouseEvent('mousedown',{bubbles:true}));
@@ -195,13 +194,15 @@ class NodriverElement:
                     el.dispatchEvent(new MouseEvent('mouseup',{bubbles:true}));
                     el.click();
                 }"""
-            ))
+                )
+            )
         except Exception as exc:
             LOGGER.debug("NodriverElement.click failed: %s", exc)
 
     def send_keys(self, text: str) -> None:
         """Type text into the element character by character via CDP Input events."""
         import nodriver as uc  # type: ignore[import-untyped]
+
         cdp = uc.cdp
         # Focus the element first
         try:
@@ -211,34 +212,38 @@ class NodriverElement:
         time.sleep(0.05)
         for char in text:
             try:
-                _run_sync(self._tab.send(
-                    cdp.input_.dispatch_key_event(
-                        type_="keyDown",
-                        key=char,
-                        text=char,
+                _run_sync(
+                    self._tab.send(
+                        cdp.input_.dispatch_key_event(
+                            type_="keyDown",
+                            key=char,
+                            text=char,
+                        )
                     )
-                ))
-                _run_sync(self._tab.send(
-                    cdp.input_.dispatch_key_event(
-                        type_="keyUp",
-                        key=char,
-                        text=char,
+                )
+                _run_sync(
+                    self._tab.send(
+                        cdp.input_.dispatch_key_event(
+                            type_="keyUp",
+                            key=char,
+                            text=char,
+                        )
                     )
-                ))
+                )
             except Exception as exc:
                 LOGGER.debug("send_keys CDP key event failed for char %r: %s — skipping", char, exc)
             time.sleep(random.uniform(0.04, 0.12))
 
     # --- find children -----------------------------------------------------
 
-    def find_element(self, by: str, value: str) -> "NodriverElement":
+    def find_element(self, by: str, value: str) -> NodriverElement:
         """Find first child element matching selector. Raises on not found."""
         results = self.find_elements(by, value)
         if not results:
             raise RuntimeError(f"NoSuchElement: {by}={value!r}")
         return results[0]
 
-    def find_elements(self, by: str, value: str) -> list["NodriverElement"]:
+    def find_elements(self, by: str, value: str) -> list[NodriverElement]:
         """Find all child elements matching CSS selector."""
         css = _by_to_css(by, value)
         if css is None:
@@ -264,6 +269,7 @@ class NodriverElement:
 # Main browser class
 # ---------------------------------------------------------------------------
 
+
 class NodriverBrowser:
     """
     Synchronous wrapper around a nodriver browser + main tab.
@@ -273,7 +279,7 @@ class NodriverBrowser:
     runner which accesses driver.find_elements / driver.execute_script.
     """
 
-    def __init__(self, browser, tab, proxy_server=None, bytes_tracker: "ProxyBytesTracker | None" = None) -> None:
+    def __init__(self, browser, tab, proxy_server=None, bytes_tracker: ProxyBytesTracker | None = None) -> None:
         self._browser = browser
         self._tab = tab
         self._proxy_server = proxy_server
@@ -312,6 +318,7 @@ class NodriverBrowser:
         When no element args are present, uses tab.evaluate() directly.
         """
         import nodriver as uc  # type: ignore[import-untyped]
+
         cdp = uc.cdp
 
         # Separate element args from plain value args
@@ -331,9 +338,7 @@ class NodriverBrowser:
             async def _call_on_elem():
                 # Resolve the element to get its remote object id.
                 # `cdp` is already in scope from `cdp = uc.cdp` above.
-                remote = await self._tab.send(
-                    cdp.dom.resolve_node(backend_node_id=primary_elem.backend_node_id)
-                )
+                remote = await self._tab.send(cdp.dom.resolve_node(backend_node_id=primary_elem.backend_node_id))
                 object_id = remote.object_id
 
                 # Build call arguments — primary element first, then any remaining elements
@@ -342,9 +347,7 @@ class NodriverBrowser:
                     extra_remote = await self._tab.send(
                         cdp.dom.resolve_node(backend_node_id=extra_elem.backend_node_id)
                     )
-                    call_args.append(
-                        cdp.runtime.CallArgument(object_id=extra_remote.object_id)
-                    )
+                    call_args.append(cdp.runtime.CallArgument(object_id=extra_remote.object_id))
                 # Plain value args
                 for val in plain_args:
                     call_args.append(cdp.runtime.CallArgument(value=val))
@@ -381,23 +384,13 @@ class NodriverBrowser:
             #    we json.loads() it back to a proper Python value.
             if plain_args:
                 args_json = json.dumps(plain_args)
-                js = (
-                    f"JSON.stringify((function(){{"
-                    f"  var arguments = {args_json};"
-                    f"  {script}"
-                    f"}}()))"
-                )
+                js = f"JSON.stringify((function(){{  var arguments = {args_json};  {script}}}()))"
                 try:
                     raw = _run_sync(self._tab.evaluate(js))
                     return json.loads(raw) if isinstance(raw, str) else raw
                 except Exception:
                     # Fallback: plain IIFE without JSON wrapper
-                    plain = (
-                        f"(function(){{"
-                        f"  var arguments = {args_json};"
-                        f"  {script}"
-                        f"}}())"
-                    )
+                    plain = f"(function(){{  var arguments = {args_json};  {script}}}())"
                     return _run_sync(self._tab.evaluate(plain))
             else:
                 if script.lstrip().startswith("return"):
@@ -421,16 +414,19 @@ class NodriverBrowser:
     def set_window_size(self, width: int, height: int) -> None:
         try:
             import nodriver as uc  # type: ignore[import-untyped]
+
             cdp = uc.cdp
-            _run_sync(self._tab.send(
-                cdp.browser.set_window_bounds(
-                    window_id=1,
-                    bounds=cdp.browser.Bounds(
-                        width=width,
-                        height=height,
-                    ),
+            _run_sync(
+                self._tab.send(
+                    cdp.browser.set_window_bounds(
+                        window_id=1,
+                        bounds=cdp.browser.Bounds(
+                            width=width,
+                            height=height,
+                        ),
+                    )
                 )
-            ))
+            )
             LOGGER.debug("Window resized to %sx%s via CDP.", width, height)
         except Exception as exc:
             LOGGER.debug("set_window_size via CDP failed: %s — trying JS.", exc)
@@ -489,9 +485,7 @@ class NodriverBrowser:
         if self._proxy_server is not None:
             try:
                 loop = _get_or_create_loop()
-                asyncio.run_coroutine_threadsafe(
-                    _close_server(self._proxy_server), loop
-                ).result(timeout=5)
+                asyncio.run_coroutine_threadsafe(_close_server(self._proxy_server), loop).result(timeout=5)
             except Exception as exc:
                 LOGGER.debug("Local proxy server close failed (non-fatal): %s", exc)
 
@@ -499,6 +493,7 @@ class NodriverBrowser:
 # ---------------------------------------------------------------------------
 # By constants shim (so callers don't need to import from selenium)
 # ---------------------------------------------------------------------------
+
 
 class By:
     CSS_SELECTOR = "css selector"
@@ -535,6 +530,7 @@ def _by_to_css(by: str, value: str) -> str | None:
 # Public factory
 # ---------------------------------------------------------------------------
 
+
 def _kill_stale_chrome() -> None:
     """
     Kill any orphaned Chrome processes left behind by a previously failed or
@@ -551,6 +547,7 @@ def _kill_stale_chrome() -> None:
     always start from a clean state.
     """
     import subprocess
+
     try:
         result = subprocess.run(
             ["sh", "-c", "pgrep -f 'google-chrome' | xargs -r kill -9"],
@@ -592,12 +589,14 @@ def build_nodriver_browser(
     bytes_tracker: ProxyBytesTracker | None = ProxyBytesTracker() if proxy_url else None
 
     t0 = time.time()
-    browser, tab, proxy_server = _run_sync(_start_nodriver(
-        headless=headless,
-        proxy_url=proxy_url,
-        user_agent=user_agent,
-        tracker=bytes_tracker,
-    ))
+    browser, tab, proxy_server = _run_sync(
+        _start_nodriver(
+            headless=headless,
+            proxy_url=proxy_url,
+            user_agent=user_agent,
+            tracker=bytes_tracker,
+        )
+    )
     LOGGER.info("nodriver browser started in %.1fs.", time.time() - t0)
 
     nb = NodriverBrowser(browser, tab, proxy_server=proxy_server, bytes_tracker=bytes_tracker)
@@ -628,7 +627,7 @@ async def _start_local_auth_proxy(
     username: str,
     password: str,
     local_port: int,
-    tracker: "ProxyBytesTracker | None" = None,
+    tracker: ProxyBytesTracker | None = None,
 ) -> asyncio.Server:
     """
     Start a minimal HTTP CONNECT proxy on 127.0.0.1:local_port that adds
@@ -639,6 +638,7 @@ async def _start_local_auth_proxy(
     This avoids all MV2 extension / CDP Fetch issues with proxy auth.
     """
     import base64
+
     auth_value = "Basic " + base64.b64encode(f"{username}:{password}".encode()).decode()
 
     async def _pipe(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
@@ -674,15 +674,8 @@ async def _start_local_auth_proxy(
                 line = await asyncio.wait_for(client_r.readline(), timeout=5)
                 if not line or line in (b"\r\n", b"\n"):
                     break
-            up_r, up_w = await asyncio.wait_for(
-                asyncio.open_connection(upstream_host, upstream_port), timeout=10
-            )
-            connect_req = (
-                f"CONNECT {target} HTTP/1.1\r\n"
-                f"Host: {target}\r\n"
-                f"Proxy-Authorization: {auth_value}\r\n"
-                f"\r\n"
-            )
+            up_r, up_w = await asyncio.wait_for(asyncio.open_connection(upstream_host, upstream_port), timeout=10)
+            connect_req = f"CONNECT {target} HTTP/1.1\r\nHost: {target}\r\nProxy-Authorization: {auth_value}\r\n\r\n"
             up_w.write(connect_req.encode())
             await up_w.drain()
             status_line = await asyncio.wait_for(up_r.readline(), timeout=10)
@@ -709,7 +702,9 @@ async def _start_local_auth_proxy(
     server = await asyncio.start_server(_handle, "127.0.0.1", local_port)
     LOGGER.info(
         "Local auth proxy listening on 127.0.0.1:%s → %s:%s",
-        local_port, upstream_host, upstream_port,
+        local_port,
+        upstream_host,
+        upstream_port,
     )
     return server
 
@@ -722,15 +717,14 @@ async def _wait_for_chrome_debug_port(host: str, port: int, timeout: float = 30.
     while time.monotonic() < deadline:
         try:
             await asyncio.get_event_loop().run_in_executor(
-                None, lambda: urllib.request.urlopen(url, timeout=2)
+                None,
+                lambda: urllib.request.urlopen(url, timeout=2),  # nosec B310 — URL is always localhost CDP endpoint, not user-supplied
             )
             return
         except Exception as exc:
             last_exc = exc
             await asyncio.sleep(0.5)
-    raise TimeoutError(
-        f"Chrome debug port {host}:{port} not ready after {timeout}s. Last error: {last_exc}"
-    )
+    raise TimeoutError(f"Chrome debug port {host}:{port} not ready after {timeout}s. Last error: {last_exc}")
 
 
 async def _start_nodriver(
@@ -738,7 +732,7 @@ async def _start_nodriver(
     headless: bool,
     proxy_url: str | None,
     user_agent: str,
-    tracker: "ProxyBytesTracker | None" = None,
+    tracker: ProxyBytesTracker | None = None,
 ):
     """Async coroutine: start nodriver with the given config.
 
@@ -750,6 +744,7 @@ async def _start_nodriver(
     """
     import nodriver as uc  # type: ignore[import-untyped]
     import nodriver.core.util as uc_util
+
     cdp = uc.cdp
 
     browser_args = [
@@ -775,13 +770,19 @@ async def _start_nodriver(
         proxy_password = urllib.parse.unquote(parsed.password or "")
         local_proxy_port = uc_util.free_port()
         _local_proxy_server = await _start_local_auth_proxy(
-            upstream_host, upstream_port, proxy_username, proxy_password or "", local_proxy_port,
+            upstream_host,
+            upstream_port,
+            proxy_username,
+            proxy_password or "",
+            local_proxy_port,
             tracker,
         )
         browser_args.append(f"--proxy-server=http://127.0.0.1:{local_proxy_port}")
         LOGGER.info(
             "Proxy configured via local auth proxy: 127.0.0.1:%s → %s:%s",
-            local_proxy_port, upstream_host, upstream_port,
+            local_proxy_port,
+            upstream_host,
+            upstream_port,
         )
 
     # Build a nodriver Config so we get the correct binary path + default args.
@@ -799,7 +800,9 @@ async def _start_nodriver(
 
     LOGGER.info(
         "Launching Chrome: exe=%s headless=%s port=%s",
-        config.browser_executable_path, headless, debug_port,
+        config.browser_executable_path,
+        headless,
+        debug_port,
     )
     _chrome_proc = await asyncio.create_subprocess_exec(
         config.browser_executable_path,
@@ -839,6 +842,7 @@ async def _start_nodriver(
 # ---------------------------------------------------------------------------
 # Warmup and search helpers (sync wrappers keeping original signatures)
 # ---------------------------------------------------------------------------
+
 
 def warmup_google_session(browser: NodriverBrowser, warmup_url: str = "https://www.google.com") -> None:
     """
@@ -923,9 +927,7 @@ def search_via_box(browser: NodriverBrowser, query: str) -> None:
             break
 
     if search_box is None:
-        raise RuntimeError(
-            f"search_via_box: could not find Google search box (url={current_url!r})"
-        )
+        raise RuntimeError(f"search_via_box: could not find Google search box (url={current_url!r})")
 
     search_box.click()
     time.sleep(random.uniform(0.3, 0.6))
@@ -943,31 +945,36 @@ def _press_enter(browser: NodriverBrowser) -> None:
     """Send a Return keypress via CDP Input."""
     try:
         import nodriver as uc  # type: ignore[import-untyped]
+
         cdp = uc.cdp
-        _run_sync(browser._tab.send(
-            cdp.input_.dispatch_key_event(
-                type_="keyDown",
-                key="Return",
-                text="\r",
-                windows_virtual_key_code=13,
-                native_virtual_key_code=13,
+        _run_sync(
+            browser._tab.send(
+                cdp.input_.dispatch_key_event(
+                    type_="keyDown",
+                    key="Return",
+                    text="\r",
+                    windows_virtual_key_code=13,
+                    native_virtual_key_code=13,
+                )
             )
-        ))
-        _run_sync(browser._tab.send(
-            cdp.input_.dispatch_key_event(
-                type_="keyUp",
-                key="Return",
-                text="\r",
-                windows_virtual_key_code=13,
-                native_virtual_key_code=13,
+        )
+        _run_sync(
+            browser._tab.send(
+                cdp.input_.dispatch_key_event(
+                    type_="keyUp",
+                    key="Return",
+                    text="\r",
+                    windows_virtual_key_code=13,
+                    native_virtual_key_code=13,
+                )
             )
-        ))
+        )
     except Exception as exc:
         LOGGER.debug("_press_enter CDP failed: %s — trying JS submit.", exc)
         try:
-            _run_sync(browser._tab.evaluate(
-                "const f=document.activeElement&&document.activeElement.form;if(f)f.submit();"
-            ))
+            _run_sync(
+                browser._tab.evaluate("const f=document.activeElement&&document.activeElement.form;if(f)f.submit();")
+            )
         except Exception:
             pass
 
@@ -982,8 +989,13 @@ def _dismiss_google_overlays(browser: NodriverBrowser, origin_url: str = "") -> 
     google.com so subsequent search-box lookups work.
     """
     _CONSENT_TEXTS = [
-        "Accept all", "Reject all", "I agree", "Agree", "Accept",
-        "Tout accepter", "Alles akzeptieren",  # French / German variants
+        "Accept all",
+        "Reject all",
+        "I agree",
+        "Agree",
+        "Accept",
+        "Tout accepter",
+        "Alles akzeptieren",  # French / German variants
     ]
     try:
         buttons = browser.find_elements_by_css("button")
@@ -1008,9 +1020,7 @@ def _dismiss_google_overlays(browser: NodriverBrowser, origin_url: str = "") -> 
         current_url = str(_run_sync(browser._tab.evaluate("window.location.href")) or "")
         _NON_SEARCH_HOSTS = ("consent.google.", "accounts.google.", "myaccount.google.")
         if any(h in current_url for h in _NON_SEARCH_HOSTS):
-            LOGGER.info(
-                "Still on non-search page after consent (%s) — navigating to google.com", current_url
-            )
+            LOGGER.info("Still on non-search page after consent (%s) — navigating to google.com", current_url)
             browser.navigate("https://www.google.com")
             time.sleep(random.uniform(1.2, 2.0))
     except Exception as exc:
@@ -1020,6 +1030,7 @@ def _dismiss_google_overlays(browser: NodriverBrowser, origin_url: str = "") -> 
 # ---------------------------------------------------------------------------
 # Proxy helpers (kept for extraction.py compatibility)
 # ---------------------------------------------------------------------------
+
 
 def resolve_proxy_url(use_proxy: bool) -> str | None:
     """Return the proxy URL to use, or None if proxying is disabled."""
@@ -1054,7 +1065,6 @@ def _verify_proxy_ip(proxy_url: str) -> None:
 # raises a clear error rather than an AttributeError.
 # ---------------------------------------------------------------------------
 
+
 def build_google_driver(**kwargs):  # type: ignore[no-untyped-def]
-    raise RuntimeError(
-        "build_google_driver() has been removed. Use build_nodriver_browser() instead."
-    )
+    raise RuntimeError("build_google_driver() has been removed. Use build_nodriver_browser() instead.")

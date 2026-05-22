@@ -15,6 +15,7 @@ Two flows are registered as Prefect deployments:
 Both flows are thin wrappers around `automated_extraction.fly_scaler` which
 holds all the Machines API logic.
 """
+
 from __future__ import annotations
 
 import os
@@ -75,7 +76,9 @@ def scale_workers_flow(
 
     logger.info(
         "Scaling %s up to %d machines (work_pool=%s)",
-        resolved_app, target_count, resolved_pool,
+        resolved_app,
+        target_count,
+        resolved_pool,
     )
 
     result: ScaleResult = scale_up(
@@ -121,7 +124,9 @@ def scale_workers_down_flow(
 
     logger.info(
         "Scaling %s down to %d machines (work_pool=%s)",
-        resolved_app, keep_count, resolved_pool,
+        resolved_app,
+        keep_count,
+        resolved_pool,
     )
 
     result: ScaleDownResult = scale_down(

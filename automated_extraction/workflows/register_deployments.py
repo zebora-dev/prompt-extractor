@@ -28,10 +28,6 @@ REGIONS = {
 
 def get_flows():
     from automated_extraction.workflows.dispatcher import dispatch_extraction_flow
-    from automated_extraction.workflows.scaler_flows import (
-        scale_workers_down_flow,
-        scale_workers_flow,
-    )
     from automated_extraction.workflows.flows import (
         google_ai_mode_extraction_batch_flow,
         google_ai_mode_extraction_flow,
@@ -40,6 +36,10 @@ def get_flows():
         prompt_extraction_batch_flow,
         prompt_extraction_flow,
         prompt_output_processing_flow,
+    )
+    from automated_extraction.workflows.scaler_flows import (
+        scale_workers_down_flow,
+        scale_workers_flow,
     )
 
     return {
@@ -332,7 +332,7 @@ def list_deployments(region: str | None = None) -> None:
         print(f"  Description: {config['description']}")
         print(f"  Tags: {', '.join(config['tags'])}")
         print(f"  Default params: {config.get('parameters', {})}")
-        print(f"  Deployments:")
+        print("  Deployments:")
         for r in regions_to_show:
             rc = REGIONS[r]
             dep_name = _deployment_name(base_name, rc["suffix"])

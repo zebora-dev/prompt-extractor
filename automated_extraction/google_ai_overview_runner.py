@@ -6,18 +6,18 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import quote_plus, urlsplit
 
-from .google_chrome_factory import (
-    NodriverBrowser,
-    build_nodriver_browser,
-    search_via_box,
-    warmup_google_session,
-)
 from .google_ai_mode_runner import (
     clean_google_url,
     clean_markdown,
     clean_text,
     first_line,
     has_meaningful_content,
+)
+from .google_chrome_factory import (
+    NodriverBrowser,
+    build_nodriver_browser,
+    search_via_box,
+    warmup_google_session,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -302,9 +302,7 @@ class GoogleAIOverviewRunner:
             if aria_expanded.lower() == "true":
                 LOGGER.debug("'Show more AI Overview' already expanded — skipping click.")
                 return True
-            browser.execute_script(
-                "arguments[0].scrollIntoView({block: 'center'});", btn
-            )
+            browser.execute_script("arguments[0].scrollIntoView({block: 'center'});", btn)
             time.sleep(0.3)
             btn.click()
             LOGGER.info("Clicked 'Show more AI Overview' button.")
@@ -326,9 +324,7 @@ class GoogleAIOverviewRunner:
                 LOGGER.debug("'Show all related links' sidebar button not found.")
                 return False
             btn = btns[0]
-            browser.execute_script(
-                "arguments[0].scrollIntoView({block: 'center'});", btn
-            )
+            browser.execute_script("arguments[0].scrollIntoView({block: 'center'});", btn)
             time.sleep(0.2)
             btn.click()
             LOGGER.info("Clicked 'Show all related links' sidebar button.")

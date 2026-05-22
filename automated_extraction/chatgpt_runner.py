@@ -12,8 +12,6 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-from automated_extraction.notifications import notify_cloudflare_challenge, notify_cloudflare_cleared
-
 import pyperclip
 from selenium import webdriver
 from selenium.common.exceptions import (
@@ -32,6 +30,8 @@ from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.remote.webelement import WebElement
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
+
+from automated_extraction.notifications import notify_cloudflare_challenge, notify_cloudflare_cleared
 
 LOGGER = logging.getLogger(__name__)
 
@@ -475,9 +475,7 @@ class ChatGPTRunner:
             try:
                 driver.find_element(By.CSS_SELECTOR, '[data-testid="login-button"]')
                 login_button_present = True
-                LOGGER.warning(
-                    "ChatGPT login button detected — session is NOT authenticated (guest mode)."
-                )
+                LOGGER.warning("ChatGPT login button detected — session is NOT authenticated (guest mode).")
             except NoSuchElementException:
                 pass
 

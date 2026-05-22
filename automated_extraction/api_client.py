@@ -148,9 +148,7 @@ class ApiClient:
         ttl_minutes: int = 20,
     ) -> bool:
         """Atomically claim a prompt. Returns True if this worker holds the claim."""
-        return self.supabase.try_claim_prompt(
-            prompt_id, batch_id, brand_id, llm_model, worker_id, ttl_minutes
-        )
+        return self.supabase.try_claim_prompt(prompt_id, batch_id, brand_id, llm_model, worker_id, ttl_minutes)
 
     def release_claim(
         self,

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import asdict, dataclass, fields
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from supabase import Client, create_client
@@ -246,14 +246,13 @@ class SupabasePromptOutputRepository:
             query = query.ilike("llm_model", f"%{llm_model_filter}%")
         response = query.execute()
         done_ids = {
-            str(row.get("prompt_id")) for row in response.data or []
-            if isinstance(row, dict) and row.get("prompt_id")
+            str(row.get("prompt_id")) for row in response.data or [] if isinstance(row, dict) and row.get("prompt_id")
         }
 
         # Prompts currently being processed by another worker (active pending claim).
         # Including these prevents multiple workers loading the same prompt simultaneously.
         try:
-            now_iso = datetime.now(timezone.utc).isoformat()
+            now_iso = datetime.now(UTC).isoformat()
             claims_query = (
                 self.client.table("prompt_claims")
                 .select("prompt_id")
@@ -265,20 +264,24 @@ class SupabasePromptOutputRepository:
                 claims_query = claims_query.ilike("llm_model", f"%{llm_model_filter}%")
             claims_response = claims_query.execute()
             claimed_ids = {
-                str(row.get("prompt_id")) for row in claims_response.data or []
+                str(row.get("prompt_id"))
+                for row in claims_response.data or []
                 if isinstance(row, dict) and row.get("prompt_id")
             }
             if claimed_ids:
                 LOGGER.info(
                     "completed_prompt_ids: %s prompt(s) excluded due to active claims. batch_id=%s llm_model_filter=%s",
-                    len(claimed_ids), batch_id, llm_model_filter or "any",
+                    len(claimed_ids),
+                    batch_id,
+                    llm_model_filter or "any",
                 )
             return done_ids | claimed_ids
         except Exception as exc:
             LOGGER.warning(
                 "completed_prompt_ids: could not load active claims (table may not exist yet) — "
                 "falling back to outputs-only filter. batch_id=%s error=%s",
-                batch_id, exc,
+                batch_id,
+                exc,
             )
             return done_ids
 
@@ -301,20 +304,24 @@ class SupabasePromptOutputRepository:
         check before saving acts as a secondary safety net in that case.
         """
         try:
-            response = self.client.rpc("try_claim_prompt", {
-                "p_prompt_id": str(prompt_id),
-                "p_batch_id": str(batch_id),
-                "p_brand_id": str(brand_id),
-                "p_llm_model": llm_model,
-                "p_worker_id": worker_id,
-                "p_ttl_minutes": ttl_minutes,
-            }).execute()
+            response = self.client.rpc(
+                "try_claim_prompt",
+                {
+                    "p_prompt_id": str(prompt_id),
+                    "p_batch_id": str(batch_id),
+                    "p_brand_id": str(brand_id),
+                    "p_llm_model": llm_model,
+                    "p_worker_id": worker_id,
+                    "p_ttl_minutes": ttl_minutes,
+                },
+            ).execute()
             return bool(response.data)
         except Exception as exc:
             LOGGER.warning(
                 "try_claim_prompt RPC unavailable for prompt %s — failing open. "
                 "Run docs/migrations/001_prompt_claims.sql to enable claiming. error=%s",
-                prompt_id, exc,
+                prompt_id,
+                exc,
             )
             return True  # Fail-open: allow processing; concurrent-output check is the fallback
 
@@ -327,13 +334,11 @@ class SupabasePromptOutputRepository:
     ) -> None:
         """Mark a claim as failed so the prompt is available for retry."""
         try:
-            self.client.table("prompt_claims") \
-                .update({"status": "failed", "error_message": (error_message or "")[:1000]}) \
-                .eq("prompt_id", str(prompt_id)) \
-                .eq("batch_id", str(batch_id)) \
-                .eq("llm_model", llm_model) \
-                .eq("status", "pending") \
-                .execute()
+            self.client.table("prompt_claims").update(
+                {"status": "failed", "error_message": (error_message or "")[:1000]}
+            ).eq("prompt_id", str(prompt_id)).eq("batch_id", str(batch_id)).eq("llm_model", llm_model).eq(
+                "status", "pending"
+            ).execute()
         except Exception as exc:
             LOGGER.warning("release_claim failed for prompt %s: %s", prompt_id, exc)
 
@@ -349,12 +354,9 @@ class SupabasePromptOutputRepository:
         claim row is no longer needed once the output is saved.
         """
         try:
-            self.client.table("prompt_claims") \
-                .delete() \
-                .eq("prompt_id", str(prompt_id)) \
-                .eq("batch_id", str(batch_id)) \
-                .eq("llm_model", llm_model) \
-                .execute()
+            self.client.table("prompt_claims").delete().eq("prompt_id", str(prompt_id)).eq(
+                "batch_id", str(batch_id)
+            ).eq("llm_model", llm_model).execute()
         except Exception as exc:
             LOGGER.warning("complete_claim failed for prompt %s: %s", prompt_id, exc)
 
