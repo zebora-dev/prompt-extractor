@@ -33,8 +33,8 @@ def prompt_extraction_batch_flow(
     skip: int = 0,
     auto_login: bool | None = False,
     login_email: str | None = None,
-    capture_products: bool = False,
-    capture_entities: bool = False,
+    capture_products: bool = True,
+    capture_entities: bool = True,
     delay_seconds: int = 120,
     max_prompts: int | None = None,
     startup_delay_seconds: int = 0,
@@ -341,8 +341,8 @@ def prompt_extraction_flow(
     llm_model_filter: str | None = "gpt",
     auto_login: bool | None = None,
     login_email: str | None = None,
-    capture_products: bool = False,
-    capture_entities: bool = False,
+    capture_products: bool = True,
+    capture_entities: bool = True,
 ) -> dict[str, Any]:
     """
     Orchestrate a ChatGPT prompt extraction run.

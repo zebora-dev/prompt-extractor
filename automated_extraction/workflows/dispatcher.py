@@ -158,8 +158,8 @@ def dispatch_extraction_flow(
     # ChatGPT-specific
     auto_login: bool = False,
     login_email: str | None = None,
-    capture_products: bool = False,
-    capture_entities: bool = False,
+    capture_products: bool = True,
+    capture_entities: bool = True,
     # Dynamic scaling
     auto_scale: bool = False,
     scale_wait_seconds: int = 30,
