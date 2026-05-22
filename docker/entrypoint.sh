@@ -16,23 +16,41 @@ fi
 
 # ── _start_persistent_chrome helper ──────────────────────────────────────────
 # Called after Xvfb is confirmed running so Chrome gets a real display window.
+_start_one_chrome() {
+  DISPLAY=:99 google-chrome \
+    --user-data-dir="${PROFILE_DEST}" \
+    --remote-debugging-port=9222 \
+    --no-first-run \
+    --no-default-browser-check \
+    --no-sandbox \
+    --disable-session-crashed-bubble \
+    --no-restore-last-session \
+    https://chatgpt.com \
+    >>/tmp/chrome-persistent.log 2>&1 &
+  echo $!
+}
+
 _start_persistent_chrome() {
   if [[ "${CHATGPT_PERSISTENT_CHROME:-false}" == "true" ]]; then
     echo "[entrypoint] Starting persistent Chrome (profile: ${PROFILE_DEST}) …"
-    DISPLAY=:99 google-chrome \
-      --user-data-dir="${PROFILE_DEST}" \
-      --remote-debugging-port=9222 \
-      --no-first-run \
-      --no-default-browser-check \
-      --no-sandbox \
-      --disable-session-crashed-bubble \
-      --no-restore-last-session \
-      https://chatgpt.com \
-      >/tmp/chrome-persistent.log 2>&1 &
-    CHROME_PID=$!
+    CHROME_PID=$(_start_one_chrome)
     echo "[entrypoint] Persistent Chrome started (PID ${CHROME_PID}) — waiting for it to be ready …"
     sleep 6
     echo "[entrypoint] Persistent Chrome ready."
+
+    # Watchdog: restart Chrome if it exits unexpectedly.
+    (
+      while true; do
+        if ! kill -0 "${CHROME_PID}" 2>/dev/null; then
+          echo "[entrypoint] Persistent Chrome (PID ${CHROME_PID}) exited — restarting …"
+          sleep 2
+          CHROME_PID=$(_start_one_chrome)
+          echo "[entrypoint] Persistent Chrome restarted (PID ${CHROME_PID})."
+          sleep 6
+        fi
+        sleep 5
+      done
+    ) &
   fi
 }
 

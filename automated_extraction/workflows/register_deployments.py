@@ -43,10 +43,10 @@ def get_flows():
     )
 
     return {
-        "prompt-extraction-batch": {
+        "chatgpt-extraction-batch": {
             "flow": prompt_extraction_batch_flow,
             "tags": ["chatgpt", "extraction", "browser", "batch"],
-            "description": "Sequentially run prompt-extraction in chunks until remaining prompts for a batch are covered.",
+            "description": "Sequentially run chatgpt-extraction in chunks until remaining prompts for a batch are covered.",
             "parameters": {
                 "batch_id": None,
                 "model_filter": "gpt",
@@ -60,7 +60,7 @@ def get_flows():
                 "startup_delay_seconds": 0,
             },
         },
-        "prompt-extraction": {
+        "chatgpt-extraction": {
             "flow": prompt_extraction_flow,
             "tags": ["chatgpt", "extraction", "browser"],
             "description": "Run BrandSight prompts through ChatGPT and save markdown, raw HTML, and sources.",

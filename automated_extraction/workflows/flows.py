@@ -22,8 +22,8 @@ from automated_extraction.workflows.tasks import (
 
 
 @flow(
-    name="prompt-extraction-batch",
-    flow_run_name="prompt-extraction-batch-{batch_id}",
+    name="chatgpt-extraction-batch",
+    flow_run_name="chatgpt-extraction-batch-{batch_id}",
     log_prints=True,
 )
 def prompt_extraction_batch_flow(
@@ -40,7 +40,7 @@ def prompt_extraction_batch_flow(
     startup_delay_seconds: int = 0,
 ) -> dict[str, Any]:
     """
-    Sequentially run prompt-extraction until the currently remaining prompt set
+    Sequentially run chatgpt-extraction until the currently remaining prompt set
     has been chunked into `limit`-sized runs, with a configurable delay between
     each run. Sources are always captured; products and entities are opt-in.
 
@@ -108,7 +108,7 @@ def prompt_extraction_batch_flow(
         run_skip = skip
         effective_limit = min(limit, max_prompts - (run_index - 1) * limit) if max_prompts is not None else limit
         flow_logger.info(
-            "Starting sequential prompt-extraction run %s/%s. batch_id=%s limit=%s skip=%s",
+            "Starting sequential chatgpt-extraction run %s/%s. batch_id=%s limit=%s skip=%s",
             run_index,
             run_count,
             batch_id,
@@ -128,7 +128,7 @@ def prompt_extraction_batch_flow(
         )
         run_results.append(result)
         flow_logger.info(
-            "Finished sequential prompt-extraction run %s/%s. saved_count=%s skipped_count=%s failed_count=%s",
+            "Finished sequential chatgpt-extraction run %s/%s. saved_count=%s skipped_count=%s failed_count=%s",
             run_index,
             run_count,
             result.get("saved_count", 0),
@@ -150,6 +150,28 @@ def prompt_extraction_batch_flow(
                 break
         else:
             consecutive_all_failed = 0
+
+        # Early-exit: if nothing was saved this run, check whether any prompts
+        # are still outstanding. If other workers have claimed everything, there
+        # is no point continuing the loop.
+        if result.get("saved_count", 0) == 0 and run_index < run_count:
+            still_remaining = api.get_prompts(
+                batch_id,
+                str(brand_id),
+                only_remaining=True,
+                llm_model_filter=model_filter,
+            )
+            if not still_remaining:
+                stopped_reason = "batch_exhausted"
+                flow_logger.info(
+                    "Early exit: no prompts remaining after run %s/%s — batch already complete. batch_id=%s",
+                    run_index, run_count, batch_id,
+                )
+                break
+            flow_logger.info(
+                "saved_count=0 on run %s/%s but %s prompt(s) still remaining — continuing. batch_id=%s",
+                run_index, run_count, len(still_remaining), batch_id,
+            )
 
         if run_index < run_count:
             flow_logger.info("Waiting %ss before next run.", delay_seconds)
@@ -224,6 +246,23 @@ def prompt_extraction_batch_flow(
                         break
                 else:
                     consecutive_all_failed = 0
+
+                # Early-exit: nothing saved — check if batch is already complete.
+                if result.get("saved_count", 0) == 0 and run_index < mop_up_run_count:
+                    still_remaining = api.get_prompts(
+                        batch_id,
+                        str(brand_id),
+                        only_remaining=True,
+                        llm_model_filter=model_filter,
+                    )
+                    if not still_remaining:
+                        stopped_reason = "batch_exhausted"
+                        flow_logger.info(
+                            "Early exit: no prompts remaining after mop-up run %s/%s — batch already complete. batch_id=%s",
+                            run_index, mop_up_run_count, batch_id,
+                        )
+                        break
+
                 if run_index < mop_up_run_count:
                     flow_logger.info("Waiting %ss before next mop-up run.", delay_seconds)
                     time.sleep(delay_seconds)
@@ -268,8 +307,8 @@ def prompt_extraction_batch_flow(
 
 
 @flow(
-    name="prompt-extraction",
-    flow_run_name="prompt-extraction-{batch_id}",
+    name="chatgpt-extraction",
+    flow_run_name="chatgpt-extraction-{batch_id}",
     log_prints=True,
 )
 def prompt_extraction_flow(
@@ -483,6 +522,26 @@ def google_ai_mode_extraction_batch_flow(
                 break
         else:
             consecutive_all_failed = 0
+
+        # Early-exit: if nothing was saved this run, check whether any prompts
+        # are still outstanding. If other workers have claimed everything, there
+        # is no point continuing the loop.
+        if result.get("saved_count", 0) == 0 and run_index < run_count:
+            still_remaining = api.get_prompts(
+                batch_id, str(brand_id), only_remaining=True, llm_model_filter=model_filter,
+            )
+            if not still_remaining:
+                stopped_reason = "batch_exhausted"
+                flow_logger.info(
+                    "Early exit: no prompts remaining after run %s/%s — batch already complete. batch_id=%s",
+                    run_index, run_count, batch_id,
+                )
+                break
+            flow_logger.info(
+                "saved_count=0 on run %s/%s but %s prompt(s) still remaining — continuing. batch_id=%s",
+                run_index, run_count, len(still_remaining), batch_id,
+            )
+
         if run_index < run_count:
             flow_logger.info("Waiting %ss before next run.", delay_seconds)
             time.sleep(delay_seconds)
@@ -525,6 +584,20 @@ def google_ai_mode_extraction_batch_flow(
                         break
                 else:
                     consecutive_all_failed = 0
+
+                # Early-exit: nothing saved — check if batch is already complete.
+                if result.get("saved_count", 0) == 0 and run_index < mop_up_run_count:
+                    still_remaining = api.get_prompts(
+                        batch_id, str(brand_id), only_remaining=True, llm_model_filter=model_filter,
+                    )
+                    if not still_remaining:
+                        stopped_reason = "batch_exhausted"
+                        flow_logger.info(
+                            "Early exit: no prompts remaining after mop-up run %s/%s — batch already complete. batch_id=%s",
+                            run_index, mop_up_run_count, batch_id,
+                        )
+                        break
+
                 if run_index < mop_up_run_count:
                     time.sleep(delay_seconds)
 
@@ -653,6 +726,26 @@ def google_ai_overview_extraction_batch_flow(
                 break
         else:
             consecutive_all_failed = 0
+
+        # Early-exit: if nothing was saved this run, check whether any prompts
+        # are still outstanding. If other workers have claimed everything, there
+        # is no point continuing the loop.
+        if result.get("saved_count", 0) == 0 and run_index < run_count:
+            still_remaining = api.get_prompts(
+                batch_id, str(brand_id), only_remaining=True, llm_model_filter=model_filter,
+            )
+            if not still_remaining:
+                stopped_reason = "batch_exhausted"
+                flow_logger.info(
+                    "Early exit: no prompts remaining after run %s/%s — batch already complete. batch_id=%s",
+                    run_index, run_count, batch_id,
+                )
+                break
+            flow_logger.info(
+                "saved_count=0 on run %s/%s but %s prompt(s) still remaining — continuing. batch_id=%s",
+                run_index, run_count, len(still_remaining), batch_id,
+            )
+
         if run_index < run_count:
             flow_logger.info("Waiting %ss before next run.", delay_seconds)
             time.sleep(delay_seconds)
@@ -696,6 +789,20 @@ def google_ai_overview_extraction_batch_flow(
                         break
                 else:
                     consecutive_all_failed = 0
+
+                # Early-exit: nothing saved — check if batch is already complete.
+                if result.get("saved_count", 0) == 0 and run_index < mop_up_run_count:
+                    still_remaining = api.get_prompts(
+                        batch_id, str(brand_id), only_remaining=True, llm_model_filter=model_filter,
+                    )
+                    if not still_remaining:
+                        stopped_reason = "batch_exhausted"
+                        flow_logger.info(
+                            "Early exit: no prompts remaining after mop-up run %s/%s — batch already complete. batch_id=%s",
+                            run_index, mop_up_run_count, batch_id,
+                        )
+                        break
+
                 if run_index < mop_up_run_count:
                     time.sleep(delay_seconds)
 

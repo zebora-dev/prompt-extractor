@@ -69,7 +69,7 @@ http_service:
   internal_port: 6080
   force_https: false
   auto_stop_machines: false
-  auto_start_machines: true
+  auto_start_machines: false
   min_machines_running: 0
   sticky_sessions: true
 

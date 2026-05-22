@@ -1,131 +1,95 @@
 # Prefect Operations Guide
 
-This app runs extraction as Prefect flows, giving us observable runs, parameters, logs, duration, state, retry hooks, and a UI for triggering and inspecting work.
+This app runs extraction workflows as Prefect flows. Prefect provides
+observable runs, parameters, logs, duration, state, retry hooks, and a UI for
+triggering and inspecting work.
 
-Batch, prompt, and prompt-output create/read/update/exists operations go directly through the Python Supabase client.
+Batch, prompt, and prompt-output operations go directly through the Python
+Supabase client.
 
-## Flows
+> **For the ChatGPT worker fleet (Fly.io machines, persistent Chrome, VNC
+> login)** see [GPT_WORKERS.md](./GPT_WORKERS.md).
 
-Ten flows are registered across two regional work pools. UK deployments have a `-uk` suffix.
+---
 
-| Flow | Pool (US) | Pool (UK) |
-|---|---|---|
-| `prompt-extraction-batch` | `prompt-extraction-us` | `prompt-extraction-uk` |
-| `prompt-extraction` | `prompt-extraction-us` | `prompt-extraction-uk` |
-| `google-ai-mode-extraction-batch` | `prompt-extraction-us` | `prompt-extraction-uk` |
-| `google-ai-mode-extraction` | `prompt-extraction-us` | `prompt-extraction-uk` |
-| `google-ai-overview-extraction-batch` | `prompt-extraction-us` | `prompt-extraction-uk` |
-| `google-ai-overview-extraction` | `prompt-extraction-us` | `prompt-extraction-uk` |
-| `prompt-output-processing` | `prompt-extraction-us` | `prompt-extraction-uk` |
-| `dispatch-extraction` | `prompt-extraction-us` | `prompt-extraction-uk` |
-| `scale-workers` | `prompt-extraction-us` | `prompt-extraction-uk` |
-| `scale-workers-down` | `prompt-extraction-us` | `prompt-extraction-uk` |
+## Flow Reference
 
-## Dispatcher & Scaling Flows
+### ChatGPT extraction
 
-### Dispatching a large batch (primary method)
+| Flow name | Deployment (UK) | Purpose |
+|-----------|----------------|---------|
+| `chatgpt-extraction` | `chatgpt-extraction-uk` | Single run: load prompts → ChatGPT → save outputs → trigger scoring |
+| `chatgpt-extraction-batch` | `chatgpt-extraction-batch-uk` | Loop `chatgpt-extraction` in chunks until a batch is fully covered |
+| `dispatch-extraction` | `dispatch-extraction-uk` | Count remaining prompts, split across N workers, submit one batch run per worker |
 
-`dispatch-extraction` is the primary way to run large batches. It counts remaining prompts for a batch, splits them into equal chunks, and submits one batch flow run per worker via the Prefect REST API, then exits immediately.
+### Google extraction
 
-Always point the CLI at the hosted server by prefixing commands with `PREFECT_API_URL=https://prompt-extractor-prefect.fly.dev/api`.
+| Flow name | Deployment (UK) | Purpose |
+|-----------|----------------|---------|
+| `google-ai-mode-extraction` | `google-ai-mode-extraction-uk` | Single Google AI Mode run |
+| `google-ai-mode-extraction-batch` | `google-ai-mode-extraction-batch-uk` | Loop Google AI Mode in chunks |
+| `google-ai-overview-extraction` | `google-ai-overview-extraction-uk` | Single Google AI Overview run |
+| `google-ai-overview-extraction-batch` | `google-ai-overview-extraction-batch-uk` | Loop Google AI Overview in chunks |
 
-```bash
-PREFECT_API_URL=https://prompt-extractor-prefect.fly.dev/api \
-prefect deployment run 'dispatch-extraction/dispatch-extraction-uk' \
-  --param batch_id=<uuid> \
-  --param extraction_type=google-ai-overview \
-  --param worker_count=8 \
-  --param region=uk \
-  --param use_proxy=true \
-  --param auto_scale=true
+### Post-processing
+
+| Flow name | Deployment (UK) | Purpose |
+|-----------|----------------|---------|
+| `prompt-output-processing` | `prompt-output-processing-uk` | Re-process saved outputs (HTML→markdown enrichment) without re-running extraction |
+
+---
+
+## End-to-End Pipeline
+
+Each `chatgpt-extraction` run executes these tasks in order:
+
 ```
-
-`auto_scale=true` triggers automatic Fly.io machine scaling before flows are submitted. Without it you must have the required number of workers already running.
-
-**Worker staggering** — with the default `stagger_seconds=15`, worker 0 starts immediately, worker 1 after 15 s, worker 2 after 30 s, and so on. For 20 workers this spreads startup over ~5 minutes, preventing all Chrome instances from hitting Google simultaneously and triggering rate-limiting.
-
-### Scaling up manually
-
-```bash
-PREFECT_API_URL=https://prompt-extractor-prefect.fly.dev/api \
-prefect deployment run 'scale-workers/scale-workers-uk' \
-  --param target_count=8 \
-  --param region=uk
-```
-
-### Scaling down after a batch
-
-```bash
-PREFECT_API_URL=https://prompt-extractor-prefect.fly.dev/api \
-prefect deployment run 'scale-workers-down/scale-workers-down-uk' \
-  --param region=uk \
-  --param keep_count=1
-```
-
-The ChatGPT flow is:
-
-```text
-prompt-extraction
-```
-
-The main task is:
-
-```text
 extract-chatgpt-batch
-```
+  └─ For each prompt:
+       ├─ Claim prompt (atomic — prevents duplicate work across workers)
+       ├─ Connect to persistent Chrome (localhost:9222)
+       ├─ Create fresh ChatGPT chat
+       ├─ Send prompt, wait for response
+       ├─ Copy markdown + raw HTML + sources
+       ├─ Capture product flyouts  (if capture_products=true)
+       └─ Capture entity flyouts   (if capture_entities=true)
 
-The task wraps one full extraction run so a single logged-in Chrome profile can process a batch without reopening the browser for every prompt.
-
-After outputs are saved, the flow runs a second task:
-
-```text
 product-output-process
-```
+  └─ Save captured products to prompts_outputs_products
 
-This task persists captured product flyouts into `prompts_outputs_products`.
-Each row includes identifiers for the prompt output, brand, batch, and prompt,
-plus `raw_html`, generated `markdown`, `links`, `images`, counts, button index,
-and capture method.
-
-The flow then runs:
-
-```text
 entity-output-process
-```
+  └─ Save captured entities to prompts_outputs_entities
 
-This task persists captured ChatGPT entity flyouts into
-`prompts_outputs_entities`. Each row includes identifiers for the prompt output,
-brand, batch, and prompt, plus `entity_text`, `raw_html`, generated `markdown`,
-`links`, `images`, counts, entity index, and capture method.
-
-The flow then runs:
-
-```text
 prompt-output-process
-```
+  └─ Convert raw HTML → markdown, enrich response with images/links
 
-This task converts each saved `raw_html` response into markdown, compares it with
-the copied markdown, and enriches the saved `response`/`markdown` with missing
-assets such as images and links.
-
-You can also run that processor without re-running ChatGPT extraction via:
-
-```text
-prompt-output-processing
-```
-
-The final extraction-flow task is:
-
-```text
 trigger-score-workflow
+  └─ POST each output_id to BRANDSIGHT_SCORE_WORKFLOW_URL
 ```
 
-It posts each newly saved `prompts_outputs.id` to
-`BRANDSIGHT_SCORE_WORKFLOW_URL` with
-`{batch_id, output_id, force:false, force_run:false}`.
+---
 
-`output_id` is sent as a string for single-output scoring. `scorer_types` is omitted unless
-`BRANDSIGHT_SCORE_WORKFLOW_SCORER_TYPES` is configured with one or more comma-separated values.
+## Remote Prefect Server
+
+The production Prefect server runs on Fly.io:
+
+```
+https://prompt-extractor-prefect.fly.dev
+```
+
+All CLI commands against production must set `PREFECT_API_URL`:
+
+```bash
+export PREFECT_API_URL=https://prompt-extractor-prefect.fly.dev/api
+```
+
+Or prefix each command:
+
+```bash
+PREFECT_API_URL=https://prompt-extractor-prefect.fly.dev/api prefect deployment ls
+```
+
+---
 
 ## 1. Install Dependencies
 
@@ -135,380 +99,259 @@ source .venv/bin/activate
 make install
 ```
 
-Check Prefect is available:
-
-```bash
-python -c "import prefect; print(prefect.__version__)"
-```
-
-If `make prefect-server` says `Prefect is not installed in this environment`, install dependencies into the active venv:
-
-```bash
-python -m pip install -r requirements.txt
-```
-
-If your shell is not picking up the venv `python`, pass it explicitly:
-
-```bash
-make PYTHON=.venv/bin/python prefect-server
-```
+---
 
 ## 2. Configure Environment
-
-Create `.env` if needed:
 
 ```bash
 cp .env.example .env
 ```
 
-Required:
+Required variables:
 
 ```text
 BRANDSIGHT_SUPABASE_ANON_KEY=...
-```
-
-Prompt-output storage:
-
-```text
 BRANDSIGHT_SUPABASE_URL=https://hmwgplzdzffivawkflci.supabase.co
 BRANDSIGHT_PROMPT_OUTPUTS_TABLE=prompts_outputs
 BRANDSIGHT_PROMPT_OUTPUT_PRODUCTS_TABLE=prompts_outputs_products
 BRANDSIGHT_PROMPT_OUTPUT_ENTITIES_TABLE=prompts_outputs_entities
 BRANDSIGHT_SCORE_WORKFLOW_URL=https://workflow.zebora.io/api/workflows/score-single-output
-WORKFLOW_API_KEY=
-BRANDSIGHT_SCORE_WORKFLOW_FORCE_RUN=false
-BRANDSIGHT_SCORE_WORKFLOW_SCORER_TYPES=
+WORKFLOW_API_KEY=...
 ```
 
-`BRANDSIGHT_SUPABASE_URL` is optional when `BRANDSIGHT_API_BASE_URL` is set to the project functions URL; the app derives the project URL automatically. `BRANDSIGHT_API_BASE_URL` is retained as a legacy compatibility setting.
-
-Recommended local Prefect settings:
+For local development:
 
 ```text
 PREFECT_API_URL=http://localhost:4200/api
 PREFECT_WORK_POOL=prompt-extraction-pool
 ```
 
-Make sure ChatGPT login is prepared before running real extraction:
+For remote (production):
 
-```bash
-make login
+```text
+PREFECT_API_URL=https://prompt-extractor-prefect.fly.dev/api
+PREFECT_WORK_POOL=prompt-extraction-uk
 ```
 
-This stores the browser session in `.chrome-profile` by default.
+---
 
-## 3. Start a Local Prefect Server
+## 3. Local Development
 
-Terminal 1:
+### Start a local Prefect server
 
 ```bash
 make prefect-server
+# UI: http://localhost:4200
 ```
 
-Open the UI:
-
-```text
-http://localhost:4200
-```
-
-You can also use Docker:
-
-```bash
-docker compose up prefect-server
-```
-
-## 4. Option A: Serve the Flow Locally
-
-This is the easiest development mode. It registers and runs the deployment in the same Python process.
-
-Terminal 2:
+### Serve flows locally (simplest dev mode)
 
 ```bash
 make prefect-serve
 ```
 
-You should see the `prompt-extraction/prompt-extraction` deployment in the Prefect UI.
+Registers and serves all deployments in the same Python process.
 
-### Trigger from the Prefect UI
-
-1. Open `http://localhost:4200`.
-2. Go to **Deployments**.
-3. Select `prompt-extraction/prompt-extraction`.
-4. Click **Quick run** or **Custom run**.
-5. Set parameters, for example:
-
-```json
-{
-  "batch_id": "b4cfbc28-a046-497f-8944-65fcf10d59fe",
-  "prompts_file": null,
-  "brand_id": null,
-  "limit": 2,
-  "skip": 0,
-  "dry_run": false,
-  "headless": null,
-  "chrome_user_data_dir": null,
-  "sources_panel_pause_seconds": 0,
-  "force_rerun": false,
-  "llm_model_filter": "gpt"
-}
-```
-
-### Trigger from the Prefect CLI
+### Deploy to a local process work pool
 
 ```bash
-prefect deployment run 'prompt-extraction/prompt-extraction' \
-  --param batch_id=b4cfbc28-a046-497f-8944-65fcf10d59fe \
-  --param limit=2
+make prefect-pool    # create the work pool
+make prefect-deploy  # register deployments
+make prefect-worker  # start a worker
 ```
 
-The extraction flow filters prompts before applying `limit`. By default it only
-treats a prompt as completed when an existing `prompts_outputs.llm_model`
-contains `gpt`:
+---
+
+## 4. Triggering Flows (Remote)
+
+### Run a single ChatGPT extraction (one worker, small test)
 
 ```bash
-prefect deployment run 'prompt-extraction/prompt-extraction' \
-  --param batch_id=b4cfbc28-a046-497f-8944-65fcf10d59fe \
+PREFECT_API_URL=https://prompt-extractor-prefect.fly.dev/api \
+prefect deployment run 'chatgpt-extraction/chatgpt-extraction-uk' \
+  --param batch_id=<batch-uuid> \
   --param limit=2 \
-  --param llm_model_filter=gpt
+  --param login_email=dev@theround.com \
+  --param capture_products=true \
+  --param capture_entities=true
 ```
 
-Use an empty `llm_model_filter` to treat any existing model as completed.
-
-To run a prompt even when an output already exists for the same batch, brand,
-and prompt:
+### Run the batch flow on a specific worker
 
 ```bash
-prefect deployment run 'prompt-extraction/prompt-extraction' \
-  --param batch_id=b4cfbc28-a046-497f-8944-65fcf10d59fe \
+PREFECT_API_URL=https://prompt-extractor-prefect.fly.dev/api \
+prefect deployment run 'chatgpt-extraction-batch/chatgpt-extraction-batch-uk' \
+  --param batch_id=<batch-uuid> \
+  --param limit=5 \
+  --param login_email=dev@theround.com \
+  --param capture_products=true \
+  --param capture_entities=true
+```
+
+`login_email` pins the run to the machine holding that account. Omit it to let
+Prefect assign any available worker.
+
+### Dispatch across all workers
+
+```bash
+PREFECT_API_URL=https://prompt-extractor-prefect.fly.dev/api \
+prefect deployment run 'dispatch-extraction/dispatch-extraction-uk' \
+  --param batch_id=<batch-uuid> \
+  --param worker_count=9 \
+  --param capture_products=true \
+  --param capture_entities=true
+```
+
+The dispatcher counts remaining prompts, divides them into `worker_count`
+chunks, and submits one `chatgpt-extraction-batch-uk` run per chunk with a
+staggered startup so workers don't all hit ChatGPT simultaneously.
+
+### Re-process saved outputs without re-running ChatGPT
+
+```bash
+# By output ID
+PREFECT_API_URL=https://prompt-extractor-prefect.fly.dev/api \
+prefect deployment run 'prompt-output-processing/prompt-output-processing-uk' \
+  --param output_id=12326
+
+# By batch (latest N outputs)
+PREFECT_API_URL=https://prompt-extractor-prefect.fly.dev/api \
+prefect deployment run 'prompt-output-processing/prompt-output-processing-uk' \
+  --param batch_id=<batch-uuid> \
+  --param limit=10
+```
+
+### Force re-run prompts that already have outputs
+
+```bash
+PREFECT_API_URL=https://prompt-extractor-prefect.fly.dev/api \
+prefect deployment run 'chatgpt-extraction/chatgpt-extraction-uk' \
+  --param batch_id=<batch-uuid> \
   --param limit=1 \
   --param force_rerun=true
 ```
 
-To re-process existing saved prompt outputs without running ChatGPT extraction:
+---
+
+## 5. Registering Deployments
+
+After code changes, re-register deployments against the remote server:
 
 ```bash
-prefect deployment run 'prompt-output-processing/prompt-output-processing' \
-  --param output_id=9170
-```
-
-Or process the latest outputs for a batch:
-
-```bash
-prefect deployment run 'prompt-output-processing/prompt-output-processing' \
-  --param batch_id=b4cfbc28-a046-497f-8944-65fcf10d59fe \
-  --param limit=1
-```
-
-For a dry run:
-
-```bash
-prefect deployment run 'prompt-extraction/prompt-extraction' \
-  --param batch_id=b4cfbc28-a046-497f-8944-65fcf10d59fe \
-  --param dry_run=true
-```
-
-## 5. Option B: Deploy to Process Work Pools (multi-region)
-
-Use this mode when you want the server and worker lifecycle separated. Two regional work pools route work to the correct Fly.io worker.
-
-### Create work pools (one-time)
-
-```bash
-make prefect-pool     # creates prompt-extraction-us
-make prefect-pool-uk  # creates prompt-extraction-uk
-```
-
-### Register deployments
-
-Run these from your local machine, pointing at the hosted Prefect server:
-
-```bash
-# US deployments (10 flows, no suffix, tagged region:us)
-PREFECT_API_URL=https://prompt-extractor-prefect.fly.dev/api \
-PREFECT_WORK_POOL=prompt-extraction-us \
-PREFECT_WORKING_DIR=/app \
-  make prefect-deploy-us
-
-# UK deployments (10 flows, -uk suffix, tagged region:uk)
+source .venv/bin/activate
 PREFECT_API_URL=https://prompt-extractor-prefect.fly.dev/api \
 PREFECT_WORK_POOL=prompt-extraction-uk \
-PREFECT_WORKING_DIR=/app \
-  make prefect-deploy-uk
+python -m automated_extraction.workflows.register_deployments --deploy-local --region uk
 ```
 
-> **⚠️ Always set `PREFECT_WORKING_DIR=/app` when registering against the remote server.**
-> Without it, `register_deployments.py` falls back to the local repo path (e.g. `/Users/.../automated-extraction`) and the Fly.io worker will crash with `FileNotFoundError` when it tries to start a flow run — the local path does not exist on the remote machine.
->
-> If you run the script directly instead of via `make`, include it explicitly:
->
-> ```bash
-> PREFECT_API_URL=https://prompt-extractor-prefect.fly.dev/api \
-> PREFECT_WORK_POOL=prompt-extraction-uk \
-> PREFECT_WORKING_DIR=/app \
->   python -m automated_extraction.workflows.register_deployments --deploy-local --region uk
-> ```
+This must be run from the directory containing the updated code.
 
-### Start workers
+---
 
-Workers are managed by Fly.io and start automatically. To run a worker locally for development:
+## 6. Parameters Reference
 
-```bash
-make prefect-worker     # polls prompt-extraction-us
-make prefect-worker-uk  # polls prompt-extraction-uk
-```
+### `chatgpt-extraction` / `chatgpt-extraction-uk`
 
-The worker process must have:
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `batch_id` | string | — | BrandSight batch UUID (required unless `prompts_file` set) |
+| `prompts_file` | string/null | null | Local JSON prompt file (alternative to `batch_id`) |
+| `brand_id` | string/null | null | Brand UUID override (for local files) |
+| `limit` | integer/null | null | Max prompts to process |
+| `skip` | integer | 0 | Number of prompts to skip |
+| `dry_run` | boolean | false | Load prompts and preview without running ChatGPT |
+| `headless` | boolean/null | null | Override `CHATGPT_HEADLESS`; null uses env |
+| `chrome_user_data_dir` | string/null | null | Override Chrome profile path |
+| `force_rerun` | boolean | false | Run even if output already exists |
+| `llm_model_filter` | string | `gpt` | Filter: only treat outputs with this model as complete |
+| `auto_login` | boolean | false | Use automated login (requires `CHATGPT_ACCOUNTS_B64`) |
+| `login_email` | string/null | null | Account to use; pins run to that machine |
+| `capture_products` | boolean | false | Capture product flyouts after each response |
+| `capture_entities` | boolean | false | Capture entity flyouts after each response |
+| `sources_panel_pause_seconds` | integer | 0 | Debug pause after opening Sources panel |
 
-- this repo checked out
-- dependencies installed
-- `.env` configured
-- access to a logged-in Chrome profile
-- a display/browser environment if running non-headless
+### `chatgpt-extraction-batch` / `chatgpt-extraction-batch-uk`
 
-## 6. Run the Flow Directly in Python
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `batch_id` | string | — | BrandSight batch UUID |
+| `model_filter` | string | `gpt` | LLM model filter passed to each sub-run |
+| `limit` | integer | 5 | Prompts per sub-run |
+| `skip` | integer | 0 | Skip N prompts from the start |
+| `login_email` | string/null | null | Pins all sub-runs to a specific machine |
+| `capture_products` | boolean | false | Enable product capture |
+| `capture_entities` | boolean | false | Enable entity capture |
+| `delay_seconds` | integer | 120 | Wait between sub-runs (rate limiting) |
+| `startup_delay_seconds` | integer | 0 | Stagger delay set by dispatcher |
+| `auto_login` | boolean | false | Use automated login |
 
-Useful for quick debugging without a deployment:
+### `dispatch-extraction` / `dispatch-extraction-uk`
 
-```bash
-python - <<'PY'
-from automated_extraction.workflows.flows import prompt_extraction_flow
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `batch_id` | string | — | BrandSight batch UUID |
+| `extraction_type` | string | `chatgpt` | `chatgpt`, `google-ai-mode`, or `google-ai-overview` |
+| `worker_count` | integer | 1 | Number of parallel workers to dispatch |
+| `limit` | integer/null | null | Cap total prompts dispatched (across all workers) |
+| `capture_products` | boolean | false | Enable product capture |
+| `capture_entities` | boolean | false | Enable entity capture |
+| `delay_seconds` | integer | 120 | Delay between sub-runs within each worker |
+| `stagger_seconds` | integer | 30 | Startup stagger between workers |
 
-prompt_extraction_flow(
-    batch_id="b4cfbc28-a046-497f-8944-65fcf10d59fe",
-    limit=2,
-)
-PY
-```
+---
 
-## 7. Parameters
+## 7. Batch Loop Behaviour
 
-### Parameters — Dispatcher
+The `*-batch` flows loop sub-runs until all remaining prompts are covered.
 
-| Parameter | Default | Description |
-|---|---|---|
-| `batch_id` | required | BrandSight batch UUID |
-| `extraction_type` | required | `"google-ai-overview"`, `"google-ai-mode"`, or `"chatgpt"` |
-| `worker_count` | `4` | Max workers to dispatch across |
-| `region` | `"uk"` | `"uk"` or `"us"` |
-| `limit` | `5` | Prompts per inner extraction run |
-| `delay_seconds` | `60` | Seconds between inner runs on each worker |
-| `use_proxy` | `false` | Route Chrome through the regional proxy |
-| `auto_scale` | `false` | Auto scale Fly.io machines before dispatching |
-| `scale_wait_seconds` | `30` | Seconds to wait after scaling for workers to connect |
-| `stagger_seconds` | `15` | Per-worker startup delay (worker i sleeps i × stagger_seconds) |
+**Early exit**: after any sub-run where `saved_count=0`, the flow queries the
+API to check if any prompts are still outstanding. If none remain (i.e. other
+workers claimed them all), the loop exits immediately. This prevents wasted
+iterations when multiple workers are running in parallel.
 
-### Parameters — ChatGPT / Google extraction flows
+**Consecutive failure guard**: if two consecutive sub-runs both have
+`saved_count=0` and `failed_count>0`, the loop stops with
+`stopped_reason=consecutive_all_failed`. This prevents runaway loops when
+ChatGPT is actively blocking.
 
-| Parameter | Type | Description |
-| --- | --- | --- |
-| `batch_id` | string/null | BrandSight batch UUID to load prompts from. |
-| `prompts_file` | string/null | Local JSON prompt file path. Use instead of `batch_id`. |
-| `brand_id` | string/null | Optional brand UUID override for local prompt files. |
-| `limit` | integer/null | Maximum prompts to run. |
-| `skip` | integer | Number of loaded prompts to skip. |
-| `dry_run` | boolean | Load prompts and log a preview without opening ChatGPT. |
-| `headless` | boolean/null | Override `CHATGPT_HEADLESS`; null uses `.env`. |
-| `chrome_user_data_dir` | string/null | Override Chrome profile path; null uses `.env`/default. |
-| `sources_panel_pause_seconds` | integer | Debug pause after opening Sources. Default is `0`. |
+**Mop-up pass** (single-worker runs only): after the main loop, the flow
+re-checks remaining prompts and runs additional sub-runs for any that were
+skipped. The mop-up pass is skipped when `max_prompts` is set (i.e. when
+dispatched by the dispatcher, which handles coverage itself).
 
-One of `batch_id` or `prompts_file` is required.
+---
 
 ## 8. Observability
 
-Prefect captures:
+The Prefect UI shows per-run:
+- All parameters
+- Task-level logs and durations
+- Final result summary
 
-- flow and task parameters
-- logs from extraction milestones
-- task status and duration
-- final result summary
-- exception traces
-
-The extraction logs include milestones such as:
-
-```text
-Markdown copied from ChatGPT response
-Raw HTML extracted from ChatGPT response
-Detected ChatGPT response model
-Sources button found; opening Sources panel
-Sources panel opened
-Sources panel links loaded
-Sources copied from panel
-Found product select button(s); opening product flyouts
-Product flyout captured
-Capture summary for prompt
-Finished prompt output process task
-```
-
-The flow returns a summary shaped like:
+Example flow result:
 
 ```json
 {
   "status": "completed",
   "loaded_count": 2,
-  "attempted_count": 2,
-  "saved_count": 2,
-  "skipped_count": 0,
+  "attempted_count": 1,
+  "saved_count": 1,
+  "skipped_count": 1,
   "failed_count": 0,
-  "batch_id": "...",
-  "brand_id": "...",
-  "failures": []
+  "batch_id": "fd0c7273-...",
+  "brand_id": "adadff95-...",
+  "product_output_processing": { "saved_count": 5 },
+  "entity_output_processing": { "saved_count": 14 },
+  "prompt_output_processing": { "updated_count": 1 },
+  "score_workflow_trigger": { "triggered_count": 1 }
 }
 ```
 
-## 9. Prompt Claiming
-
-When multiple workers run against the same batch, the claiming system provides atomic per-prompt locking to prevent two workers from processing the same prompt concurrently.
-
-### How it works
-
-Three layers of protection work together:
-
-1. **Excluded from the remaining list** — `completed_prompt_ids()` now also excludes prompts that have an active pending claim. Workers never even load a claimed prompt into their run queue.
-2. **Atomic claim before Chrome opens** — before opening a browser tab for a prompt, the worker calls the `try_claim_prompt` Postgres RPC. This is an atomic upsert that only succeeds when no live pending claim exists for that `(prompt_id, batch_id, llm_model)` triple. If it returns `false`, the prompt is skipped.
-3. **Complete or release on outcome** — on success, `complete_claim()` deletes the claim row. On failure, `release_claim()` marks the claim `failed` (making it retry-eligible). If the worker crashes without calling either, the TTL expires the claim automatically.
-
-### Claim status values
-
-| Status | Meaning |
-|---|---|
-| `pending` | A worker has claimed the prompt and is actively processing it (or has crashed) |
-| `failed` | The worker finished but the extraction failed — the prompt is eligible for retry |
-
-Completed prompts have their claim row deleted, not updated.
-
-### TTL and crash recovery
-
-Claims are created with a 20-minute TTL stored in the `expires_at` column. If a worker crashes mid-extraction, no cleanup is needed — the next worker that loads the prompt list will find the claim expired and treat it as available. The `completed_prompt_ids()` query filters out only claims where `expires_at > now()`.
-
-### Worker identity
-
-The worker ID recorded in each claim is resolved in order: `FLY_MACHINE_ID` env var → `HOSTNAME` env var → a fresh UUID. This is used for diagnostics only; the claiming logic does not depend on it.
-
-### Bypassing claims with `force_rerun`
-
-Passing `force_rerun=True` to any extraction flow skips the claiming system entirely and re-processes every prompt regardless of existing claims or outputs. Use this when you want to deliberately re-extract a batch from scratch.
-
-### Migration requirement
-
-The claiming system requires the `prompt_claims` table and the `try_claim_prompt` RPC to exist in Supabase. The migration is at:
-
-```
-docs/migrations/001_prompt_claims.sql
-```
-
-Run it once against your Supabase project before deploying workers that include this feature.
-
-### Fail-open behaviour
-
-If the `prompt_claims` table does not yet exist (e.g. during the migration window), all claim calls fail open — `try_claim_prompt` returns `true` and prompts are processed as if no claim system were present. This ensures existing deployments keep working until the migration is applied.
-
 ---
 
-## 10. Troubleshooting
+## 9. Troubleshooting
 
 ### `No module named 'prefect'`
-
-Install dependencies in the active environment:
 
 ```bash
 make install
@@ -516,116 +359,56 @@ make install
 
 ### `No module named 'automated_extraction'`
 
-The worker can see Prefect, but it cannot import this app package. Install the
-package in editable mode and redeploy so the worker receives the project
-working directory:
+Install in editable mode and re-register:
 
 ```bash
 make install
-make prefect-deploy
-```
-
-Then restart the worker:
-
-```bash
-make prefect-worker
-```
-
-### Deployment does not appear in UI
-
-Confirm the server is running:
-
-```bash
-prefect config view
-curl http://localhost:4200/api/health
-```
-
-Then serve or deploy again:
-
-```bash
-make prefect-serve
+PREFECT_API_URL=https://prompt-extractor-prefect.fly.dev/api \
+PREFECT_WORK_POOL=prompt-extraction-uk \
+python -m automated_extraction.workflows.register_deployments --deploy-local --region uk
 ```
 
 ### Worker does not pick up runs
 
-Check the work pool names match:
+Check the work pool name and concurrency limit:
 
 ```bash
-echo $PREFECT_WORK_POOL
-prefect work-pool ls
+PREFECT_API_URL=https://prompt-extractor-prefect.fly.dev/api \
+prefect work-pool inspect prompt-extraction-uk
 ```
 
-The default pool is:
-
-```text
-prompt-extraction-pool
-```
-
-### ChatGPT opens but is not logged in
-
-Refresh the login profile:
+If concurrency is too low (e.g. still set to 1):
 
 ```bash
-make login
+PREFECT_API_URL=https://prompt-extractor-prefect.fly.dev/api \
+prefect work-pool set-concurrency-limit prompt-extraction-uk 9
 ```
 
-### Sources are visible but not captured
+### Flow run stays in `Pending`
 
-Run with verbose logging:
+The Prefect worker on the target machine may not be running. Check machine
+state and logs:
 
 ```bash
-python -m automated_extraction --batch-id <batch-id> --limit 1 --verbose
+fly machine list -a prompt-extractor-uk
+fly logs -a prompt-extractor-uk --machine <machine-id>
 ```
 
-Or use a short debug pause:
+### ChatGPT extraction times out
+
+See [GPT_WORKERS.md — Cloudflare challenge](./GPT_WORKERS.md#cloudflare-are-you-human-challenge)
+and [GPT_WORKERS.md — Session expiry](./GPT_WORKERS.md#session-expiry).
+
+### Sources not captured
+
+Run with a debug pause:
 
 ```bash
-python -m automated_extraction --batch-id <batch-id> --limit 1 --sources-panel-pause-seconds 30
-```
-
-The logs should show whether the button, panel, links, or extraction step failed.
-
-### Worker does not pick up UK runs
-
-Make sure the deployment name has the `-uk` suffix and the run was submitted against the `prompt-extraction-uk` pool. Check that the UK worker is running and polling the correct pool:
-
-```bash
-fly status -a prompt-extractor-uk
-fly logs -a prompt-extractor-uk
-```
-
-### Google batch stops with `stopped_reason=google_blocked_consecutive`
-
-The worker's datacenter IP is being blocked by Google. This applies to both AI Mode and AI Overview batches. Re-trigger the same batch with `use_proxy=True`:
-
-```bash
-# AI Mode
-prefect deployment run 'google-ai-mode-extraction-batch/google-ai-mode-extraction-batch-uk' \
+PREFECT_API_URL=https://prompt-extractor-prefect.fly.dev/api \
+prefect deployment run 'chatgpt-extraction/chatgpt-extraction-uk' \
   --param batch_id=<uuid> \
-  --param use_proxy=true
-
-# AI Overview
-prefect deployment run 'google-ai-overview-extraction-batch/google-ai-overview-extraction-batch-uk' \
-  --param batch_id=<uuid> \
-  --param use_proxy=true
+  --param limit=1 \
+  --param sources_panel_pause_seconds=60
 ```
 
-This requires `GOOGLE_PROXY_URL` to be set as a secret on the worker. See [MULTI_REGION.md](MULTI_REGION.md) for proxy setup details.
-
-### All workers processing the same prompts (duplicate runs)
-
-**Symptom:** Multiple workers pick up the same prompts and produce duplicate outputs, or all workers converge on the same position in the prompt list after their first inner run.
-
-**Cause:** The old dispatcher set `run_skip = 1 if run_index == 1 else 0` for inner runs beyond the first, resetting every worker's offset to 0 on their second run. All workers then raced to process whatever was at position 0.
-
-**Fix (already applied):** The dispatcher now uses `run_skip = skip` — the constant offset originally assigned to that worker. Because `get_prompts` uses `only_remaining=True`, the prompt list shrinks as other workers complete entries ahead of this position, so the constant offset naturally advances through fresh prompts on each successive inner run without causing collisions.
-
-If you observe duplicate outputs from a run before this fix was deployed, use `force_rerun=False` (the default) and let the claiming system (see [Prompt Claiming](#prompt-claiming)) handle deduplication going forward.
-
-### Workers crash on startup with `ModuleNotFoundError: No module named 'importlib_metadata'`
-
-`importlib_metadata` is required by `prefect/workers/base.py` but was missing from `requirements.txt`. It has now been added. If you are hitting this error on an older image, rebuild and redeploy the worker:
-
-```bash
-make deploy-worker-uk
-```
+Then VNC in to inspect the Sources panel state.
