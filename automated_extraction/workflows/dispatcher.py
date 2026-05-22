@@ -26,7 +26,6 @@ worker_count to this flow.  No other changes needed.
 
 from __future__ import annotations
 
-import math
 import os
 from typing import Any
 
@@ -243,17 +242,16 @@ def dispatch_extraction_flow(
     # -- Calculate chunks -------------------------------------------------------
     # Cap worker_count so we never dispatch more flows than there are prompts.
     effective_workers = min(worker_count, remaining_count)
-    chunk_size = math.ceil(remaining_count / effective_workers)
 
     flow_logger.info(
         "Dispatching %s worker(s) for batch %s. extraction_type=%s region=%s "
-        "remaining=%s chunk_size=%s limit_per_run=%s deployment=%s",
+        "remaining=%s limit_per_run=%s deployment=%s "
+        "(workers compete dynamically via claims — no static skip assignment)",
         effective_workers,
         batch_id,
         extraction_type,
         region,
         remaining_count,
-        chunk_size,
         limit,
         deployment_full_name,
     )
@@ -316,47 +314,42 @@ def dispatch_extraction_flow(
         )
 
     # -- Submit one flow run per worker ----------------------------------------
+    # Workers all start at skip=0 with no max_prompts cap. The claims system
+    # in the extraction layer ensures no two workers process the same prompt
+    # simultaneously. Each worker runs until the remaining pool is genuinely
+    # exhausted, rather than stopping at a static slice that may shrink under
+    # it as other workers complete prompts.
     submitted: list[dict[str, Any]] = []
     for i in range(effective_workers):
-        skip = i * chunk_size
         worker_params = {
             **base_params,
-            "skip": skip,
-            "max_prompts": chunk_size,
             "startup_delay_seconds": i * stagger_seconds,
         }
         try:
             run_id = _submit_worker_run(prefect_api_url, deployment_full_name, worker_params)
             flow_logger.info(
-                "Submitted worker %s/%s — flow_run_id=%s skip=%s max_prompts=%s",
+                "Submitted worker %s/%s — flow_run_id=%s",
                 i + 1,
                 effective_workers,
                 run_id,
-                skip,
-                chunk_size,
             )
             submitted.append(
                 {
                     "worker_index": i + 1,
                     "flow_run_id": run_id,
-                    "skip": skip,
-                    "max_prompts": chunk_size,
                 }
             )
         except Exception as exc:
             flow_logger.error(
-                "Failed to submit worker %s/%s (skip=%s): %s",
+                "Failed to submit worker %s/%s: %s",
                 i + 1,
                 effective_workers,
-                skip,
                 exc,
             )
             submitted.append(
                 {
                     "worker_index": i + 1,
                     "flow_run_id": None,
-                    "skip": skip,
-                    "max_prompts": chunk_size,
                     "error": str(exc),
                 }
             )
@@ -371,7 +364,6 @@ def dispatch_extraction_flow(
         "remaining_count": remaining_count,
         "worker_count": worker_count,
         "effective_workers": effective_workers,
-        "chunk_size": chunk_size,
         "limit_per_run": limit,
         "workers": submitted,
         "scale_result": scale_result,
