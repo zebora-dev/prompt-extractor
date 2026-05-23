@@ -1,5 +1,5 @@
 ---
-name: remote-control
+name: zebora
 description: Remote control for the BrandSight UK extraction workers and Prefect dispatches. Use for starting/stopping workers, triggering GPT extraction dispatches, and checking batch prompt status.
 argument-hint: [workers on|off|status] | [dispatch <batch_id>] | [status <batch_id>] | [batch <batch_id>]
 disable-model-invocation: true
