@@ -159,6 +159,8 @@ def dispatch_extraction_flow(
     login_email: str | None = None,
     capture_products: bool = True,
     capture_entities: bool = True,
+    # Scoring
+    trigger_scoring: bool = True,
     # Dynamic scaling
     auto_scale: bool = False,
     scale_wait_seconds: int = 30,
@@ -186,6 +188,10 @@ def dispatch_extraction_flow(
     login_email       : (ChatGPT) Account to use for auto-login.
     capture_products  : (ChatGPT) Extract product entities from responses.
     capture_entities  : (ChatGPT) Extract named entities from responses.
+    trigger_scoring   : When True (default), trigger the downstream scoring
+                        workflow after each prompt output is saved. Set to
+                        False to skip scoring (useful for bulk re-extraction
+                        where scoring will be triggered separately).
     auto_scale        : If True, automatically scale Fly.io machines to
                         match worker_count before submitting flows.
                         Requires FLY_API_TOKEN secret to be set on the app.
@@ -300,6 +306,7 @@ def dispatch_extraction_flow(
                 "use_proxy": use_proxy,
                 "country": country,
                 "language": language,
+                "trigger_scoring": trigger_scoring,
             }
         )
     else:  # chatgpt
@@ -310,6 +317,7 @@ def dispatch_extraction_flow(
                 "login_email": login_email,
                 "capture_products": capture_products,
                 "capture_entities": capture_entities,
+                "trigger_scoring": trigger_scoring,
             }
         )
 
