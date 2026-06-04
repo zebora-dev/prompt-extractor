@@ -681,6 +681,7 @@ def run_google_ai_overview_extraction_job(
     language: str | None = None,
     debug_pause_seconds: int = 0,
     use_proxy: bool = False,
+    paa_titles_only: bool = True,
 ) -> ExtractionRunResult:
     if not batch_id and not prompts_file:
         raise ValueError("one of batch_id or prompts_file is required")
@@ -868,6 +869,7 @@ def run_google_ai_overview_extraction_job(
                     llm_model="google-ai-overview",
                     index=index,
                     total=len(prompts),
+                    paa_titles_only=paa_titles_only,
                 )
                 if suggestion_count > 0:
                     current_metadata = (
@@ -1255,6 +1257,7 @@ def _capture_and_save_suggestions(
     llm_model: str,
     index: int,
     total: int,
+    paa_titles_only: bool = True,
 ) -> int:
     """Capture PAA suggestions from the current page and save them to Supabase.
 
@@ -1269,7 +1272,7 @@ def _capture_and_save_suggestions(
     if not output_id or not prompt_id or not brand_id:
         return 0
     try:
-        paa = capture_people_also_ask(driver)
+        paa = capture_people_also_ask(driver, titles_only=paa_titles_only)
         if not paa.suggestions:
             LOGGER.info("[%s/%s] No PAA suggestions found for prompt %s.", index, total, prompt_id)
             return 0

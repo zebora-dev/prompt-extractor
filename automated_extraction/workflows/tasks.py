@@ -231,6 +231,7 @@ def extract_google_ai_overview_batch_task(
     language: str | None = None,
     debug_pause_seconds: int = 0,
     use_proxy: bool = False,
+    paa_titles_only: bool = True,
 ) -> dict[str, Any]:
     """
     Run BrandSight prompts through Google Search and capture AI Overview output.
@@ -266,6 +267,7 @@ def extract_google_ai_overview_batch_task(
         language=language,
         debug_pause_seconds=debug_pause_seconds,
         use_proxy=use_proxy,
+        paa_titles_only=paa_titles_only,
     )
     payload = asdict(result)
     task_logger.info("Finished Google AI Overview extraction task: %s", summarize_extraction_payload(payload))

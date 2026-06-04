@@ -33,11 +33,12 @@ def prompt_extraction_batch_flow(
     skip: int = 0,
     auto_login: bool | None = False,
     login_email: str | None = None,
-    capture_products: bool = False,
-    capture_entities: bool = False,
+    capture_products: bool = True,
+    capture_entities: bool = True,
     delay_seconds: int = 120,
     max_prompts: int | None = None,
     startup_delay_seconds: int = 0,
+    trigger_scoring: bool = True,
 ) -> dict[str, Any]:
     """
     Sequentially run chatgpt-extraction until the currently remaining prompt set
@@ -86,7 +87,7 @@ def prompt_extraction_batch_flow(
     if max_prompts is not None:
         run_count = min(run_count, math.ceil(max_prompts / limit))
     flow_logger.info(
-        "Starting sequential prompt extraction batch. batch_id=%s brand_id=%s model_filter=%s remaining_count=%s skip=%s limit_per_run=%s planned_runs=%s auto_login=%s capture_products=%s capture_entities=%s delay_seconds=%s max_prompts=%s",
+        "Starting sequential prompt extraction batch. batch_id=%s brand_id=%s model_filter=%s remaining_count=%s skip=%s limit_per_run=%s planned_runs=%s auto_login=%s capture_products=%s capture_entities=%s delay_seconds=%s max_prompts=%s trigger_scoring=%s",
         batch_id,
         brand_id,
         model_filter or "any",
@@ -99,6 +100,7 @@ def prompt_extraction_batch_flow(
         capture_entities,
         delay_seconds,
         max_prompts,
+        trigger_scoring,
     )
 
     run_results: list[dict[str, Any]] = []
@@ -125,6 +127,7 @@ def prompt_extraction_batch_flow(
             force_rerun=False,
             capture_products=capture_products,
             capture_entities=capture_entities,
+            trigger_scoring=trigger_scoring,
         )
         run_results.append(result)
         flow_logger.info(
@@ -234,6 +237,7 @@ def prompt_extraction_batch_flow(
                     force_rerun=False,
                     capture_products=capture_products,
                     capture_entities=capture_entities,
+                    trigger_scoring=trigger_scoring,
                 )
                 mop_up_results.append(result)
                 flow_logger.info(
@@ -303,6 +307,7 @@ def prompt_extraction_batch_flow(
         "auto_login": auto_login,
         "capture_products": capture_products,
         "capture_entities": capture_entities,
+        "trigger_scoring": trigger_scoring,
         "delay_seconds": delay_seconds,
         "max_prompts": max_prompts,
         "initial_remaining_count": remaining_count,
@@ -341,8 +346,9 @@ def prompt_extraction_flow(
     llm_model_filter: str | None = "gpt",
     auto_login: bool | None = None,
     login_email: str | None = None,
-    capture_products: bool = False,
-    capture_entities: bool = False,
+    capture_products: bool = True,
+    capture_entities: bool = True,
+    trigger_scoring: bool = True,
 ) -> dict[str, Any]:
     """
     Orchestrate a ChatGPT prompt extraction run.
@@ -419,12 +425,16 @@ def prompt_extraction_flow(
         flow_logger.info("Skipping prompt output processing because no outputs were saved.")
 
     score_workflow_result: dict[str, Any] | None = None
-    if not dry_run and result.get("saved_outputs"):
+    if not dry_run and trigger_scoring and result.get("saved_outputs"):
         score_workflow_result = score_workflow_trigger_task(
             saved_outputs=result.get("saved_outputs") or [], force=False
         )
     else:
-        flow_logger.info("Skipping score workflow trigger because no outputs were saved.")
+        flow_logger.info(
+            "Skipping score workflow trigger. trigger_scoring=%s saved_outputs=%s",
+            trigger_scoring,
+            len(result.get("saved_outputs") or []),
+        )
 
     combined_result = {
         **result,
@@ -453,6 +463,7 @@ def google_ai_mode_extraction_batch_flow(
     use_proxy: bool = False,
     max_prompts: int | None = None,
     startup_delay_seconds: int = 0,
+    trigger_scoring: bool = True,
 ) -> dict[str, Any]:
     """
     Sequentially run google-ai-mode-extraction until all remaining prompts in
@@ -538,6 +549,7 @@ def google_ai_mode_extraction_batch_flow(
             country=country,
             language=language,
             use_proxy=use_proxy,
+            trigger_scoring=trigger_scoring,
         )
         run_results.append(result)
         flow_logger.info(
@@ -629,6 +641,7 @@ def google_ai_mode_extraction_batch_flow(
                     country=country,
                     language=language,
                     use_proxy=use_proxy,
+                    trigger_scoring=trigger_scoring,
                 )
                 mop_up_results.append(result)
                 flow_logger.info(
@@ -693,6 +706,7 @@ def google_ai_mode_extraction_batch_flow(
         "country": country,
         "language": language,
         "use_proxy": use_proxy,
+        "trigger_scoring": trigger_scoring,
         "max_prompts": max_prompts,
         "initial_remaining_count": remaining_count,
         "limit_per_run": limit,
@@ -727,6 +741,8 @@ def google_ai_overview_extraction_batch_flow(
     use_proxy: bool = False,
     max_prompts: int | None = None,
     startup_delay_seconds: int = 0,
+    trigger_scoring: bool = True,
+    paa_titles_only: bool = True,
 ) -> dict[str, Any]:
     """
     Sequentially run google-ai-overview-extraction until all remaining prompts
@@ -814,6 +830,8 @@ def google_ai_overview_extraction_batch_flow(
             country=country,
             language=language,
             use_proxy=use_proxy,
+            trigger_scoring=trigger_scoring,
+            paa_titles_only=paa_titles_only,
         )
         run_results.append(result)
         flow_logger.info(
@@ -906,6 +924,7 @@ def google_ai_overview_extraction_batch_flow(
                     country=country,
                     language=language,
                     use_proxy=use_proxy,
+                    trigger_scoring=trigger_scoring,
                 )
                 mop_up_results.append(result)
                 flow_logger.info(
@@ -970,6 +989,7 @@ def google_ai_overview_extraction_batch_flow(
         "country": country,
         "language": language,
         "use_proxy": use_proxy,
+        "trigger_scoring": trigger_scoring,
         "max_prompts": max_prompts,
         "initial_remaining_count": remaining_count,
         "limit_per_run": limit,
@@ -1008,6 +1028,7 @@ def google_ai_mode_extraction_flow(
     language: str | None = None,
     debug_pause_seconds: int = 0,
     use_proxy: bool = False,
+    trigger_scoring: bool = True,
 ) -> dict[str, Any]:
     """
     Orchestrate a Google AI Mode prompt extraction run.
@@ -1057,12 +1078,16 @@ def google_ai_mode_extraction_flow(
         flow_logger.info("Skipping prompt output processing because no Google AI Mode outputs were saved.")
 
     score_workflow_result: dict[str, Any] | None = None
-    if not dry_run and result.get("saved_outputs"):
+    if not dry_run and trigger_scoring and result.get("saved_outputs"):
         score_workflow_result = score_workflow_trigger_task(
             saved_outputs=result.get("saved_outputs") or [], force=False
         )
     else:
-        flow_logger.info("Skipping score workflow trigger because no Google AI Mode outputs were saved.")
+        flow_logger.info(
+            "Skipping score workflow trigger. trigger_scoring=%s saved_outputs=%s",
+            trigger_scoring,
+            len(result.get("saved_outputs") or []),
+        )
 
     combined_result = {
         **result,
@@ -1093,6 +1118,8 @@ def google_ai_overview_extraction_flow(
     language: str | None = None,
     debug_pause_seconds: int = 0,
     use_proxy: bool = False,
+    trigger_scoring: bool = True,
+    paa_titles_only: bool = True,
 ) -> dict[str, Any]:
     """
     Orchestrate a Google AI Overview prompt extraction run.
@@ -1128,6 +1155,7 @@ def google_ai_overview_extraction_flow(
         language=language,
         debug_pause_seconds=debug_pause_seconds,
         use_proxy=use_proxy,
+        paa_titles_only=paa_titles_only,
     )
 
     processing_result: dict[str, Any] | None = None
@@ -1142,12 +1170,16 @@ def google_ai_overview_extraction_flow(
         flow_logger.info("Skipping prompt output processing because no Google AI Overview outputs were saved.")
 
     score_workflow_result: dict[str, Any] | None = None
-    if not dry_run and result.get("saved_outputs"):
+    if not dry_run and trigger_scoring and result.get("saved_outputs"):
         score_workflow_result = score_workflow_trigger_task(
             saved_outputs=result.get("saved_outputs") or [], force=False
         )
     else:
-        flow_logger.info("Skipping score workflow trigger because no Google AI Overview outputs were saved.")
+        flow_logger.info(
+            "Skipping score workflow trigger. trigger_scoring=%s saved_outputs=%s",
+            trigger_scoring,
+            len(result.get("saved_outputs") or []),
+        )
 
     combined_result = {
         **result,
