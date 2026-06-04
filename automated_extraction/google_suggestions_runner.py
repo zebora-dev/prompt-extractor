@@ -132,8 +132,19 @@ class PAASectionCapture:
         return len(self.suggestions)
 
 
-def capture_people_also_ask(driver, *, max_questions: int = 20, wait_seconds: float = 4.0) -> PAASectionCapture:
+def capture_people_also_ask(
+    driver,
+    *,
+    max_questions: int = 20,
+    wait_seconds: float = 4.0,
+    titles_only: bool = True,
+) -> PAASectionCapture:
     """Click every PAA accordion, expand with Show more, and capture each answer.
+
+    When titles_only=True, only the question title text is captured from the
+    data-q attribute — no click, no expand, no network wait.  This is much
+    faster (instant DOM read vs. 5–10 s per question) and avoids the long
+    timeouts that occur when Google's AI Overview is unavailable for a PAA query.
 
     Returns a PAASectionCapture with one entry per question found.
     Works with NodriverBrowser (and remains compatible with the Selenium Chrome
@@ -149,12 +160,34 @@ def capture_people_also_ask(driver, *, max_questions: int = 20, wait_seconds: fl
         LOGGER.info("No 'People also ask' section found on this page.")
         return PAASectionCapture(capture_method="paa_dom_not_found")
 
-    LOGGER.info("Found %s 'People also ask' question(s). Capturing up to %s.", len(questions), max_questions)
+    LOGGER.info(
+        "Found %s 'People also ask' question(s). Capturing up to %s (titles_only=%s).",
+        len(questions), max_questions, titles_only,
+    )
     suggestions: list[PAASuggestionCapture] = []
 
     for idx, question_el in enumerate(questions[:max_questions], start=1):
         question_text = (question_el.get_attribute("data-q") or "").strip()
         if not question_text:
+            continue
+
+        if titles_only:
+            # Fast path: just record the question title, skip click/expand entirely.
+            suggestion = PAASuggestionCapture(
+                index=idx,
+                text=question_text,
+                response="",
+                sources=[],
+                raw_html="",
+                capture_method="paa_titles_only",
+            )
+            LOGGER.info(
+                "[PAA %s/%s] Title-only capture: %r",
+                idx,
+                min(len(questions), max_questions),
+                question_text[:80],
+            )
+            suggestions.append(suggestion)
             continue
 
         suggestion = _capture_single_paa(driver, question_el, idx, question_text, wait_seconds)

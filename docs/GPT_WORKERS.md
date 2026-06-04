@@ -42,17 +42,17 @@ persistent Chrome browser that stays alive between extraction runs.
 
 9 dedicated machines, each permanently assigned one ChatGPT account.
 
-| Machine ID       | Account                  | Profile index |
-|------------------|--------------------------|---------------|
-| e829420a634578   | dev@theround.com         | 0             |
-| 7849237b673708   | chris@theround.com       | 1             |
-| e82949df4390d8   | bob@theround.com         | 2             |
-| d8d3744c34e4e8   | frank@theround.com       | 3             |
-| 7849237b673208   | info@zebora.io           | 4             |
-| e829491b6d4268   | dev@zebora.io            | 5             |
-| d896d6da5d3938   | data@zebora.io           | 6             |
-| 0805610f32d018   | rob@zebora.io            | 7             |
-| 18592e4a677678   | john@zebora.io           | 8             |
+| UK Worker ID     | UK Worker ID (old)                          | US Worker ID     | Account                  | Profile index |
+|------------------|---------------------------------------------|------------------|--------------------------|---------------|
+| —                | e829420a634578                              | d8d3160b35de68   | dev@theround.com         | 0             |
+| —                | 7849237b673708                              | e829397bdd1038   | chris@theround.com       | 1             |
+| —                | e82949df4390d8                              | d8927e5c775e58   | bob@theround.com         | 2             |
+| d8d3744c34e4e8   | —                                           | 78452e3b292208   | frank@theround.com       | 3             |
+| 7849237b673208   | —                                           | 822e94c79651d8   | info@zebora.io           | 4             |
+| —                | e829491b6d4268                              | 781e5d1c6e9128   | dev@zebora.io            | 5             |
+| d896d6da5d3938   | —                                           | 6837ee3ce30758   | data@zebora.io           | 6             |
+| —                | 0805610f32d018                              | d89590ebed9308   | rob@zebora.io            | 7             |
+| —                | 18592e4a677678                              | 8d4e06ced91468   | john@zebora.io           | 8             |
 
 Per-machine env vars (`CHROME_PROFILE_INDEX`, `CHATGPT_LOGIN_EMAIL`) are set
 via `fly machine update --env` and are **not** in `fly-uk.yaml` (Fly wipes
