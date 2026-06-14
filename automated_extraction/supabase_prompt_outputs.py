@@ -437,9 +437,35 @@ class SupabasePromptOutputRepository:
         batch_id: str | None,
         *,
         llm_model_filter: str | None = "gpt",
+        required_models: list[str] | None = None,
     ) -> dict[str, Any] | None:
+        """Return an existing output if the prompt is already fully complete.
+
+        When ``required_models`` is set a prompt is only considered complete when
+        ALL required models have an active output — otherwise return None so the
+        prompt is processed again (for the missing model).
+        """
         if not prompt_id or not brand_id or not batch_id:
             return None
+
+        if required_models:
+            # Check each required model — prompt is done only if ALL are present.
+            for model in required_models:
+                resp = (
+                    self.client.table(self.table_name)
+                    .select("id")
+                    .eq("prompt_id", prompt_id)
+                    .eq("brand_id", brand_id)
+                    .eq("batch_id", batch_id)
+                    .eq("active", True)
+                    .eq("llm_model", model)
+                    .limit(1)
+                    .execute()
+                )
+                if not resp.data:
+                    return None  # Missing this model — not yet complete
+            # All required models present — return a sentinel so caller skips
+            return {"llm_model": ",".join(required_models), "run_at": None, "id": None}
 
         query = (
             self.client.table(self.table_name)

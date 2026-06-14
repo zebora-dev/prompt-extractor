@@ -68,9 +68,12 @@ class ApiClient:
         batch_id: str | None,
         *,
         llm_model_filter: str | None = "gpt",
+        required_models: list[str] | None = None,
     ) -> dict[str, Any] | None:
         return self.supabase.find_existing_prompt_output(
-            prompt_id, brand_id, batch_id, llm_model_filter=llm_model_filter
+            prompt_id, brand_id, batch_id,
+            llm_model_filter=llm_model_filter,
+            required_models=required_models,
         )
 
     def save_prompt_output(self, output: dict[str, Any], max_retries: int = 4) -> dict[str, Any] | None:
