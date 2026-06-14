@@ -40,6 +40,7 @@ class ApiClient:
         *,
         only_remaining: bool = True,
         llm_model_filter: str | None = "gpt",
+        required_models: list[str] | None = None,
     ) -> list[dict[str, Any]]:
         return self.supabase.get_prompts(
             batch_id,
@@ -47,6 +48,7 @@ class ApiClient:
             limit,
             only_remaining=only_remaining,
             llm_model_filter=llm_model_filter,
+            required_models=required_models,
         )
 
     def prompt_output_exists(

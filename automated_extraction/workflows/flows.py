@@ -76,18 +76,32 @@ def prompt_extraction_batch_flow(
     if not brand_id:
         raise RuntimeError(f"Batch {batch_id} does not include brand_id")
 
+    # Read required_models from batch config (drives multi-model completion check).
+    llm_model_config = batch.get("llm_models") or {}
+    required_models: list[str] | None = None
+    if isinstance(llm_model_config, dict):
+        raw = llm_model_config.get("required_models")
+        if isinstance(raw, list) and raw:
+            required_models = [str(m) for m in raw]
+            flow_logger.info(
+                "Batch config specifies required_models=%s — prompts missing any model will be re-run. batch_id=%s",
+                required_models,
+                batch_id,
+            )
+
     remaining_prompts = api.get_prompts(
         batch_id,
         str(brand_id),
         only_remaining=True,
         llm_model_filter=model_filter,
+        required_models=required_models,
     )
     remaining_count = max(0, len(remaining_prompts) - skip)
     run_count = math.ceil(remaining_count / limit) if remaining_count else 0
     if max_prompts is not None:
         run_count = min(run_count, math.ceil(max_prompts / limit))
     flow_logger.info(
-        "Starting sequential prompt extraction batch. batch_id=%s brand_id=%s model_filter=%s remaining_count=%s skip=%s limit_per_run=%s planned_runs=%s auto_login=%s capture_products=%s capture_entities=%s delay_seconds=%s max_prompts=%s trigger_scoring=%s",
+        "Starting sequential prompt extraction batch. batch_id=%s brand_id=%s model_filter=%s remaining_count=%s skip=%s limit_per_run=%s planned_runs=%s auto_login=%s capture_products=%s capture_entities=%s delay_seconds=%s max_prompts=%s trigger_scoring=%s required_models=%s",
         batch_id,
         brand_id,
         model_filter or "any",
@@ -101,6 +115,7 @@ def prompt_extraction_batch_flow(
         delay_seconds,
         max_prompts,
         trigger_scoring,
+        required_models or "none",
     )
 
     run_results: list[dict[str, Any]] = []
@@ -167,6 +182,7 @@ def prompt_extraction_batch_flow(
                 str(brand_id),
                 only_remaining=True,
                 llm_model_filter=model_filter,
+                required_models=required_models,
             )
             if not still_remaining:
                 stopped_reason = "batch_exhausted"
@@ -202,6 +218,7 @@ def prompt_extraction_batch_flow(
             str(brand_id),
             only_remaining=True,
             llm_model_filter=model_filter,
+            required_models=required_models,
         )
         mop_up_count = len(mop_up_remaining)
         flow_logger.info(
@@ -268,6 +285,7 @@ def prompt_extraction_batch_flow(
                         str(brand_id),
                         only_remaining=True,
                         llm_model_filter=model_filter,
+                        required_models=required_models,
                     )
                     if not still_remaining:
                         stopped_reason = "batch_exhausted"

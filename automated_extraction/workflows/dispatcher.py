@@ -86,14 +86,27 @@ def _get_remaining_count(
     batch_id: str,
     brand_id: str,
     model_filter: str | None,
+    required_models: list[str] | None = None,
 ) -> int:
     prompts = api.get_prompts(
         batch_id,
         brand_id,
         only_remaining=True,
         llm_model_filter=model_filter,
+        required_models=required_models,
     )
     return len(prompts)
+
+
+def _required_models_from_batch(batch: dict) -> list[str] | None:
+    """Extract required_models from batches.llm_model config, if present."""
+    llm_model_config = batch.get("llm_models") or {}
+    if not isinstance(llm_model_config, dict):
+        return None
+    raw = llm_model_config.get("required_models")
+    if isinstance(raw, list) and raw:
+        return [str(m) for m in raw]
+    return None
 
 
 def _submit_worker_run(
@@ -230,7 +243,15 @@ def dispatch_extraction_flow(
     if not brand_id:
         raise RuntimeError(f"Batch {batch_id} has no brand_id")
 
-    remaining_count = _get_remaining_count(api, batch_id, brand_id, model_filter)
+    required_models = _required_models_from_batch(batch)
+    if required_models:
+        flow_logger.info(
+            "Batch config specifies required_models=%s — using multi-model completion check. batch_id=%s",
+            required_models,
+            batch_id,
+        )
+
+    remaining_count = _get_remaining_count(api, batch_id, brand_id, model_filter, required_models)
     if remaining_count == 0:
         flow_logger.info(
             "No remaining prompts for batch %s (extraction_type=%s). Nothing to dispatch.",

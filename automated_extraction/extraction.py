@@ -957,12 +957,27 @@ def load_prompt_work(
     resolved_brand_id = brand_id or batch.get("brand_id")
     if not resolved_brand_id:
         raise RuntimeError(f"Batch {batch_id} does not include brand_id")
+
+    # Read required_models from batch config if present.
+    llm_model_config = batch.get("llm_models") or {}
+    required_models: list[str] | None = None
+    if isinstance(llm_model_config, dict):
+        raw = llm_model_config.get("required_models")
+        if isinstance(raw, list) and raw:
+            required_models = [str(m) for m in raw]
+            LOGGER.info(
+                "load_prompt_work: batch config specifies required_models=%s. batch_id=%s",
+                required_models,
+                batch_id,
+            )
+
     return (
         api.get_prompts(
             batch_id,
             str(resolved_brand_id),
             only_remaining=only_remaining,
             llm_model_filter=llm_model_filter,
+            required_models=required_models,
         ),
         batch_id,
         str(resolved_brand_id),
