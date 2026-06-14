@@ -267,7 +267,9 @@ def run_extraction_job(
                     capture.source_capture_method,
                 )
                 # Re-check immediately before saving — another worker may have saved
-                # this prompt while Chrome was running it.
+                # this specific model while Chrome was running it.
+                # Use the exact captured model (not required_models) so we don't
+                # create duplicate rows for a model we already have.
                 concurrent_output = (
                     None
                     if force_rerun
@@ -275,8 +277,8 @@ def run_extraction_job(
                         prompt_id,
                         prompt_brand_id,
                         resolved_batch_id,
-                        llm_model_filter=llm_model_filter,
-                        required_models=required_models,
+                        llm_model_filter=capture.llm_model,
+                        required_models=None,
                     )
                 )
                 if concurrent_output:

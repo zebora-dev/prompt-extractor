@@ -264,6 +264,7 @@ class SupabasePromptOutputRepository:
                     .eq("brand_id", brand_id)
                     .eq("active", True)
                     .eq("llm_model", model)
+                    .limit(10000)
                     .execute()
                 )
                 ids = {
@@ -301,7 +302,7 @@ class SupabasePromptOutputRepository:
         )
         if llm_model_filter:
             query = query.ilike("llm_model", f"%{llm_model_filter}%")
-        response = query.execute()
+        response = query.limit(10000).execute()
         return {
             str(row.get("prompt_id")) for row in response.data or [] if isinstance(row, dict) and row.get("prompt_id")
         }
@@ -319,7 +320,7 @@ class SupabasePromptOutputRepository:
             )
             if llm_model_filter:
                 claims_query = claims_query.ilike("llm_model", f"%{llm_model_filter}%")
-            claims_response = claims_query.execute()
+            claims_response = claims_query.limit(10000).execute()
             claimed_ids = {
                 str(row.get("prompt_id"))
                 for row in claims_response.data or []
@@ -485,9 +486,20 @@ class SupabasePromptOutputRepository:
 
     def save_prompt_output(self, output: dict[str, Any]) -> dict[str, Any] | None:
         row = output_to_row(output, include_id=False)
+        prompt_id = row.get("prompt_id")
+        batch_id = row.get("batch_id")
+        llm_model = row.get("llm_model")
         LOGGER.info(
-            "Saving prompt output directly to Supabase. table=%s prompt_id=%s", self.table_name, row.get("prompt_id")
+            "Saving prompt output directly to Supabase. table=%s prompt_id=%s llm_model=%s",
+            self.table_name,
+            prompt_id,
+            llm_model,
         )
+        # Deactivate any existing active rows for this prompt+batch+model before inserting.
+        if prompt_id and batch_id and llm_model:
+            self.client.table(self.table_name).update({"active": False}).eq("prompt_id", prompt_id).eq(
+                "batch_id", batch_id
+            ).eq("llm_model", llm_model).eq("active", True).execute()
         response = self.client.table(self.table_name).insert(row).execute()
         if not response.data:
             return None
