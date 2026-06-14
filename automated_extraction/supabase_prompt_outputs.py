@@ -29,6 +29,7 @@ class BatchRow:
     is_active: bool | None = None
     is_approved: str | None = None
     multi_llm: bool | None = None
+    llm_models: Any = None
     brand: Any = None
 
 
@@ -197,6 +198,7 @@ class SupabasePromptOutputRepository:
         *,
         only_remaining: bool = True,
         llm_model_filter: str | None = "gpt",
+        required_models: list[str] | None = None,
     ) -> list[PromptDict]:
         response = (
             self.client.table("prompts")
@@ -216,25 +218,80 @@ class SupabasePromptOutputRepository:
             LOGGER.info("Loaded %s active prompt(s) for brand_id=%s without remaining filter.", len(prompts), brand_id)
             return prompts
 
-        completed_prompt_ids = self.completed_prompt_ids(
+        completed_ids = self.completed_prompt_ids(
             batch_id=batch_id,
             brand_id=brand_id,
             llm_model_filter=llm_model_filter,
+            required_models=required_models,
         )
-        remaining = [prompt for prompt in prompts if prompt.get("id") not in completed_prompt_ids]
+        remaining = [prompt for prompt in prompts if prompt.get("id") not in completed_ids]
         LOGGER.info(
-            "Remaining prompts analysis. total_prompts=%s completed_count=%s remaining_count=%s batch_id=%s brand_id=%s llm_model_filter=%s",
+            "Remaining prompts analysis. total_prompts=%s completed_count=%s remaining_count=%s "
+            "batch_id=%s brand_id=%s llm_model_filter=%s required_models=%s",
             len(prompts),
-            len(completed_prompt_ids),
+            len(completed_ids),
             len(remaining),
             batch_id,
             brand_id,
             llm_model_filter or "any",
+            required_models or "none",
         )
         return remaining
 
-    def completed_prompt_ids(self, *, batch_id: str, brand_id: str, llm_model_filter: str | None = "gpt") -> set[str]:
-        # Prompts that already have a saved output record
+    def completed_prompt_ids(
+        self,
+        *,
+        batch_id: str,
+        brand_id: str,
+        llm_model_filter: str | None = "gpt",
+        required_models: list[str] | None = None,
+    ) -> set[str]:
+        """Return prompt_ids that are fully complete for this batch.
+
+        When ``required_models`` is provided, a prompt is only considered
+        complete if it has outputs for *all* listed models (exact match).
+        When absent, falls back to the existing ILIKE behaviour on
+        ``llm_model_filter``.
+        """
+        if required_models:
+            # Per-model exact-match sets; intersection = prompts with ALL models.
+            per_model_sets: list[set[str]] = []
+            for model in required_models:
+                resp = (
+                    self.client.table(self.table_name)
+                    .select("prompt_id")
+                    .eq("batch_id", batch_id)
+                    .eq("brand_id", brand_id)
+                    .eq("active", True)
+                    .eq("llm_model", model)
+                    .execute()
+                )
+                ids = {
+                    str(r.get("prompt_id"))
+                    for r in resp.data or []
+                    if isinstance(r, dict) and r.get("prompt_id")
+                }
+                per_model_sets.append(ids)
+                LOGGER.debug("required_models: model=%s found=%s batch_id=%s", model, len(ids), batch_id)
+
+            complete = per_model_sets[0].intersection(*per_model_sets[1:]) if per_model_sets else set()
+            LOGGER.info(
+                "required_models completion. models=%s fully_complete=%s batch_id=%s brand_id=%s",
+                required_models,
+                len(complete),
+                batch_id,
+                brand_id,
+            )
+            # Also exclude any prompts currently claimed by another worker.
+            return complete | self._active_claimed_ids(batch_id=batch_id, llm_model_filter=llm_model_filter)
+
+        # Original behaviour: ILIKE filter on llm_model_filter.
+        done_ids = self._completed_output_ids(batch_id=batch_id, brand_id=brand_id, llm_model_filter=llm_model_filter)
+        return done_ids | self._active_claimed_ids(batch_id=batch_id, llm_model_filter=llm_model_filter)
+
+    def _completed_output_ids(
+        self, *, batch_id: str, brand_id: str, llm_model_filter: str | None
+    ) -> set[str]:
         query = (
             self.client.table(self.table_name)
             .select("prompt_id")
@@ -245,12 +302,12 @@ class SupabasePromptOutputRepository:
         if llm_model_filter:
             query = query.ilike("llm_model", f"%{llm_model_filter}%")
         response = query.execute()
-        done_ids = {
+        return {
             str(row.get("prompt_id")) for row in response.data or [] if isinstance(row, dict) and row.get("prompt_id")
         }
 
-        # Prompts currently being processed by another worker (active pending claim).
-        # Including these prevents multiple workers loading the same prompt simultaneously.
+    def _active_claimed_ids(self, *, batch_id: str, llm_model_filter: str | None) -> set[str]:
+        """Return prompt_ids currently held by an active (non-expired) claim."""
         try:
             now_iso = datetime.now(UTC).isoformat()
             claims_query = (
@@ -275,15 +332,15 @@ class SupabasePromptOutputRepository:
                     batch_id,
                     llm_model_filter or "any",
                 )
-            return done_ids | claimed_ids
+            return claimed_ids
         except Exception as exc:
             LOGGER.warning(
                 "completed_prompt_ids: could not load active claims (table may not exist yet) — "
-                "falling back to outputs-only filter. batch_id=%s error=%s",
+                "falling back to outputs-only. batch_id=%s error=%s",
                 batch_id,
                 exc,
             )
-            return done_ids
+            return set()
 
     def try_claim_prompt(
         self,
@@ -611,6 +668,7 @@ def row_to_batch(row: dict[str, Any]) -> BatchDict:
         is_active=row.get("is_active"),
         is_approved=row.get("is_approved"),
         multi_llm=row.get("multi_llm"),
+        llm_models=row.get("llm_models"),
         brand=row.get("brand"),
     )
     return asdict(typed_row)
