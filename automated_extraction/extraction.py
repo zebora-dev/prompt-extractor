@@ -85,6 +85,18 @@ def run_extraction_job(
     if limit:
         prompts = prompts[:limit]
 
+    # Read required_models from batch config so per-prompt skip check is model-aware.
+    required_models: list[str] | None = None
+    if resolved_batch_id:
+        try:
+            batch = api.get_batch(resolved_batch_id)
+            llm_model_config = batch.get("llm_models") or {}
+            raw = llm_model_config.get("required_models") if isinstance(llm_model_config, dict) else None
+            if isinstance(raw, list) and raw:
+                required_models = [str(m) for m in raw]
+        except Exception:
+            pass
+
     LOGGER.info(
         "Loaded %s prompt(s). batch_id=%s brand_id=%s dry_run=%s only_remaining=%s llm_model_filter=%s",
         len(prompts),
@@ -182,6 +194,7 @@ def run_extraction_job(
                     prompt_brand_id,
                     resolved_batch_id,
                     llm_model_filter=llm_model_filter,
+                    required_models=required_models,
                 )
             )
             if existing_output:
@@ -263,6 +276,7 @@ def run_extraction_job(
                         prompt_brand_id,
                         resolved_batch_id,
                         llm_model_filter=llm_model_filter,
+                        required_models=required_models,
                     )
                 )
                 if concurrent_output:
