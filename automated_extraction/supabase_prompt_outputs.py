@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import random
 from dataclasses import asdict, dataclass, fields
 from datetime import UTC, datetime
 from typing import Any
@@ -225,6 +226,7 @@ class SupabasePromptOutputRepository:
             required_models=required_models,
         )
         remaining = [prompt for prompt in prompts if prompt.get("id") not in completed_ids]
+        random.shuffle(remaining)
         LOGGER.info(
             "Remaining prompts analysis. total_prompts=%s completed_count=%s remaining_count=%s "
             "batch_id=%s brand_id=%s llm_model_filter=%s required_models=%s",

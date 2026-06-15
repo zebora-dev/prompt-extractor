@@ -52,8 +52,8 @@ _EXTRACTION_TYPES: dict[str, dict[str, str]] = {
         "model_filter": "google-ai-mode",
     },
     "chatgpt": {
-        "flow_name": "prompt-extraction-batch",
-        "deployment_base": "prompt-extraction-batch",
+        "flow_name": "chatgpt-extraction-batch",
+        "deployment_base": "chatgpt-extraction-batch",
         "model_filter": "gpt",
     },
 }
