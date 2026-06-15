@@ -36,6 +36,7 @@ When `required_models = ["gpt-5-5", "gpt-5-3-mini"]` and a prompt had `gpt-5-3-m
 
 ---
 
+
 ## 🐛 Bug Fixes / Quick Wins
 
 ### Chrome SingletonLock cleanup on startup
@@ -64,6 +65,7 @@ When `required_models` is set, claims are registered with the broad filter strin
 **Fix:** When `required_models` is set, identify which specific model is missing for each prompt before claiming, and register the claim with that model name. This requires a per-prompt model gap check before the claim step.
 
 ---
+
 
 ### Prompt claims — reduce claim window / auto-expire stale claims
 **Status:** Open  
