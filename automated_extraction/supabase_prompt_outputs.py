@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import random
 from dataclasses import asdict, dataclass, fields
 from datetime import UTC, datetime
 from typing import Any
@@ -225,6 +226,7 @@ class SupabasePromptOutputRepository:
             required_models=required_models,
         )
         remaining = [prompt for prompt in prompts if prompt.get("id") not in completed_ids]
+        random.shuffle(remaining)
         LOGGER.info(
             "Remaining prompts analysis. total_prompts=%s completed_count=%s remaining_count=%s "
             "batch_id=%s brand_id=%s llm_model_filter=%s required_models=%s",
@@ -255,22 +257,31 @@ class SupabasePromptOutputRepository:
         """
         if required_models:
             # Per-model exact-match sets; intersection = prompts with ALL models.
+            # Paginate in pages of 1000 — Supabase enforces a server-side 1000-row cap
+            # regardless of the client-side .limit() value.
             per_model_sets: list[set[str]] = []
             for model in required_models:
-                resp = (
-                    self.client.table(self.table_name)
-                    .select("prompt_id")
-                    .eq("batch_id", batch_id)
-                    .eq("brand_id", brand_id)
-                    .eq("active", True)
-                    .eq("llm_model", model)
-                    .execute()
-                )
-                ids = {
-                    str(r.get("prompt_id"))
-                    for r in resp.data or []
-                    if isinstance(r, dict) and r.get("prompt_id")
-                }
+                ids: set[str] = set()
+                page_size = 1000
+                offset = 0
+                while True:
+                    resp = (
+                        self.client.table(self.table_name)
+                        .select("prompt_id")
+                        .eq("batch_id", batch_id)
+                        .eq("brand_id", brand_id)
+                        .eq("active", True)
+                        .eq("llm_model", model)
+                        .range(offset, offset + page_size - 1)
+                        .execute()
+                    )
+                    page = resp.data or []
+                    for r in page:
+                        if isinstance(r, dict) and r.get("prompt_id"):
+                            ids.add(str(r["prompt_id"]))
+                    if len(page) < page_size:
+                        break
+                    offset += page_size
                 per_model_sets.append(ids)
                 LOGGER.debug("required_models: model=%s found=%s batch_id=%s", model, len(ids), batch_id)
 
@@ -292,19 +303,27 @@ class SupabasePromptOutputRepository:
     def _completed_output_ids(
         self, *, batch_id: str, brand_id: str, llm_model_filter: str | None
     ) -> set[str]:
-        query = (
-            self.client.table(self.table_name)
-            .select("prompt_id")
-            .eq("batch_id", batch_id)
-            .eq("brand_id", brand_id)
-            .eq("active", True)
-        )
-        if llm_model_filter:
-            query = query.ilike("llm_model", f"%{llm_model_filter}%")
-        response = query.execute()
-        return {
-            str(row.get("prompt_id")) for row in response.data or [] if isinstance(row, dict) and row.get("prompt_id")
-        }
+        ids: set[str] = set()
+        page_size = 1000
+        offset = 0
+        while True:
+            query = (
+                self.client.table(self.table_name)
+                .select("prompt_id")
+                .eq("batch_id", batch_id)
+                .eq("brand_id", brand_id)
+                .eq("active", True)
+            )
+            if llm_model_filter:
+                query = query.ilike("llm_model", f"%{llm_model_filter}%")
+            page = query.range(offset, offset + page_size - 1).execute().data or []
+            for row in page:
+                if isinstance(row, dict) and row.get("prompt_id"):
+                    ids.add(str(row["prompt_id"]))
+            if len(page) < page_size:
+                break
+            offset += page_size
+        return ids
 
     def _active_claimed_ids(self, *, batch_id: str, llm_model_filter: str | None) -> set[str]:
         """Return prompt_ids currently held by an active (non-expired) claim."""
@@ -319,7 +338,7 @@ class SupabasePromptOutputRepository:
             )
             if llm_model_filter:
                 claims_query = claims_query.ilike("llm_model", f"%{llm_model_filter}%")
-            claims_response = claims_query.execute()
+            claims_response = claims_query.limit(10000).execute()
             claimed_ids = {
                 str(row.get("prompt_id"))
                 for row in claims_response.data or []
@@ -485,9 +504,20 @@ class SupabasePromptOutputRepository:
 
     def save_prompt_output(self, output: dict[str, Any]) -> dict[str, Any] | None:
         row = output_to_row(output, include_id=False)
+        prompt_id = row.get("prompt_id")
+        batch_id = row.get("batch_id")
+        llm_model = row.get("llm_model")
         LOGGER.info(
-            "Saving prompt output directly to Supabase. table=%s prompt_id=%s", self.table_name, row.get("prompt_id")
+            "Saving prompt output directly to Supabase. table=%s prompt_id=%s llm_model=%s",
+            self.table_name,
+            prompt_id,
+            llm_model,
         )
+        # Deactivate any existing active rows for this prompt+batch+model before inserting.
+        if prompt_id and batch_id and llm_model:
+            self.client.table(self.table_name).update({"active": False}).eq("prompt_id", prompt_id).eq(
+                "batch_id", batch_id
+            ).eq("llm_model", llm_model).eq("active", True).execute()
         response = self.client.table(self.table_name).insert(row).execute()
         if not response.data:
             return None
