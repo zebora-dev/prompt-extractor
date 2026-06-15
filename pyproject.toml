@@ -13,6 +13,7 @@ dependencies = [
     "python-dotenv>=1.0.1",
     "setuptools>=82.0.0",
     "prefect>=3.6.19",
+    "importlib_metadata>=6.0.0",
     "httpx>=0.28.1",
     "supabase>=2.10.0",
 ]
