@@ -130,30 +130,70 @@ After that the session cookies persist indefinitely on the Fly volume.
 
 ### Initial login via VNC
 
-1. Start the machine if stopped:
+Do this once per machine, sequentially — one machine at a time so the Fly
+load balancer routes the VNC URL to the correct target.
+
+**UK machines** (`prompt-extractor-uk`, VNC: `https://prompt-extractor-uk.fly.dev/vnc.html`)
+**US machines** (`prompt-extractor-us`, VNC: `https://prompt-extractor-us.fly.dev/vnc.html`)
+
+1. Make sure all other machines in the app are **stopped** so the load balancer
+   routes to only the target machine.
+
+2. Start the target machine:
    ```bash
-   fly machine start <machine-id> -a prompt-extractor-uk
+   fly machine start <machine-id> -a <app-name>
    ```
 
-2. Open the VNC URL in a browser. Because `auto_start_machines: false` is set
-   and Fly load-balances across running machines, stop all other machines first
-   so the public URL routes to the target:
+3. Launch Chrome on the display via SSH (Chrome does not start automatically on
+   first boot — it only opens when a flow runs):
    ```bash
-   # Stop all others, leave only target running
-   fly machine stop <other-id-1> <other-id-2> … -a prompt-extractor-uk
+   fly ssh console -a <app-name> -C "/bin/sh -c 'DISPLAY=:99 google-chrome \
+     --user-data-dir=/data/chrome-profile --profile-directory=Default \
+     --no-sandbox --disable-dev-shm-usage --start-maximized \
+     https://chatgpt.com >/tmp/chrome.log 2>&1 &'"
    ```
-   Then open: `https://prompt-extractor-uk.fly.dev/vnc.html`
 
-3. You'll see the Chrome window already open at `chatgpt.com`. Log in manually.
+4. Open the VNC URL and click **Connect**:
+   - UK: `https://prompt-extractor-uk.fly.dev/vnc.html`
+   - US: `https://prompt-extractor-us.fly.dev/vnc.html`
 
-4. Once logged in, Chrome writes the session cookies to
-   `/data/chrome-profile`. The session will be reused for all future runs on
-   this machine.
+5. Log into ChatGPT with the account assigned to this machine (see table above).
 
-5. Restart any other machines you stopped:
+6. Once logged in, session cookies are saved to `/data/chrome-profile` on the
+   Fly volume and will persist across restarts.
+
+7. Stop the machine and move to the next one:
    ```bash
-   fly machine start <other-id-1> … -a prompt-extractor-uk
+   fly machine stop <machine-id> -a <app-name>
    ```
+
+Repeat steps 2–7 for each machine in order of profile index (0 → 8).
+
+**Full UK login sequence (profile 0 → 8):**
+```bash
+MACHINES="0805626fe21498 683932eae9d968 784920df1490e8 d8d3744c34e4e8 7849237b673208 0805614bd911d8 d896d6da5d3938 48e4527fed62d8 865130be035738"
+for id in $MACHINES; do
+  fly machine start $id -a prompt-extractor-uk
+  fly ssh console -a prompt-extractor-uk -C "/bin/sh -c 'DISPLAY=:99 google-chrome --user-data-dir=/data/chrome-profile --profile-directory=Default --no-sandbox --disable-dev-shm-usage --start-maximized https://chatgpt.com >/tmp/chrome.log 2>&1 &'"
+  # Open https://prompt-extractor-uk.fly.dev/vnc.html and log in
+  # Press enter when done
+  read -p "Logged in to $id? Press enter to continue..."
+  fly machine stop $id -a prompt-extractor-uk
+done
+```
+
+**Full US login sequence (profile 0 → 8):**
+```bash
+MACHINES="d8d3160b35de68 e829397bdd1038 d8927e5c775e58 78452e3b292208 822e94c79651d8 781e5d1c6e9128 6837ee3ce30758 d89590ebed9308 8d4e06ced91468"
+for id in $MACHINES; do
+  fly machine start $id -a prompt-extractor-us
+  fly ssh console -a prompt-extractor-us -C "/bin/sh -c 'DISPLAY=:99 google-chrome --user-data-dir=/data/chrome-profile --profile-directory=Default --no-sandbox --disable-dev-shm-usage --start-maximized https://chatgpt.com >/tmp/chrome.log 2>&1 &'"
+  # Open https://prompt-extractor-us.fly.dev/vnc.html and log in
+  # Press enter when done
+  read -p "Logged in to $id? Press enter to continue..."
+  fly machine stop $id -a prompt-extractor-us
+done
+```
 
 ### Session expiry
 

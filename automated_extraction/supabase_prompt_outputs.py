@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import logging
+import random
 from dataclasses import asdict, dataclass, fields
+from datetime import UTC, datetime
 from typing import Any
 
 from supabase import Client, create_client
@@ -28,6 +30,7 @@ class BatchRow:
     is_active: bool | None = None
     is_approved: str | None = None
     multi_llm: bool | None = None
+    llm_models: Any = None
     brand: Any = None
 
 
@@ -105,11 +108,31 @@ class PromptOutputEntityRow:
     created_at: str | None = None
 
 
+@dataclass(frozen=True)
+class PromptOutputSuggestionRow:
+    output_id: int
+    prompt_id: str
+    brand_id: str
+    batch_id: str
+    index: int
+    text: str
+    id: int | None = None
+    response: str | None = None
+    sources: Any = None
+    raw_html: str | None = None
+    llm_model: str | None = None
+    capture_method: str | None = None
+    error: str | None = None
+    metadata: Any = None
+    created_at: str | None = None
+
+
 BatchDict = dict[str, Any]
 PromptDict = dict[str, Any]
 PromptOutputDict = dict[str, Any]
 PromptOutputProductDict = dict[str, Any]
 PromptOutputEntityDict = dict[str, Any]
+PromptOutputSuggestionDict = dict[str, Any]
 
 BATCH_COLUMNS = tuple(field.name for field in fields(BatchRow) if field.name != "brand")
 PROMPT_COLUMNS = tuple(field.name for field in fields(PromptRow) if field.name != "brand")
@@ -122,6 +145,8 @@ PROMPT_OUTPUT_PRODUCT_COLUMNS = tuple(field.name for field in fields(PromptOutpu
 PROMPT_OUTPUT_PRODUCT_INSERT_COLUMNS = tuple(column for column in PROMPT_OUTPUT_PRODUCT_COLUMNS if column != "id")
 PROMPT_OUTPUT_ENTITY_COLUMNS = tuple(field.name for field in fields(PromptOutputEntityRow))
 PROMPT_OUTPUT_ENTITY_INSERT_COLUMNS = tuple(column for column in PROMPT_OUTPUT_ENTITY_COLUMNS if column != "id")
+PROMPT_OUTPUT_SUGGESTION_COLUMNS = tuple(field.name for field in fields(PromptOutputSuggestionRow))
+PROMPT_OUTPUT_SUGGESTION_INSERT_COLUMNS = tuple(column for column in PROMPT_OUTPUT_SUGGESTION_COLUMNS if column != "id")
 
 
 @dataclass(frozen=True)
@@ -131,6 +156,7 @@ class SupabasePromptOutputRepository:
     table_name: str = "prompts_outputs"
     product_table_name: str = "prompts_outputs_products"
     entity_table_name: str = "prompts_outputs_entities"
+    suggestion_table_name: str = "prompts_outputs_suggestions"
 
     def __post_init__(self) -> None:
         if not self.supabase_url:
@@ -173,6 +199,7 @@ class SupabasePromptOutputRepository:
         *,
         only_remaining: bool = True,
         llm_model_filter: str | None = "gpt",
+        required_models: list[str] | None = None,
     ) -> list[PromptDict]:
         response = (
             self.client.table("prompts")
@@ -192,38 +219,222 @@ class SupabasePromptOutputRepository:
             LOGGER.info("Loaded %s active prompt(s) for brand_id=%s without remaining filter.", len(prompts), brand_id)
             return prompts
 
-        completed_prompt_ids = self.completed_prompt_ids(
+        completed_ids = self.completed_prompt_ids(
             batch_id=batch_id,
             brand_id=brand_id,
             llm_model_filter=llm_model_filter,
+            required_models=required_models,
         )
-        remaining = [prompt for prompt in prompts if prompt.get("id") not in completed_prompt_ids]
+        remaining = [prompt for prompt in prompts if prompt.get("id") not in completed_ids]
+        random.shuffle(remaining)
         LOGGER.info(
-            "Remaining prompts analysis. total_prompts=%s completed_count=%s remaining_count=%s batch_id=%s brand_id=%s llm_model_filter=%s",
+            "Remaining prompts analysis. total_prompts=%s completed_count=%s remaining_count=%s "
+            "batch_id=%s brand_id=%s llm_model_filter=%s required_models=%s",
             len(prompts),
-            len(completed_prompt_ids),
+            len(completed_ids),
             len(remaining),
             batch_id,
             brand_id,
             llm_model_filter or "any",
+            required_models or "none",
         )
         return remaining
 
-    def completed_prompt_ids(self, *, batch_id: str, brand_id: str, llm_model_filter: str | None = "gpt") -> set[str]:
-        query = (
-            self.client.table(self.table_name)
-            .select("prompt_id")
-            .eq("batch_id", batch_id)
-            .eq("brand_id", brand_id)
-            .eq("active", True)
-        )
-        if llm_model_filter:
-            query = query.ilike("llm_model", f"%{llm_model_filter}%")
+    def completed_prompt_ids(
+        self,
+        *,
+        batch_id: str,
+        brand_id: str,
+        llm_model_filter: str | None = "gpt",
+        required_models: list[str] | None = None,
+    ) -> set[str]:
+        """Return prompt_ids that are fully complete for this batch.
 
-        response = query.execute()
-        return {
-            str(row.get("prompt_id")) for row in response.data or [] if isinstance(row, dict) and row.get("prompt_id")
-        }
+        When ``required_models`` is provided, a prompt is only considered
+        complete if it has outputs for *all* listed models (exact match).
+        When absent, falls back to the existing ILIKE behaviour on
+        ``llm_model_filter``.
+        """
+        if required_models:
+            # Per-model exact-match sets; intersection = prompts with ALL models.
+            # Paginate in pages of 1000 — Supabase enforces a server-side 1000-row cap
+            # regardless of the client-side .limit() value.
+            per_model_sets: list[set[str]] = []
+            for model in required_models:
+                ids: set[str] = set()
+                page_size = 1000
+                offset = 0
+                while True:
+                    resp = (
+                        self.client.table(self.table_name)
+                        .select("prompt_id")
+                        .eq("batch_id", batch_id)
+                        .eq("brand_id", brand_id)
+                        .eq("active", True)
+                        .eq("llm_model", model)
+                        .range(offset, offset + page_size - 1)
+                        .execute()
+                    )
+                    page = resp.data or []
+                    for r in page:
+                        if isinstance(r, dict) and r.get("prompt_id"):
+                            ids.add(str(r["prompt_id"]))
+                    if len(page) < page_size:
+                        break
+                    offset += page_size
+                per_model_sets.append(ids)
+                LOGGER.debug("required_models: model=%s found=%s batch_id=%s", model, len(ids), batch_id)
+
+            complete = per_model_sets[0].intersection(*per_model_sets[1:]) if per_model_sets else set()
+            LOGGER.info(
+                "required_models completion. models=%s fully_complete=%s batch_id=%s brand_id=%s",
+                required_models,
+                len(complete),
+                batch_id,
+                brand_id,
+            )
+            # Also exclude any prompts currently claimed by another worker.
+            return complete | self._active_claimed_ids(batch_id=batch_id, llm_model_filter=llm_model_filter)
+
+        # Original behaviour: ILIKE filter on llm_model_filter.
+        done_ids = self._completed_output_ids(batch_id=batch_id, brand_id=brand_id, llm_model_filter=llm_model_filter)
+        return done_ids | self._active_claimed_ids(batch_id=batch_id, llm_model_filter=llm_model_filter)
+
+    def _completed_output_ids(
+        self, *, batch_id: str, brand_id: str, llm_model_filter: str | None
+    ) -> set[str]:
+        ids: set[str] = set()
+        page_size = 1000
+        offset = 0
+        while True:
+            query = (
+                self.client.table(self.table_name)
+                .select("prompt_id")
+                .eq("batch_id", batch_id)
+                .eq("brand_id", brand_id)
+                .eq("active", True)
+            )
+            if llm_model_filter:
+                query = query.ilike("llm_model", f"%{llm_model_filter}%")
+            page = query.range(offset, offset + page_size - 1).execute().data or []
+            for row in page:
+                if isinstance(row, dict) and row.get("prompt_id"):
+                    ids.add(str(row["prompt_id"]))
+            if len(page) < page_size:
+                break
+            offset += page_size
+        return ids
+
+    def _active_claimed_ids(self, *, batch_id: str, llm_model_filter: str | None) -> set[str]:
+        """Return prompt_ids currently held by an active (non-expired) claim."""
+        try:
+            now_iso = datetime.now(UTC).isoformat()
+            claims_query = (
+                self.client.table("prompt_claims")
+                .select("prompt_id")
+                .eq("batch_id", batch_id)
+                .eq("status", "pending")
+                .gt("expires_at", now_iso)
+            )
+            if llm_model_filter:
+                claims_query = claims_query.ilike("llm_model", f"%{llm_model_filter}%")
+            claims_response = claims_query.limit(10000).execute()
+            claimed_ids = {
+                str(row.get("prompt_id"))
+                for row in claims_response.data or []
+                if isinstance(row, dict) and row.get("prompt_id")
+            }
+            if claimed_ids:
+                LOGGER.info(
+                    "completed_prompt_ids: %s prompt(s) excluded due to active claims. batch_id=%s llm_model_filter=%s",
+                    len(claimed_ids),
+                    batch_id,
+                    llm_model_filter or "any",
+                )
+            return claimed_ids
+        except Exception as exc:
+            LOGGER.warning(
+                "completed_prompt_ids: could not load active claims (table may not exist yet) — "
+                "falling back to outputs-only. batch_id=%s error=%s",
+                batch_id,
+                exc,
+            )
+            return set()
+
+    def try_claim_prompt(
+        self,
+        prompt_id: str,
+        batch_id: str,
+        brand_id: str,
+        llm_model: str,
+        worker_id: str,
+        ttl_minutes: int = 20,
+    ) -> bool:
+        """Atomically claim a prompt for processing via the try_claim_prompt RPC.
+
+        Returns True if this worker successfully holds the claim, False if another
+        worker already has an active (pending, non-expired) claim on this prompt.
+
+        Fails open (returns True) if the RPC is unavailable so that existing
+        deployments without the migration still work — the concurrent-output
+        check before saving acts as a secondary safety net in that case.
+        """
+        try:
+            response = self.client.rpc(
+                "try_claim_prompt",
+                {
+                    "p_prompt_id": str(prompt_id),
+                    "p_batch_id": str(batch_id),
+                    "p_brand_id": str(brand_id),
+                    "p_llm_model": llm_model,
+                    "p_worker_id": worker_id,
+                    "p_ttl_minutes": ttl_minutes,
+                },
+            ).execute()
+            return bool(response.data)
+        except Exception as exc:
+            LOGGER.warning(
+                "try_claim_prompt RPC unavailable for prompt %s — failing open. "
+                "Run docs/migrations/001_prompt_claims.sql to enable claiming. error=%s",
+                prompt_id,
+                exc,
+            )
+            return True  # Fail-open: allow processing; concurrent-output check is the fallback
+
+    def release_claim(
+        self,
+        prompt_id: str,
+        batch_id: str,
+        llm_model: str,
+        error_message: str | None = None,
+    ) -> None:
+        """Mark a claim as failed so the prompt is available for retry."""
+        try:
+            self.client.table("prompt_claims").update(
+                {"status": "failed", "error_message": (error_message or "")[:1000]}
+            ).eq("prompt_id", str(prompt_id)).eq("batch_id", str(batch_id)).eq("llm_model", llm_model).eq(
+                "status", "pending"
+            ).execute()
+        except Exception as exc:
+            LOGGER.warning("release_claim failed for prompt %s: %s", prompt_id, exc)
+
+    def complete_claim(
+        self,
+        prompt_id: str,
+        batch_id: str,
+        llm_model: str,
+    ) -> None:
+        """Delete a claim after successful processing.
+
+        The prompts_outputs record is the source of truth for completion — the
+        claim row is no longer needed once the output is saved.
+        """
+        try:
+            self.client.table("prompt_claims").delete().eq("prompt_id", str(prompt_id)).eq(
+                "batch_id", str(batch_id)
+            ).eq("llm_model", llm_model).execute()
+        except Exception as exc:
+            LOGGER.warning("complete_claim failed for prompt %s: %s", prompt_id, exc)
 
     def prompt_output_exists(
         self,
@@ -245,9 +456,35 @@ class SupabasePromptOutputRepository:
         batch_id: str | None,
         *,
         llm_model_filter: str | None = "gpt",
+        required_models: list[str] | None = None,
     ) -> dict[str, Any] | None:
+        """Return an existing output if the prompt is already fully complete.
+
+        When ``required_models`` is set a prompt is only considered complete when
+        ALL required models have an active output — otherwise return None so the
+        prompt is processed again (for the missing model).
+        """
         if not prompt_id or not brand_id or not batch_id:
             return None
+
+        if required_models:
+            # Check each required model — prompt is done only if ALL are present.
+            for model in required_models:
+                resp = (
+                    self.client.table(self.table_name)
+                    .select("id")
+                    .eq("prompt_id", prompt_id)
+                    .eq("brand_id", brand_id)
+                    .eq("batch_id", batch_id)
+                    .eq("active", True)
+                    .eq("llm_model", model)
+                    .limit(1)
+                    .execute()
+                )
+                if not resp.data:
+                    return None  # Missing this model — not yet complete
+            # All required models present — return a sentinel so caller skips
+            return {"llm_model": ",".join(required_models), "run_at": None, "id": None}
 
         query = (
             self.client.table(self.table_name)
@@ -267,9 +504,20 @@ class SupabasePromptOutputRepository:
 
     def save_prompt_output(self, output: dict[str, Any]) -> dict[str, Any] | None:
         row = output_to_row(output, include_id=False)
+        prompt_id = row.get("prompt_id")
+        batch_id = row.get("batch_id")
+        llm_model = row.get("llm_model")
         LOGGER.info(
-            "Saving prompt output directly to Supabase. table=%s prompt_id=%s", self.table_name, row.get("prompt_id")
+            "Saving prompt output directly to Supabase. table=%s prompt_id=%s llm_model=%s",
+            self.table_name,
+            prompt_id,
+            llm_model,
         )
+        # Deactivate any existing active rows for this prompt+batch+model before inserting.
+        if prompt_id and batch_id and llm_model:
+            self.client.table(self.table_name).update({"active": False}).eq("prompt_id", prompt_id).eq(
+                "batch_id", batch_id
+            ).eq("llm_model", llm_model).eq("active", True).execute()
         response = self.client.table(self.table_name).insert(row).execute()
         if not response.data:
             return None
@@ -302,6 +550,20 @@ class SupabasePromptOutputRepository:
         )
         response = self.client.table(self.entity_table_name).insert(rows).execute()
         return [row_to_entity(row) for row in response.data or [] if isinstance(row, dict)]
+
+    def save_prompt_output_suggestions(self, suggestions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        rows = [suggestion_to_row(s, include_id=False) for s in suggestions]
+        rows = [row for row in rows if row.get("output_id") and row.get("prompt_id") and row.get("brand_id")]
+        if not rows:
+            return []
+
+        LOGGER.info(
+            "Saving prompt output suggestion rows directly to Supabase. table=%s count=%s",
+            self.suggestion_table_name,
+            len(rows),
+        )
+        response = self.client.table(self.suggestion_table_name).insert(rows).execute()
+        return [row_to_suggestion(row) for row in response.data or [] if isinstance(row, dict)]
 
     def get_prompt_output(self, output_id: int | str) -> dict[str, Any] | None:
         outputs = self.get_prompt_outputs(output_id=output_id, limit=1)
@@ -462,6 +724,7 @@ def row_to_batch(row: dict[str, Any]) -> BatchDict:
         is_active=row.get("is_active"),
         is_approved=row.get("is_approved"),
         multi_llm=row.get("multi_llm"),
+        llm_models=row.get("llm_models"),
         brand=row.get("brand"),
     )
     return asdict(typed_row)
@@ -551,6 +814,49 @@ def row_to_entity(row: dict[str, Any]) -> PromptOutputEntityDict:
         text_length=row.get("text_length"),
         entity_index=row.get("entity_index"),
         capture_method=row.get("capture_method"),
+        created_at=row.get("created_at"),
+    )
+    return asdict(typed_row)
+
+
+def suggestion_to_row(suggestion: dict[str, Any], *, include_id: bool) -> dict[str, Any]:
+    row = {
+        "id": suggestion.get("id"),
+        "output_id": suggestion.get("output_id"),
+        "prompt_id": suggestion.get("prompt_id"),
+        "brand_id": suggestion.get("brand_id"),
+        "batch_id": suggestion.get("batch_id"),
+        "index": suggestion.get("index"),
+        "text": suggestion.get("text"),
+        "response": suggestion.get("response"),
+        "sources": suggestion.get("sources"),
+        "raw_html": suggestion.get("raw_html"),
+        "llm_model": suggestion.get("llm_model"),
+        "capture_method": suggestion.get("capture_method"),
+        "error": suggestion.get("error"),
+        "metadata": suggestion.get("metadata"),
+        "created_at": suggestion.get("created_at"),
+    }
+    allowed_columns = PROMPT_OUTPUT_SUGGESTION_COLUMNS if include_id else PROMPT_OUTPUT_SUGGESTION_INSERT_COLUMNS
+    return compact_row(row, allowed_columns)
+
+
+def row_to_suggestion(row: dict[str, Any]) -> PromptOutputSuggestionDict:
+    typed_row = PromptOutputSuggestionRow(
+        id=row.get("id"),
+        output_id=int(row.get("output_id") or 0),
+        prompt_id=str(row.get("prompt_id") or ""),
+        brand_id=str(row.get("brand_id") or ""),
+        batch_id=str(row.get("batch_id") or ""),
+        index=int(row.get("index") or 0),
+        text=str(row.get("text") or ""),
+        response=row.get("response"),
+        sources=row.get("sources"),
+        raw_html=row.get("raw_html"),
+        llm_model=row.get("llm_model"),
+        capture_method=row.get("capture_method"),
+        error=row.get("error"),
+        metadata=row.get("metadata"),
         created_at=row.get("created_at"),
     )
     return asdict(typed_row)

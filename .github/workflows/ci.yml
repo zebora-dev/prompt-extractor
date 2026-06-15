@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main, feat/us-chatgpt-tests]
+    branches: [main]
   pull_request:
     branches: [main]
 
@@ -48,6 +48,8 @@ jobs:
         run: pip install -e . --no-deps
 
       - name: mypy
+        # Pre-existing errors in third-party stubs mean we treat mypy as advisory for now.
+        # Remove the `|| true` once all violations are resolved.
         run: mypy automated_extraction --ignore-missing-imports || true
 
   test:
@@ -70,7 +72,8 @@ jobs:
       - name: Run tests with coverage
         run: pytest --cov=automated_extraction --cov-report=xml --cov-report=term-missing
         env:
-          # Provide dummy values so config modules don't fail on import
+          # Dummy values prevent Settings.from_env() from raising on import-time checks
+          BRANDSIGHT_SUPABASE_ANON_KEY: "ci-placeholder"
           CHATGPT_ACCOUNTS_B64: ""
           PREFECT_API_URL: "http://localhost:4200/api"
 
@@ -130,11 +133,22 @@ jobs:
       - name: Verify package imports correctly
         run: |
           python -c "
-          from automated_extraction.extraction import build_prompt_output, prompt_text
+          from automated_extraction.extraction import (
+              build_prompt_output,
+              build_google_ai_mode_prompt_output,
+              build_google_ai_overview_prompt_output,
+              prompt_text,
+          )
           from automated_extraction.chatgpt_auth.accounts import AccountsDeserializer
           from automated_extraction.chatgpt_auth.login_method import LoginMethod
           from automated_extraction.supabase_prompt_outputs import compact_row, output_to_row
-          from automated_extraction.workflows.flows import prompt_extraction_batch_flow, prompt_extraction_flow
+          from automated_extraction.google_suggestions_runner import capture_people_also_ask
+          from automated_extraction.workflows.flows import (
+              prompt_extraction_batch_flow,
+              prompt_extraction_flow,
+              google_ai_mode_extraction_flow,
+              google_ai_overview_extraction_flow,
+          )
           print('All imports OK')
           "
 

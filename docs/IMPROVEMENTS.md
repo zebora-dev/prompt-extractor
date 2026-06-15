@@ -4,6 +4,39 @@ Tracked improvements for the prompt-extractor system. Items are grouped by theme
 
 ---
 
+## ✅ Recently Fixed
+
+### `completed_prompt_ids` / `_active_claimed_ids` — Supabase 1000-row limit
+**Fixed:** 2026-06-15  
+**Files:** `automated_extraction/supabase_prompt_outputs.py`
+
+Supabase's default page size is 1000 rows. For batches where `gpt-5-3-mini` had 1017+ output rows, `completed_prompt_ids()` silently truncated the result — missing prompt IDs that were actually complete. Workers loaded those prompts, found them already done on the per-prompt check, and skipped everything. Net result: no new outputs on any flow run despite 175 prompts remaining.
+
+Same bug affected `_active_claimed_ids`, allowing workers to pick up already-claimed prompts when claims exceeded 1000 rows.
+
+**Fix:** Added `.limit(10000)` to the per-model queries in both `completed_prompt_ids()` and `_active_claimed_ids()`.
+
+---
+
+### Duplicate `active=true` rows per prompt+model
+**Fixed:** 2026-06-15  
+**Files:** `automated_extraction/supabase_prompt_outputs.py`, `automated_extraction/extraction.py`
+
+Two bugs caused multiple `active=true` rows to accumulate for the same `prompt_id + batch_id + llm_model`:
+
+**Bug 1 — Concurrent check used `required_models` instead of exact captured model:**  
+When `required_models = ["gpt-5-5", "gpt-5-3-mini"]` and a prompt had `gpt-5-3-mini` but not `gpt-5-5`, the pre-save concurrent check returned `None` (not complete) — allowing a worker to save a new `gpt-5-5` row even if one already existed. This happened on every re-dispatch, producing up to 13 active `gpt-5-5` rows per prompt.
+
+**Fix:** Concurrent check now uses `llm_model_filter=capture.llm_model` (the exact model just captured) instead of `required_models`. Only blocks the save if *this specific model* already has an output.
+
+**Bug 2 — No deactivation on save:**  
+`save_prompt_output()` did a plain `.insert()` with no deactivation of previous rows. Even if two workers raced past the concurrent check simultaneously, both rows survived.
+
+**Fix:** `save_prompt_output()` now runs an `.update({"active": False})` on any existing active rows for the same `prompt_id + batch_id + llm_model` before inserting. Guarantees exactly one active row per prompt+model regardless of concurrency.
+
+---
+
+
 ## 🐛 Bug Fixes / Quick Wins
 
 ### Chrome SingletonLock cleanup on startup
@@ -21,6 +54,18 @@ rm -f /data/chrome-profile/SingletonLock \
 ```
 
 ---
+
+### Prompt claims — claim per specific model when `required_models` is set
+**Status:** Open  
+**Effort:** Half day  
+**Impact:** Medium — prevents wasted Chrome sessions re-running prompts for a model already captured
+
+When `required_models` is set, claims are registered with the broad filter string `"gpt"` rather than the specific model being targeted (e.g. `"gpt-5-5"`). After a worker saves `gpt-5-5` and deletes its claim, the prompt re-enters the remaining set (still needs `gpt-5-3-mini`). Another worker picks it up, claims it for `"gpt"` again, Chrome runs, ChatGPT uses `gpt-5-5` again — wasting a full Chrome session. The deactivation-on-save fix prevents bad data, but the wasted session remains.
+
+**Fix:** When `required_models` is set, identify which specific model is missing for each prompt before claiming, and register the claim with that model name. This requires a per-prompt model gap check before the claim step.
+
+---
+
 
 ### Prompt claims — reduce claim window / auto-expire stale claims
 **Status:** Open  

@@ -31,6 +31,8 @@ from selenium.webdriver.remote.webelement import WebElement
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 
+from automated_extraction.notifications import notify_cloudflare_challenge, notify_cloudflare_cleared
+
 LOGGER = logging.getLogger(__name__)
 
 CHAT_INPUT_SELECTORS = [
@@ -135,6 +137,30 @@ class ChatGPTRunner:
         self.close()
 
     def start(self) -> None:
+        # ── Persistent Chrome mode ─────────────────────────────────────────────
+        # When CHATGPT_PERSISTENT_CHROME=true the entrypoint has already started
+        # a Chrome instance with --remote-debugging-port=9222.  We connect to it
+        # via CDP rather than launching a new browser.  This keeps the ChatGPT
+        # session alive between runs without needing profile upload/download.
+        #
+        # Google extraction runners are unaffected — they always use uc.Chrome().
+        if os.environ.get("CHATGPT_PERSISTENT_CHROME", "false").lower() == "true":
+            self.driver = self._connect_to_persistent_chrome()
+            self._persistent_chrome = True
+            if not self.headless:
+                vnc_screen = os.getenv("VNC_SCREEN", "1280x720x24")
+                w, h = vnc_screen.split("x")[:2]
+                try:
+                    self.driver.set_window_size(int(w), int(h))
+                except Exception:
+                    pass
+            self.driver.get(self.chatgpt_url)
+            self.recover_chrome_error_page(context="initial_chatgpt_load")
+            self.wait_for_login()
+            return
+
+        # ── Normal mode: launch a fresh Chrome per run ─────────────────────────
+        self._persistent_chrome = False
         options = Options()
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-dev-shm-usage")
@@ -165,6 +191,51 @@ class ChatGPTRunner:
         if self.auto_login:
             self.run_automated_login()
         self.wait_for_login()
+
+    def _connect_to_persistent_chrome(self, port: int = 9222, retries: int = 5) -> Chrome:
+        """
+        Connect to the already-running Chrome instance started by entrypoint.sh.
+        Retries a few times in case Chrome is still warming up.
+        """
+        import time as _time
+
+        last_exc: Exception | None = None
+        for attempt in range(1, retries + 1):
+            try:
+                options = Options()
+                options.debugger_address = f"localhost:{port}"
+                # Grant clipboard access to chatgpt.com in the existing profile
+                options.add_experimental_option(
+                    "prefs",
+                    {
+                        "profile.managed_default_content_settings.clipboard": 1,
+                        "profile.content_settings.exceptions.clipboard": {
+                            "https://chatgpt.com:443,*": {"setting": 1},
+                        },
+                    },
+                )
+                driver = webdriver.Chrome(options=options)
+                LOGGER.info(
+                    "Connected to persistent Chrome on port %s (attempt %s/%s).",
+                    port,
+                    attempt,
+                    retries,
+                )
+                return driver
+            except Exception as exc:
+                last_exc = exc
+                LOGGER.warning(
+                    "Could not connect to persistent Chrome on port %s (attempt %s/%s): %s — retrying …",
+                    port,
+                    attempt,
+                    retries,
+                    exc,
+                )
+                _time.sleep(3)
+
+        raise RuntimeError(
+            f"Failed to connect to persistent Chrome on port {port} after {retries} attempts: {last_exc}"
+        )
 
     def run_automated_login(self) -> None:
         from .chatgpt_auth import AutomatedLoginError, perform_automated_login
@@ -241,12 +312,22 @@ class ChatGPTRunner:
 
     def close(self) -> None:
         if self.driver:
-            self.driver.quit()
+            if getattr(self, "_persistent_chrome", False):
+                # In persistent mode we leave Chrome running — just release the
+                # Python reference without sending any CDP teardown command.
+                # Calling driver.close() would kill the last tab and crash Chrome;
+                # calling driver.quit() would terminate the browser entirely.
+                # We simply drop the reference so Chrome stays alive with the
+                # ChatGPT tab open for the next extraction run.
+                LOGGER.debug("Persistent Chrome mode: releasing CDP reference, Chrome stays running.")
+            else:
+                self.driver.quit()
             self.driver = None
 
     def run_prompt(self, prompt_text: str) -> ChatGPTCapture:
         driver = self.require_driver()
         self.create_fresh_chat()
+        self._raise_if_cloudflare(context="run_prompt")
         self.dismiss_blocking_dialogs()
         input_element = self.wait_for_input()
         self.type_prompt(input_element, prompt_text)
@@ -305,14 +386,131 @@ class ChatGPTRunner:
 
     def wait_for_login(self) -> None:
         deadline = time.time() + self.login_wait_seconds
+        cf_first_seen: float | None = None
+        cf_last_logged: float = 0.0
+        CF_LOG_INTERVAL = 30  # log a reminder every 30s while CF is blocking
+        cf_was_seen = False
+
         while time.time() < deadline:
             self.recover_chrome_error_page(context="wait_for_login")
             if self.find_first(CHAT_INPUT_SELECTORS):
                 return
+
+            cf = self.cloudflare_challenge_state()
+            if cf.get("is_challenge"):
+                now = time.time()
+                if cf_first_seen is None:
+                    cf_first_seen = now
+                    cf_was_seen = True
+                    LOGGER.warning(
+                        "Cloudflare 'Are you human?' challenge detected — machine is blocked. "
+                        "VNC into this machine and solve the challenge to resume. "
+                        "The run will continue automatically once the challenge clears. "
+                        "title=%r url=%s signals=%s",
+                        cf.get("title", ""),
+                        cf.get("url", ""),
+                        cf.get("signals", []),
+                    )
+                    cf_last_logged = now
+                    notify_cloudflare_challenge(
+                        signals=cf.get("signals", []),
+                        title=cf.get("title", ""),
+                        url=cf.get("url", ""),
+                        context="wait_for_login",
+                    )
+                elif now - cf_last_logged >= CF_LOG_INTERVAL:
+                    elapsed = int(now - cf_first_seen)
+                    remaining = int(deadline - now)
+                    LOGGER.warning(
+                        "Cloudflare challenge still active — waiting for VNC resolution. "
+                        "elapsed=%ss remaining=%ss title=%r",
+                        elapsed,
+                        remaining,
+                        cf.get("title", ""),
+                    )
+                    cf_last_logged = now
+            else:
+                if cf_first_seen is not None:
+                    elapsed = int(time.time() - cf_first_seen)
+                    LOGGER.info(
+                        "Cloudflare challenge cleared after %ss — resuming.",
+                        elapsed,
+                    )
+                    notify_cloudflare_cleared(elapsed_seconds=elapsed, context="wait_for_login")
+                cf_first_seen = None  # reset so we log again if it reappears
+
             time.sleep(1)
+
+        if cf_was_seen:
+            raise TimeoutError(
+                "Timed out waiting for ChatGPT prompt input — a Cloudflare 'Are you human?' "
+                "challenge was blocking this machine. VNC in and solve the challenge, then "
+                "re-queue the run."
+            )
         raise TimeoutError(
             "Timed out waiting for ChatGPT prompt input. Log in in the opened browser or set CHATGPT_CHROME_USER_DATA_DIR to a logged-in profile."
         )
+
+    def get_session_info(self) -> dict[str, Any]:
+        """
+        Detect the current ChatGPT login state.
+
+        Two-signal check:
+          1. If [data-testid="login-button"] is present → definitely NOT logged in
+             (ChatGPT shows this button to unauthenticated / guest users).
+          2. If [data-testid="accounts-profile-button"] is present → logged in.
+
+        Returns a dict with:
+            logged_in     (bool)  — True only if the profile button is present AND
+                                    the login button is absent.
+            account_name  (str)   — Always empty string (detection deferred to a
+                                    future implementation).
+            account_label (str)   — The aria-label of the profile button, or empty.
+            login_button_present (bool) — True if the "Log in" button was detected.
+        """
+        driver = self.require_driver()
+        try:
+            # Signal 1: login button present → guest / logged-out session
+            login_button_present = False
+            try:
+                driver.find_element(By.CSS_SELECTOR, '[data-testid="login-button"]')
+                login_button_present = True
+                LOGGER.warning("ChatGPT login button detected — session is NOT authenticated (guest mode).")
+            except NoSuchElementException:
+                pass
+
+            if login_button_present:
+                return {
+                    "logged_in": False,
+                    "account_name": "",
+                    "account_label": "",
+                    "login_button_present": True,
+                }
+
+            # Signal 2: profile button present → authenticated
+            btn = driver.find_element(By.CSS_SELECTOR, '[data-testid="accounts-profile-button"]')
+            aria_label = btn.get_attribute("aria-label") or ""
+            return {
+                "logged_in": True,
+                "account_name": "",
+                "account_label": aria_label,
+                "login_button_present": False,
+            }
+        except NoSuchElementException:
+            return {
+                "logged_in": False,
+                "account_name": "",
+                "account_label": "",
+                "login_button_present": False,
+            }
+        except Exception as exc:
+            LOGGER.debug("Could not detect ChatGPT session info: %s", exc)
+            return {
+                "logged_in": False,
+                "account_name": "",
+                "account_label": "",
+                "login_button_present": False,
+            }
 
     def recover_chrome_error_page(self, *, context: str, max_attempts: int = 2) -> bool:
         """
@@ -384,6 +582,90 @@ class ChatGPTRunner:
             return result if isinstance(result, dict) else {"is_error": False}
         except WebDriverException:
             return {"is_error": False}
+
+    def cloudflare_challenge_state(self) -> dict[str, Any]:
+        """
+        Detect whether the current page is a Cloudflare 'Are you human?' challenge.
+
+        Cloudflare challenge pages share several signals:
+          - Page title contains "Just a moment" or "Are you human"
+          - A #challenge-running or .cf-browser-verification element is present
+          - The body carries class 'no-js' with a CF-generated script target
+          - cf.com assets are loaded (checked via resource list)
+
+        Returns a dict:
+            is_challenge (bool)  — True when a CF challenge is active.
+            title        (str)   — Current document.title.
+            url          (str)   — Current location.href.
+            signals      (list)  — Which signals triggered.
+        """
+        try:
+            result = self.require_driver().execute_script(
+                """
+                const title = (document.title || '').toLowerCase();
+                const bodyClass = (document.body?.className || '').toLowerCase();
+                const bodyId    = (document.body?.id || '').toLowerCase();
+                const html      = (document.documentElement?.innerHTML || '');
+
+                const signals = [];
+
+                if (/just a moment|are you human|verify.*human|human.*verify/i.test(document.title))
+                    signals.push('title_challenge');
+
+                if (document.querySelector('#challenge-running, #challenge-form, .cf-browser-verification, #cf-challenge-running'))
+                    signals.push('cf_element');
+
+                // Cloudflare injects a turnstile iframe
+                if (document.querySelector('iframe[src*="challenges.cloudflare.com"]'))
+                    signals.push('cf_turnstile_iframe');
+
+                // CF challenge pages typically have no ChatGPT nav
+                const hasCFScript = Array.from(document.scripts).some(
+                    s => s.src && s.src.includes('cloudflare.com')
+                );
+                if (hasCFScript) signals.push('cf_script');
+
+                // Title is entirely generic (CF placeholder) while chatgpt content absent
+                if (/^just a moment/i.test(document.title) && !document.querySelector('[data-testid]'))
+                    signals.push('title_just_a_moment_no_testid');
+
+                return {
+                    is_challenge: signals.length > 0,
+                    title: document.title,
+                    url: location.href,
+                    signals: signals,
+                };
+                """
+            )
+            return result if isinstance(result, dict) else {"is_challenge": False}
+        except WebDriverException:
+            return {"is_challenge": False}
+
+    def _raise_if_cloudflare(self, *, context: str) -> None:
+        """
+        Check for an active Cloudflare challenge and log a clear warning if found.
+        Called at the start of each prompt run (after create_fresh_chat) so operators
+        can see in Prefect logs exactly why a run is waiting, then VNC in to resolve it.
+        Does NOT raise — the subsequent wait_for_input() will time out if unresolved,
+        giving the operator a window to fix it without the run failing instantly.
+        """
+        cf = self.cloudflare_challenge_state()
+        if cf.get("is_challenge"):
+            LOGGER.warning(
+                "Cloudflare 'Are you human?' challenge detected during %s — "
+                "VNC into this machine to resolve. Run will continue once cleared. "
+                "title=%r url=%s signals=%s",
+                context,
+                cf.get("title", ""),
+                cf.get("url", ""),
+                cf.get("signals", []),
+            )
+            notify_cloudflare_challenge(
+                signals=cf.get("signals", []),
+                title=cf.get("title", ""),
+                url=cf.get("url", ""),
+                context=context,
+            )
 
     def create_fresh_chat(self) -> None:
         driver = self.require_driver()
@@ -677,6 +959,7 @@ class ChatGPTRunner:
                                 copied[:200],
                             )
                             break
+                        self._kill_xclip_orphans()
                         return visible_text, copied, f"copy_button_markdown_attempt_{attempt}"
                     time.sleep(0.2)
                 LOGGER.info("Markdown copy attempt did not produce a valid clipboard payload. attempt=%s/3", attempt)
@@ -685,7 +968,30 @@ class ChatGPTRunner:
                 LOGGER.warning("Markdown copy attempt failed. attempt=%s/3 error=%s", attempt, first_line(str(exc)))
                 time.sleep(1)
 
+        self._kill_xclip_orphans()
         return visible_text, "", "copy_button_markdown_failed_after_retries"
+
+    @staticmethod
+    def _kill_xclip_orphans() -> None:
+        """Kill any lingering xclip processes left over from clipboard operations.
+
+        On Linux, pyperclip uses xclip to read/write the clipboard.  The xclip
+        process sometimes remains alive waiting for a paste, which keeps a file
+        descriptor open and — when the Prefect worker runs with ``--limit 1`` —
+        counts as a live child process and blocks the worker from picking up the
+        next flow run.
+        """
+        import platform as _platform
+        import subprocess as _sub
+
+        if _platform.system() != "Linux":
+            return
+        try:
+            result = _sub.run(["pkill", "-x", "xclip"], capture_output=True, timeout=5)
+            if result.returncode == 0:
+                LOGGER.debug("Killed lingering xclip process(es).")
+        except Exception as exc:
+            LOGGER.debug("Could not kill xclip orphans: %s", exc)
 
     def is_suspicious_copied_response(self, copied: str, visible_text: str) -> bool:
         copied_lines = [line.strip() for line in copied.splitlines() if line.strip()]

@@ -1,6 +1,7 @@
 .env
 .venv/
 .chrome-profile/
+.google-chrome-profile/
 __pycache__/
 *.py[cod]
 *.egg-info/

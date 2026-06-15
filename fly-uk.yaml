@@ -1,0 +1,82 @@
+# fly-uk.yaml — Fly.io worker configuration for the UK region (lhr)
+#
+# Creates prompt-extractor-uk running in London (lhr).
+# This worker polls the prompt-extraction-uk Prefect work pool so that
+# UK-tagged deployments (e.g. google-ai-mode-extraction-batch-uk) are
+# routed here rather than to the US worker.
+#
+# Architecture: 9 dedicated machines, each permanently assigned one ChatGPT
+# account.  The Chrome profile lives on a local Fly volume at /data/chrome-profile
+# — never uploaded or downloaded between runs.  Login once per machine via VNC.
+#
+# Deploy:   fly deploy -a prompt-extractor-uk -c fly-uk.yaml
+# Secrets (run once, not stored in this file):
+#   fly secrets set -a prompt-extractor-uk \
+#     BRANDSIGHT_API_BASE_URL=... \
+#     BRANDSIGHT_SUPABASE_URL=... \
+#     BRANDSIGHT_SUPABASE_ANON_KEY=... \
+#     BRANDSIGHT_SUPABASE_SERVICE_KEY=... \
+#     PREFECT_API_URL=https://prompt-extractor-prefect.fly.dev/api \
+#     WORKFLOW_API_KEY=... \
+#     GOOGLE_PROXY_URL=http://user-country-gb:password@gw.dataimpulse.com:823
+#
+# Per-machine env vars (set after creating each machine — NOT in this file):
+#   fly machine update <machine-id> -a prompt-extractor-uk \
+#     --env CHROME_PROFILE_INDEX=0 \
+#     --env CHATGPT_LOGIN_EMAIL=account@example.com
+
+app: prompt-extractor-uk
+primary_region: lhr
+kill_signal: SIGINT
+kill_timeout: 30s
+
+build:
+  dockerfile: Dockerfile
+
+env:
+  CHATGPT_CHROME_USER_DATA_DIR: /data/chrome-profile
+  CHATGPT_HEADLESS: "false"
+  PREFECT_WORKING_DIR: /app
+  PREFECT_WORK_POOL: prompt-extraction-uk
+  PROMPT_EXTRACTOR_VNC: "true"
+  VNC_SCREEN: 1280x720x24
+  # Capture INFO-level logs from all automated_extraction submodules in Prefect UI
+  PREFECT_LOGGING_EXTRA_LOGGERS: automated_extraction
+  # Geo defaults for this worker — flows can override per-run via parameters
+  GOOGLE_SEARCH_COUNTRY: GB
+  GOOGLE_SEARCH_LANGUAGE: en
+  # Keep a single Chrome instance alive between ChatGPT extraction runs so the
+  # session stays fresh without any profile upload/download between runs.
+  # Google extraction runners are unaffected — they always use fresh Chrome.
+  CHATGPT_PERSISTENT_CHROME: "true"
+  # CHROME_PROFILE_INDEX and CHATGPT_LOGIN_EMAIL are intentionally omitted here.
+  # Each machine has its own account set via `fly machine update --env`.
+  # See the per-machine env vars comment at the top of this file.
+
+processes:
+  app: python -m prefect worker start --pool prompt-extraction-uk --type process --limit 1 --install-policy never
+
+mounts:
+  - source: prompt_extractor_data_uk
+    destination: /data
+    # NOTE: Each machine is attached to its own named volume at creation time.
+    # This 'source' is the default for new fly deploy creates (unused for
+    # existing machines that already have their per-profile volumes attached).
+    processes:
+      - app
+
+http_service:
+  internal_port: 6080
+  force_https: false
+  auto_stop_machines: false
+  auto_start_machines: false
+  min_machines_running: 0
+  sticky_sessions: true
+
+  processes:
+    - app
+
+vm:
+  - memory: 2048mb
+    cpu_kind: performance
+    cpus: 1
