@@ -113,6 +113,7 @@ def get_flows():
                 "worker_count": 4,
                 "region": "uk",
                 "limit": 5,
+                "max_prompts": None,
                 "delay_seconds": 60,
                 "use_proxy": False,
                 "country": None,

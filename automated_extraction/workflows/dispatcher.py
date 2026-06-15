@@ -162,6 +162,7 @@ def dispatch_extraction_flow(
     region: str = "uk",
     # Inner-run tuning (passed through to each batch flow)
     limit: int = 5,
+    max_prompts: int | None = None,
     delay_seconds: int = 60,
     # Google-specific
     use_proxy: bool = False,
@@ -194,6 +195,11 @@ def dispatch_extraction_flow(
     worker_count      : Number of workers to distribute work across.
     region            : "us" or "uk" — selects the regional deployment variant.
     limit             : Prompts per inner extraction run (rate-limiting knob).
+    max_prompts       : Total prompts each worker will process before stopping.
+                        When set, each worker does ceil(max_prompts/limit) sub-runs
+                        then exits — prevents a single session processing too many
+                        prompts and triggering rate limits. Default None = run until
+                        the pool is exhausted.
     delay_seconds     : Seconds to pause between inner runs on each worker.
     use_proxy         : (Google) Route Chrome through the regional proxy.
     country/language  : (Google) Override geo-targeting.
@@ -318,6 +324,7 @@ def dispatch_extraction_flow(
         "batch_id": batch_id,
         "limit": limit,
         "delay_seconds": delay_seconds,
+        **({"max_prompts": max_prompts} if max_prompts is not None else {}),
     }
 
     if extraction_type in ("google-ai-overview", "google-ai-mode"):
@@ -394,6 +401,7 @@ def dispatch_extraction_flow(
         "worker_count": worker_count,
         "effective_workers": effective_workers,
         "limit_per_run": limit,
+        "max_prompts_per_worker": max_prompts,
         "workers": submitted,
         "scale_result": scale_result,
     }

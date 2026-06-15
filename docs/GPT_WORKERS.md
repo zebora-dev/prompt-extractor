@@ -53,6 +53,11 @@ persistent Chrome browser that stays alive between extraction runs.
 | d896d6da5d3938   | —                                           | 6837ee3ce30758   | data@zebora.io           | 6             |
 | 48e4527fed62d8   | 0805610f32d018                              | d89590ebed9308   | rob@zebora.io            | 7             |
 | 865130be035738   | 18592e4a677678                              | 8d4e06ced91468   | john@zebora.io           | 8             |
+| 801e9df6133918   | —                                           | —                | anna@zebora.io           | 9  (UK only)  |
+| 6839307b436168   | —                                           | —                | cleo@zebora.io           | 10 (UK only)  |
+| 85e76df4166968   | —                                           | —                | alice@zebora.io          | 11 (UK only, login pending) |
+| —                | —                                           | 2869142b977568   | lisa@theround.com        | 9  (US only)  |
+| —                | —                                           | d8de560a452958   | emily@theround.com       | 10 (US only)  |
 
 Per-machine env vars (`CHROME_PROFILE_INDEX`, `CHATGPT_LOGIN_EMAIL`) are set
 via `fly machine update --env` and are **not** in `fly-uk.yaml` (Fly wipes
