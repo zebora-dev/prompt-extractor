@@ -1,0 +1,39 @@
+app = "prompt-extractor-us"
+primary_region = "iad"
+kill_signal = "SIGINT"
+kill_timeout = "30s"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  CHATGPT_CHROME_USER_DATA_DIR = "/data/chrome-profile"
+  CHATGPT_HEADLESS = "false"
+  CHATGPT_PERSISTENT_CHROME = "true"
+  GOOGLE_SEARCH_COUNTRY = "US"
+  GOOGLE_SEARCH_LANGUAGE = "en"
+  PREFECT_LOGGING_EXTRA_LOGGERS = "automated_extraction"
+  PREFECT_WORKING_DIR = "/app"
+  PREFECT_WORK_POOL = "prompt-extraction-us"
+  PROMPT_EXTRACTOR_VNC = "true"
+  VNC_SCREEN = "1280x720x24"
+
+[processes]
+  app = "python -m prefect worker start --pool prompt-extraction-us --type process --limit 1 --install-policy never"
+
+[[mounts]]
+  source = "prompt_extractor_data_us"
+  destination = "/data"
+  processes = ["app"]
+
+[http_service]
+  internal_port = 6080
+  auto_stop_machines = false
+  auto_start_machines = false
+  min_machines_running = 0
+  processes = ["app"]
+
+[[vm]]
+  memory = "4096mb"
+  cpu_kind = "performance"
+  cpus = 2
