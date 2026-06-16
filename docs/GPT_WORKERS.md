@@ -26,7 +26,7 @@ persistent Chrome browser that stays alive between extraction runs.
 │  ├── Chrome on :9222 ──► chatgpt.com (logged in)            │
 │  └── Prefect worker ──► polls prompt-extraction-uk pool      │
 │                                                              │
-│  … 7 more machines (one per account)                         │
+│  … 17 more machines (one per account)                        │
 └──────────────────────────────────────────────────────────────┘
                         │
                         ▼ picks up flow runs
@@ -40,24 +40,29 @@ persistent Chrome browser that stays alive between extraction runs.
 
 ## Machines & Accounts
 
-14 dedicated machines, each permanently assigned one ChatGPT account.
+23 dedicated machines, each permanently assigned one ChatGPT account.
 
-| UK Worker ID     | UK Worker ID (old) | US Worker ID     | Account                  | Profile index | Paid account |
-|------------------|--------------------|------------------|--------------------------|---------------|--------------|
-| 0805626fe21498   | e829420a634578     | d8d3160b35de68   | dev@theround.com         | 0             |              |
-| 683932eae9d968   | 7849237b673708     | e829397bdd1038   | chris@theround.com       | 1             |              |
-| 784920df1490e8   | e82949df4390d8     | d8927e5c775e58   | bob@theround.com         | 2             |              |
-| d8d3744c34e4e8   | —                  | 78452e3b292208   | frank@theround.com       | 3             |              |
-| 7849237b673208   | —                  | 822e94c79651d8   | info@zebora.io           | 4             |              |
-| 0805614bd911d8   | e829491b6d4268     | 781e5d1c6e9128   | dev@zebora.io            | 5             |              |
-| 0801246fd05dd8   | —                  | —                | data@zebora.io (alt)     | 6             |              |
-| d896d6da5d3938   | —                  | 6837ee3ce30758   | data@zebora.io           | 6             |              |
-| 48e4527fed62d8   | 0805610f32d018     | d89590ebed9308   | rob@zebora.io            | 7             |              |
-| 865130be035738   | 18592e4a677678     | 8d4e06ced91468   | john@zebora.io           | 8             |              |
-| 801e9df6133918   | —                  | —                | anna@zebora.io           | 9             |              |
-| 6839307b436168   | —                  | —                | cleo@zebora.io           | 10            |              |
-| 85e76df4166968   | —                  | —                | alice@zebora.io          | 11            |              |
-| 7819643fd929d8   | —                  | —                | grant@theround.com       | 12            | ✓            |
+| UK Worker ID     | UK Worker ID (old) | US Worker ID     | Account                    | Profile index | Paid account |
+|------------------|--------------------|------------------|----------------------------|---------------|--------------|
+| 0805626fe21498   | e829420a634578     | d8d3160b35de68   | dev@theround.com           | 0             |              |
+| 683932eae9d968   | 7849237b673708     | e829397bdd1038   | chris@theround.com         | 1             |              |
+| 784920df1490e8   | e82949df4390d8     | d8927e5c775e58   | bob@theround.com           | 2             |              |
+| d8d3744c34e4e8   | —                  | 78452e3b292208   | frank@theround.com         | 3             |              |
+| 7849237b673208   | —                  | 822e94c79651d8   | inda@zebora.io             | 4             |              |
+| 0805614bd911d8   | e829491b6d4268     | 781e5d1c6e9128   | dev@zebora.io              | 5             |              |
+| 0801246fd05dd8   | —                  | —                | data@zebora.io (alt)       | 6             |              |
+| d896d6da5d3938   | —                  | 6837ee3ce30758   | data@zebora.io             | 6             |              |
+| 48e4527fed62d8   | 0805610f32d018     | d89590ebed9308   | rob@zebora.io              | 7             |              |
+| 865130be035738   | 18592e4a677678     | 8d4e06ced91468   | john@zebora.io             | 8             |              |
+| 683720eb029518   | —                  | —                | anna@zebora.io             | 9             |              |
+| 6839327ae79708   | —                  | —                | alice@zebora.io            | 10            |              |
+| 891244c62419e8   | —                  | —                | cleo@zebora.io             | 11            |              |
+| 2860097a16e138   | —                  | —                | ryan.simmonds@zebora.io    | 12            |              |
+| 781965ead71e98   | —                  | —                | steve.taylor@zebora.io     | 13            |              |
+| 6839322fe24518   | —                  | —                | ian.smith@theround.com     | 14            |              |
+| 28716d6cd76698   | —                  | —                | laura.john@theround.com    | 15            |              |
+| e82942efd07518   | —                  | —                | lisa@theround.com          | 16            |              |
+| 080d0d5c197d98   | —                  | —                | emily@theround.com         | 17            |              |
 
 Per-machine env vars (`CHROME_PROFILE_INDEX`, `CHATGPT_LOGIN_EMAIL`) are set
 via `fly machine update --env` and are **not** in `fly-uk.yaml` (Fly wipes

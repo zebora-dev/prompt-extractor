@@ -22,6 +22,9 @@ fly machine update 0805614bd911d8 -a "${APP}" --env CHROME_PROFILE_INDEX=5 --env
 fly machine update d896d6da5d3938 -a "${APP}" --env CHROME_PROFILE_INDEX=6 --env CHATGPT_LOGIN_EMAIL=data@zebora.io --yes
 fly machine update 48e4527fed62d8 -a "${APP}" --env CHROME_PROFILE_INDEX=7 --env CHATGPT_LOGIN_EMAIL=rob@zebora.io --yes
 fly machine update 865130be035738 -a "${APP}" --env CHROME_PROFILE_INDEX=8 --env CHATGPT_LOGIN_EMAIL=john@zebora.io --yes
+fly machine update 801e9df6133918 -a "${APP}" --env CHROME_PROFILE_INDEX=9 --env CHATGPT_LOGIN_EMAIL=anna@zebora.io --yes
+fly machine update 6839307b436168 -a "${APP}" --env CHROME_PROFILE_INDEX=10 --env CHATGPT_LOGIN_EMAIL=cleo@zebora.io --yes
+fly machine update 85e76df4166968 -a "${APP}" --env CHROME_PROFILE_INDEX=11 --env CHATGPT_LOGIN_EMAIL=alice@zebora.io --yes
 
 echo "Done."
 
@@ -37,5 +40,7 @@ fly machine update 781e5d1c6e9128 -a "${APP_US}" --env CHROME_PROFILE_INDEX=5 --
 fly machine update 6837ee3ce30758 -a "${APP_US}" --env CHROME_PROFILE_INDEX=6 --env CHATGPT_LOGIN_EMAIL=data@zebora.io --yes
 fly machine update d89590ebed9308 -a "${APP_US}" --env CHROME_PROFILE_INDEX=7 --env CHATGPT_LOGIN_EMAIL=rob@zebora.io --yes
 fly machine update 8d4e06ced91468 -a "${APP_US}" --env CHROME_PROFILE_INDEX=8 --env CHATGPT_LOGIN_EMAIL=john@zebora.io --yes
+fly machine update 2869142b977568 -a "${APP_US}" --env CHROME_PROFILE_INDEX=9 --env CHATGPT_LOGIN_EMAIL=lisa@theround.com --yes
+fly machine update d8de560a452958 -a "${APP_US}" --env CHROME_PROFILE_INDEX=10 --env CHATGPT_LOGIN_EMAIL=emily@theround.com --yes
 
 echo "Done."
