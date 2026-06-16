@@ -40,29 +40,46 @@ persistent Chrome browser that stays alive between extraction runs.
 
 ## Machines & Accounts
 
-23 dedicated machines, each permanently assigned one ChatGPT account.
+19 dedicated machines, each permanently assigned one ChatGPT account.
 
-| UK Worker ID     | UK Worker ID (old) | US Worker ID     | Account                    | Profile index | Paid account |
-|------------------|--------------------|------------------|----------------------------|---------------|--------------|
-| 0805626fe21498   | e829420a634578     | d8d3160b35de68   | dev@theround.com           | 0             |              |
-| 683932eae9d968   | 7849237b673708     | e829397bdd1038   | chris@theround.com         | 1             |              |
-| 784920df1490e8   | e82949df4390d8     | d8927e5c775e58   | bob@theround.com           | 2             |              |
-| d8d3744c34e4e8   | —                  | 78452e3b292208   | frank@theround.com         | 3             |              |
-| 7849237b673208   | —                  | 822e94c79651d8   | inda@zebora.io             | 4             |              |
-| 0805614bd911d8   | e829491b6d4268     | 781e5d1c6e9128   | dev@zebora.io              | 5             |              |
-| 0801246fd05dd8   | —                  | —                | data@zebora.io (alt)       | 6             |              |
-| d896d6da5d3938   | —                  | 6837ee3ce30758   | data@zebora.io             | 6             |              |
-| 48e4527fed62d8   | 0805610f32d018     | d89590ebed9308   | rob@zebora.io              | 7             |              |
-| 865130be035738   | 18592e4a677678     | 8d4e06ced91468   | john@zebora.io             | 8             |              |
-| 683720eb029518   | —                  | —                | anna@zebora.io             | 9             |              |
-| 6839327ae79708   | —                  | —                | alice@zebora.io            | 10            |              |
-| 891244c62419e8   | —                  | —                | cleo@zebora.io             | 11            |              |
-| 2860097a16e138   | —                  | —                | ryan.simmonds@zebora.io    | 12            |              |
-| 781965ead71e98   | —                  | —                | steve.taylor@zebora.io     | 13            |              |
-| 6839322fe24518   | —                  | —                | ian.smith@theround.com     | 14            |              |
-| 28716d6cd76698   | —                  | —                | laura.john@theround.com    | 15            |              |
-| e82942efd07518   | —                  | —                | lisa@theround.com          | 16            |              |
-| 080d0d5c197d98   | —                  | —                | emily@theround.com         | 17            |              |
+| UK Worker ID     | Private IP (VNC tunnel)             | UK Worker ID (old) | US Worker ID     | Account                    | Profile index | Paid account |
+|------------------|-------------------------------------|--------------------|------------------|----------------------------|---------------|--------------|
+| 0805626fe21498   | fdaa:73:d486:a7b:4a1:8385:f0ce:2   | e829420a634578     | d8d3160b35de68   | dev@theround.com           | 0             |              |
+| 683932eae9d968   | fdaa:73:d486:a7b:499:cae7:23c5:2   | 7849237b673708     | e829397bdd1038   | chris@theround.com         | 1             |              |
+| 784920df1490e8   | fdaa:73:d486:a7b:49b:ee52:37d9:2   | e82949df4390d8     | d8927e5c775e58   | bob@theround.com           | 2             |              |
+| d8d3744c34e4e8   | fdaa:73:d486:a7b:497:8d3c:9152:2   | —                  | 78452e3b292208   | frank@theround.com         | 3             |              |
+| 7849237b673208   | fdaa:73:d486:a7b:494:71d0:d4e5:2   | —                  | 822e94c79651d8   | inda@zebora.io             | 4             |              |
+| 0805614bd911d8   | fdaa:73:d486:a7b:49e:1554:f044:2   | e829491b6d4268     | 781e5d1c6e9128   | dev@zebora.io              | 5             |              |
+| 0801246fd05dd8   | fdaa:73:d486:a7b:328:e39c:437a:2   | —                  | —                | data@zebora.io (alt)       | 6             |              |
+| d896d6da5d3938   | fdaa:73:d486:a7b:4a5:fdd4:b604:2   | —                  | 6837ee3ce30758   | data@zebora.io             | 6             |              |
+| 48e4527fed62d8   | fdaa:73:d486:a7b:494:7eff:8f9f:2   | 0805610f32d018     | d89590ebed9308   | rob@zebora.io              | 7             |              |
+| 865130be035738   | fdaa:73:d486:a7b:172:d504:d8b1:2   | 18592e4a677678     | 8d4e06ced91468   | john@zebora.io             | 8             |              |
+| 683720eb029518   | fdaa:73:d486:a7b:5ae:879b:7dbc:2   | —                  | —                | anna@zebora.io             | 9             |              |
+| 6839327ae79708   | fdaa:73:d486:a7b:492:e861:8fbd:2   | —                  | —                | alice@zebora.io            | 10            |              |
+| 891244c62419e8   | fdaa:73:d486:a7b:173:71e2:6265:2   | —                  | —                | cleo@zebora.io             | 11            |              |
+| 2860097a16e138   | fdaa:73:d486:a7b:4e3:56d4:cf1d:2   | —                  | —                | ryan.simmonds@zebora.io    | 12            |              |
+| 781965ead71e98   | fdaa:73:d486:a7b:4a0:54bd:d8c5:2   | —                  | —                | steve.taylor@zebora.io     | 13            |              |
+| 6839322fe24518   | fdaa:73:d486:a7b:497:f00f:d4a7:2   | —                  | —                | ian.smith@theround.com     | 14            |              |
+| 28716d6cd76698   | fdaa:73:d486:a7b:327:e971:2c65:2   | —                  | —                | laura.john@theround.com    | 15            |              |
+| e82942efd07518   | fdaa:73:d486:a7b:495:bd34:d2a5:2   | —                  | —                | lisa@theround.com          | 16            |              |
+| 080d0d5c197d98   | fdaa:73:d486:a7b:79:191b:5881:2    | —                  | —                | emily@theround.com         | 17            |              |
+
+### VNC: targeting a specific machine
+
+The public VNC URL (`https://prompt-extractor-uk.fly.dev/vnc.html`) hits a load balancer
+and may route to any running machine. To VNC directly into a specific machine (e.g. to
+solve a Cloudflare Turnstile challenge), use `fly proxy` with the machine's private IP:
+
+```bash
+# Replace <PRIVATE_IP> with the machine's IP from the table above
+fly proxy 6080:6080 <PRIVATE_IP> -a prompt-extractor-uk
+# Then open http://localhost:6080/vnc.html in your browser
+```
+
+Example — VNC into chris@theround.com:
+```bash
+fly proxy 6080:6080 fdaa:73:d486:a7b:499:cae7:23c5:2 -a prompt-extractor-uk
+```
 
 Per-machine env vars (`CHROME_PROFILE_INDEX`, `CHATGPT_LOGIN_EMAIL`) are set
 via `fly machine update --env` and are **not** in `fly-uk.yaml` (Fly wipes
