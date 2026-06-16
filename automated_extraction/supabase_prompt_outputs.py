@@ -368,7 +368,7 @@ class SupabasePromptOutputRepository:
         brand_id: str,
         llm_model: str,
         worker_id: str,
-        ttl_minutes: int = 20,
+        ttl_minutes: int = 5,
     ) -> bool:
         """Atomically claim a prompt for processing via the try_claim_prompt RPC.
 

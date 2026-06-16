@@ -150,7 +150,7 @@ class ApiClient:
         brand_id: str,
         llm_model: str,
         worker_id: str,
-        ttl_minutes: int = 20,
+        ttl_minutes: int = 5,
     ) -> bool:
         """Atomically claim a prompt. Returns True if this worker holds the claim."""
         return self.supabase.try_claim_prompt(prompt_id, batch_id, brand_id, llm_model, worker_id, ttl_minutes)
