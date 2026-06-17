@@ -1,0 +1,70 @@
+# fly-claude-us.yaml — Fly.io worker configuration for Claude.ai extraction (US)
+#
+# Creates prompt-extractor-claude-us running in Washington DC (iad).
+# This worker polls the prompt-extraction-claude-us Prefect work pool.
+#
+# Architecture: 1 dedicated machine (start small, scale up as needed).
+# The Chrome profile lives on a local Fly volume at /data/chrome-profile.
+# Log in once per machine via VNC.
+#
+# Initial deploy:
+#   fly apps create prompt-extractor-claude-us
+#   fly vol create prompt_extractor_claude_data_us -a prompt-extractor-claude-us -r iad --size 10
+#   fly deploy -a prompt-extractor-claude-us -c fly-claude-us.yaml
+#
+# Secrets (run once):
+#   fly secrets set -a prompt-extractor-claude-us \
+#     BRANDSIGHT_API_BASE_URL=... \
+#     BRANDSIGHT_SUPABASE_URL=... \
+#     BRANDSIGHT_SUPABASE_ANON_KEY=... \
+#     BRANDSIGHT_SUPABASE_SERVICE_KEY=... \
+#     PREFECT_API_URL=https://prompt-extractor-prefect.fly.dev/api \
+#     WORKFLOW_API_KEY=... \
+#     FLY_API_TOKEN=$(fly auth token)
+#
+# Upload Chrome profile (after first machine boots):
+#   fly ssh sftp shell -a prompt-extractor-claude-us
+#   > put .claude-profile.tar.gz /data/claude-profile.tar.gz
+#   Then SSH in and extract: tar -xzf /data/claude-profile.tar.gz -C /data/chrome-profile
+
+app: prompt-extractor-claude-us
+primary_region: iad
+kill_signal: SIGINT
+kill_timeout: 30s
+
+build:
+  dockerfile: Dockerfile
+
+env:
+  CLAUDE_URL: https://claude.ai
+  CLAUDE_CHROME_USER_DATA_DIR: /data/chrome-profile
+  CHATGPT_HEADLESS: "false"
+  PREFECT_WORKING_DIR: /app
+  PREFECT_WORK_POOL: prompt-extraction-claude-us
+  PROMPT_EXTRACTOR_VNC: "true"
+  VNC_SCREEN: 1280x720x24
+  PREFECT_LOGGING_EXTRA_LOGGERS: automated_extraction
+
+processes:
+  app: python -m prefect worker start --pool prompt-extraction-claude-us --type process --limit 1 --install-policy never
+
+mounts:
+  - source: prompt_extractor_claude_data_us
+    destination: /data
+    processes:
+      - app
+
+http_service:
+  internal_port: 6080
+  force_https: false
+  auto_stop_machines: false
+  auto_start_machines: false
+  min_machines_running: 0
+  sticky_sessions: true
+  processes:
+    - app
+
+vm:
+  - memory: 4096mb
+    cpu_kind: performance
+    cpus: 2
