@@ -120,7 +120,7 @@ class Settings:
             ),
             logged_in_accounts_dir=os.getenv("CHATGPT_LOGGED_IN_ACCOUNTS_DIR") or str(DEFAULT_LOGGED_IN_ACCOUNTS_DIR),
             headless=parse_bool(os.getenv("CHATGPT_HEADLESS"), default=False),
-            login_wait_seconds=parse_int(os.getenv("CHATGPT_LOGIN_WAIT_SECONDS"), default=180),
+            login_wait_seconds=parse_int(os.getenv("CHATGPT_LOGIN_WAIT_SECONDS"), default=600),
             response_timeout_seconds=parse_int(os.getenv("CHATGPT_RESPONSE_TIMEOUT_SECONDS"), default=300),
             sources_panel_pause_seconds=parse_int(os.getenv("CHATGPT_SOURCES_PANEL_PAUSE_SECONDS"), default=0),
             score_workflow_url=os.getenv("BRANDSIGHT_SCORE_WORKFLOW_URL", DEFAULT_SCORE_WORKFLOW_URL).strip()
