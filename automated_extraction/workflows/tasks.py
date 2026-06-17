@@ -309,10 +309,11 @@ def extract_claude_batch_task(
     chrome_user_data_dir: str | None = None,
     force_rerun: bool = False,
     llm_model_filter: str | None = "claude",
+    measurements_filter: str | None = None,
 ) -> dict[str, Any]:
     task_logger = get_run_logger()
     task_logger.info(
-        "Starting Claude extraction task. batch_id=%s prompts_file=%s limit=%s skip=%s dry_run=%s force_rerun=%s llm_model_filter=%s",
+        "Starting Claude extraction task. batch_id=%s prompts_file=%s limit=%s skip=%s dry_run=%s force_rerun=%s llm_model_filter=%s measurements_filter=%s",
         batch_id,
         prompts_file,
         limit,
@@ -320,6 +321,7 @@ def extract_claude_batch_task(
         dry_run,
         force_rerun,
         llm_model_filter or "any",
+        measurements_filter or "any",
     )
     settings = Settings.from_env(require_api_key=True, require_auto_login_credentials=False)
     result = run_claude_extraction_job(
@@ -334,6 +336,7 @@ def extract_claude_batch_task(
         chrome_user_data_dir=chrome_user_data_dir,
         force_rerun=force_rerun,
         llm_model_filter=llm_model_filter,
+        measurements_filter=measurements_filter,
     )
     payload = asdict(result)
     task_logger.info("Finished Claude extraction task: %s", summarize_extraction_payload(payload))

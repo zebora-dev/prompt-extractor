@@ -92,6 +92,7 @@ def _get_remaining_count(
     brand_id: str,
     model_filter: str | None,
     required_models: list[str] | None = None,
+    measurements_filter: str | None = None,
 ) -> int:
     prompts = api.get_prompts(
         batch_id,
@@ -99,6 +100,7 @@ def _get_remaining_count(
         only_remaining=True,
         llm_model_filter=model_filter,
         required_models=required_models,
+        measurements_filter=measurements_filter,
     )
     return len(prompts)
 
@@ -180,6 +182,8 @@ def dispatch_extraction_flow(
     capture_entities: bool = True,
     # Scoring
     trigger_scoring: bool = True,
+    # Prompt filtering
+    measurements_filter: str | None = None,
     # Dynamic scaling
     auto_scale: bool = False,
     scale_wait_seconds: int = 30,
@@ -262,7 +266,7 @@ def dispatch_extraction_flow(
             batch_id,
         )
 
-    remaining_count = _get_remaining_count(api, batch_id, brand_id, model_filter, required_models)
+    remaining_count = _get_remaining_count(api, batch_id, brand_id, model_filter, required_models, measurements_filter)
     if remaining_count == 0:
         flow_logger.info(
             "No remaining prompts for batch %s (extraction_type=%s). Nothing to dispatch.",
@@ -347,6 +351,7 @@ def dispatch_extraction_flow(
             {
                 "model_filter": model_filter,
                 "trigger_scoring": trigger_scoring,
+                **({"measurements_filter": measurements_filter} if measurements_filter else {}),
             }
         )
     else:  # chatgpt

@@ -962,6 +962,7 @@ def run_claude_extraction_job(
     chrome_user_data_dir: str | None = None,
     force_rerun: bool = False,
     llm_model_filter: str | None = "claude",
+    measurements_filter: str | None = None,
 ) -> ExtractionRunResult:
     if not batch_id and not prompts_file:
         raise ValueError("one of batch_id or prompts_file is required")
@@ -982,6 +983,7 @@ def run_claude_extraction_job(
         brand_id=brand_id,
         only_remaining=not force_rerun,
         llm_model_filter=llm_model_filter,
+        measurements_filter=measurements_filter,
     )
 
     if skip:
@@ -1259,6 +1261,7 @@ def load_prompt_work(
     brand_id: str | None,
     only_remaining: bool = True,
     llm_model_filter: str | None = "gpt",
+    measurements_filter: str | None = None,
 ) -> tuple[list[dict[str, Any]], str | None, str | None]:
     if prompts_file:
         with prompts_file.open("r", encoding="utf-8") as handle:
@@ -1297,6 +1300,7 @@ def load_prompt_work(
             only_remaining=only_remaining,
             llm_model_filter=llm_model_filter,
             required_models=required_models,
+            measurements_filter=measurements_filter,
         ),
         batch_id,
         str(resolved_brand_id),

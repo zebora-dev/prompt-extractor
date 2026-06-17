@@ -49,7 +49,7 @@ processes:
   app: python -m prefect worker start --pool prompt-extraction-claude-us --type process --limit 1 --install-policy never
 
 mounts:
-  - source: prompt_extractor_claude_data_us
+  - source: prompt_extractor_claude_us
     destination: /data
     processes:
       - app

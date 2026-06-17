@@ -482,6 +482,7 @@ def claude_extraction_flow(
     chrome_user_data_dir: str | None = None,
     force_rerun: bool = False,
     llm_model_filter: str | None = "claude",
+    measurements_filter: str | None = None,
     trigger_scoring: bool = True,
 ) -> dict[str, Any]:
     """Orchestrate a Claude.ai prompt extraction run."""
@@ -491,7 +492,7 @@ def claude_extraction_flow(
         raise ValueError("one of batch_id or prompts_file is required")
 
     flow_logger.info(
-        "Starting Claude extraction flow. batch_id=%s prompts_file=%s brand_id=%s limit=%s skip=%s force_rerun=%s llm_model_filter=%s",
+        "Starting Claude extraction flow. batch_id=%s prompts_file=%s brand_id=%s limit=%s skip=%s force_rerun=%s llm_model_filter=%s measurements_filter=%s",
         batch_id,
         prompts_file,
         brand_id,
@@ -499,6 +500,7 @@ def claude_extraction_flow(
         skip,
         force_rerun,
         llm_model_filter or "any",
+        measurements_filter or "any",
     )
     result = extract_claude_batch_task(
         batch_id=batch_id,
@@ -511,6 +513,7 @@ def claude_extraction_flow(
         chrome_user_data_dir=chrome_user_data_dir,
         force_rerun=force_rerun,
         llm_model_filter=llm_model_filter,
+        measurements_filter=measurements_filter,
     )
 
     processing_result: dict[str, Any] | None = None
@@ -551,6 +554,7 @@ def claude_extraction_batch_flow(
     max_prompts: int | None = None,
     startup_delay_seconds: int = 0,
     trigger_scoring: bool = True,
+    measurements_filter: str | None = None,
 ) -> dict[str, Any]:
     """
     Sequentially run claude-extraction until the remaining prompt set is exhausted.
@@ -586,18 +590,20 @@ def claude_extraction_batch_flow(
         str(brand_id),
         only_remaining=True,
         llm_model_filter=model_filter,
+        measurements_filter=measurements_filter,
     )
     remaining_count = max(0, len(remaining_prompts) - skip)
     run_count = math.ceil(remaining_count / limit) if remaining_count else 0
     if max_prompts is not None:
         run_count = min(run_count, math.ceil(max_prompts / limit))
     flow_logger.info(
-        "Claude batch flow: batch_id=%s brand_id=%s remaining=%s run_count=%s limit=%s",
+        "Claude batch flow: batch_id=%s brand_id=%s remaining=%s run_count=%s limit=%s measurements_filter=%s",
         batch_id,
         brand_id,
         remaining_count,
         run_count,
         limit,
+        measurements_filter or "any",
     )
 
     if run_count == 0:
@@ -613,6 +619,7 @@ def claude_extraction_batch_flow(
             limit=limit,
             skip=skip,
             llm_model_filter=model_filter,
+            measurements_filter=measurements_filter,
             trigger_scoring=trigger_scoring,
         )
         saved = run_result.get("saved_count") or 0
