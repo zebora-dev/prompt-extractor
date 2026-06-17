@@ -1180,6 +1180,31 @@ def run_claude_extraction_job(
     )
 
 
+def _normalise_claude_model(display_name: str) -> str:
+    """
+    Convert Claude's UI display name to a stable kebab-case slug.
+
+    Examples:
+      "Sonnet 4.6 Low"  -> "claude-sonnet-4-6"
+      "Opus 4.8"        -> "claude-opus-4-8"
+      "Haiku 4.5"       -> "claude-haiku-4-5"
+      "claude-sonnet-4" -> "claude-sonnet-4"   (already normalised)
+    """
+    import re as _re
+
+    if not display_name:
+        return "claude"
+    name = display_name.strip()
+    # Already a proper slug — return as-is
+    if name.lower().startswith("claude-"):
+        return name.lower()
+    # Strip trailing qualifiers like "Low", "High", "Fast", etc.
+    name = _re.sub(r"\s+(Low|High|Fast|Slow|Extended|Preview)\s*$", "", name, flags=_re.IGNORECASE).strip()
+    # "Sonnet 4.6" -> "claude-sonnet-4-6"
+    slug = "claude-" + _re.sub(r"[\s.]+", "-", name.lower())
+    return slug
+
+
 def build_claude_prompt_output(
     prompt: dict[str, Any],
     response: str,
@@ -1196,6 +1221,7 @@ def build_claude_prompt_output(
     session_info: dict[str, Any] | None = None,
     chrome_user_data_dir: str | None = None,
 ) -> dict[str, Any]:
+    normalised_model = _normalise_claude_model(llm_model) if llm_model else "claude"
     output = build_prompt_output(
         prompt,
         response,
@@ -1204,7 +1230,7 @@ def build_claude_prompt_output(
         markdown_capture_method,
         raw_html,
         raw_html_capture_method,
-        llm_model or "claude",
+        normalised_model,
         url,
         batch_id,
         sources,
@@ -1219,7 +1245,7 @@ def build_claude_prompt_output(
     metadata = output.get("output_metadata") if isinstance(output.get("output_metadata"), dict) else {}
     output["output_metadata"] = {
         **metadata,
-        "llm_model": llm_model or "claude",
+        "llm_model": normalised_model,
         "site_used": "Anthropic",
     }
     return output
