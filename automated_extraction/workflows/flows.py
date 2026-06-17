@@ -13,6 +13,7 @@ from automated_extraction.config import Settings
 from automated_extraction.workflows.tasks import (
     entity_output_process_task,
     extract_chatgpt_batch_task,
+    extract_claude_batch_task,
     extract_google_ai_mode_batch_task,
     extract_google_ai_overview_batch_task,
     product_output_process_task,
@@ -463,6 +464,177 @@ def prompt_extraction_flow(
     }
     flow_logger.info("Prompt extraction flow finished: %s", combined_result)
     return combined_result
+
+
+@flow(
+    name="claude-extraction",
+    flow_run_name="claude-extraction-{batch_id}",
+    log_prints=True,
+)
+def claude_extraction_flow(
+    batch_id: str | None = None,
+    prompts_file: str | None = None,
+    brand_id: str | None = None,
+    limit: int | None = None,
+    skip: int = 0,
+    dry_run: bool = False,
+    headless: bool | None = None,
+    chrome_user_data_dir: str | None = None,
+    force_rerun: bool = False,
+    llm_model_filter: str | None = "claude",
+    trigger_scoring: bool = True,
+) -> dict[str, Any]:
+    """Orchestrate a Claude.ai prompt extraction run."""
+    flow_logger = get_run_logger()
+    flow_logger.info("WORKER machine_id=%s", os.getenv("FLY_MACHINE_ID", "local"))
+    if not batch_id and not prompts_file:
+        raise ValueError("one of batch_id or prompts_file is required")
+
+    flow_logger.info(
+        "Starting Claude extraction flow. batch_id=%s prompts_file=%s brand_id=%s limit=%s skip=%s force_rerun=%s llm_model_filter=%s",
+        batch_id,
+        prompts_file,
+        brand_id,
+        limit,
+        skip,
+        force_rerun,
+        llm_model_filter or "any",
+    )
+    result = extract_claude_batch_task(
+        batch_id=batch_id,
+        prompts_file=prompts_file,
+        brand_id=brand_id,
+        limit=limit,
+        skip=skip,
+        dry_run=dry_run,
+        headless=headless,
+        chrome_user_data_dir=chrome_user_data_dir,
+        force_rerun=force_rerun,
+        llm_model_filter=llm_model_filter,
+    )
+
+    processing_result: dict[str, Any] | None = None
+    if not dry_run and result.get("saved_count", 0) > 0:
+        processing_result = prompt_output_process_task(
+            saved_outputs=result.get("saved_outputs") or [],
+            batch_id=result.get("batch_id") or batch_id,
+            brand_id=result.get("brand_id") or brand_id,
+            limit=result.get("saved_count") or limit or 50,
+        )
+
+    score_workflow_result: dict[str, Any] | None = None
+    if not dry_run and trigger_scoring and result.get("saved_outputs"):
+        score_workflow_result = score_workflow_trigger_task(
+            saved_outputs=result.get("saved_outputs") or [], force=False
+        )
+
+    combined_result = {
+        **result,
+        "prompt_output_processing": processing_result,
+        "score_workflow_trigger": score_workflow_result,
+    }
+    flow_logger.info("Claude extraction flow finished: %s", combined_result)
+    return combined_result
+
+
+@flow(
+    name="claude-extraction-batch",
+    flow_run_name="claude-extraction-batch-{batch_id}",
+    log_prints=True,
+)
+def claude_extraction_batch_flow(
+    batch_id: str | None = None,
+    model_filter: str | None = "claude",
+    limit: int = 5,
+    skip: int = 0,
+    delay_seconds: int = 120,
+    max_prompts: int | None = None,
+    startup_delay_seconds: int = 0,
+    trigger_scoring: bool = True,
+) -> dict[str, Any]:
+    """
+    Sequentially run claude-extraction until the remaining prompt set is exhausted.
+    Mirrors prompt_extraction_batch_flow for ChatGPT.
+    """
+    flow_logger = get_run_logger()
+    flow_logger.info("WORKER machine_id=%s", os.getenv("FLY_MACHINE_ID", "local"))
+    if not batch_id:
+        raise ValueError("batch_id is required")
+    if limit <= 0:
+        raise ValueError("limit must be greater than 0")
+    if startup_delay_seconds > 0:
+        flow_logger.info("Staggered startup: waiting %ss before beginning work.", startup_delay_seconds)
+        time.sleep(startup_delay_seconds)
+
+    settings = Settings.from_env(require_api_key=True, require_auto_login_credentials=False)
+    api = ApiClient(
+        settings.api_base_url,
+        settings.anon_key,
+        supabase_url=settings.supabase_url,
+        prompt_outputs_table=settings.prompt_outputs_table,
+        prompt_output_products_table=settings.prompt_output_products_table,
+        prompt_output_entities_table=settings.prompt_output_entities_table,
+    )
+
+    batch = api.get_batch(batch_id)
+    brand_id = batch.get("brand_id")
+    if not brand_id:
+        raise RuntimeError(f"Batch {batch_id} does not include brand_id")
+
+    remaining_prompts = api.get_prompts(
+        batch_id,
+        str(brand_id),
+        only_remaining=True,
+        llm_model_filter=model_filter,
+    )
+    remaining_count = max(0, len(remaining_prompts) - skip)
+    run_count = math.ceil(remaining_count / limit) if remaining_count else 0
+    if max_prompts is not None:
+        run_count = min(run_count, math.ceil(max_prompts / limit))
+    flow_logger.info(
+        "Claude batch flow: batch_id=%s brand_id=%s remaining=%s run_count=%s limit=%s",
+        batch_id,
+        brand_id,
+        remaining_count,
+        run_count,
+        limit,
+    )
+
+    if run_count == 0:
+        flow_logger.info("No remaining Claude prompts. Exiting.")
+        return {"status": "no_prompts", "batch_id": batch_id, "runs_completed": 0}
+
+    total_saved = 0
+    all_saved_outputs: list[dict[str, Any]] = []
+    for run_index in range(run_count):
+        flow_logger.info("Claude batch run %s/%s. batch_id=%s", run_index + 1, run_count, batch_id)
+        run_result = claude_extraction_flow(
+            batch_id=batch_id,
+            limit=limit,
+            skip=skip,
+            llm_model_filter=model_filter,
+            trigger_scoring=trigger_scoring,
+        )
+        saved = run_result.get("saved_count") or 0
+        total_saved += saved
+        all_saved_outputs.extend(run_result.get("saved_outputs") or [])
+        flow_logger.info(
+            "Claude batch run %s/%s finished. saved=%s total_saved=%s",
+            run_index + 1,
+            run_count,
+            saved,
+            total_saved,
+        )
+        if run_index < run_count - 1 and delay_seconds > 0:
+            flow_logger.info("Waiting %ss before next Claude run.", delay_seconds)
+            time.sleep(delay_seconds)
+
+    return {
+        "status": "completed",
+        "batch_id": batch_id,
+        "runs_completed": run_count,
+        "total_saved": total_saved,
+    }
 
 
 @flow(

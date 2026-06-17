@@ -56,6 +56,11 @@ _EXTRACTION_TYPES: dict[str, dict[str, str]] = {
         "deployment_base": "chatgpt-extraction-batch",
         "model_filter": "gpt",
     },
+    "claude": {
+        "flow_name": "claude-extraction-batch",
+        "deployment_base": "claude-extraction-batch",
+        "model_filter": "claude",
+    },
 }
 
 _REGION_SUFFIXES: dict[str, str] = {
@@ -334,6 +339,13 @@ def dispatch_extraction_flow(
                 "use_proxy": use_proxy,
                 "country": country,
                 "language": language,
+                "trigger_scoring": trigger_scoring,
+            }
+        )
+    elif extraction_type == "claude":
+        base_params.update(
+            {
+                "model_filter": model_filter,
                 "trigger_scoring": trigger_scoring,
             }
         )
