@@ -7,7 +7,7 @@ from pathlib import Path
 
 from .config import Settings
 from .entity_output_processor import process_entity_outputs
-from .extraction import run_extraction_job, run_google_ai_mode_extraction_job, run_google_ai_overview_extraction_job
+from .extraction import run_claude_extraction_job, run_extraction_job, run_google_ai_mode_extraction_job, run_google_ai_overview_extraction_job, run_perplexity_extraction_job
 from .product_output_processor import process_product_outputs
 from .workflow_trigger import trigger_score_workflows
 
@@ -28,18 +28,21 @@ def main(argv: list[str] | None = None) -> int:
             args.llm_model_filter = "google-ai-mode"
         elif args.provider == "google-ai-overview":
             args.llm_model_filter = "google-ai-overview"
+        elif args.provider == "claude":
+            args.llm_model_filter = "claude"
+        elif args.provider == "perplexity":
+            args.llm_model_filter = "perplexity"
         else:
             args.llm_model_filter = "gpt"
 
     auto_login_override = args.auto_login
     is_google_provider = args.provider in {"google-ai-mode", "google-ai-overview"}
+    is_claude_provider = args.provider in {"claude", "perplexity"}
     settings = Settings.from_env(
         require_api_key=not args.login_only,
-        # When --auto-login is explicitly set, enforce credentials even for
-        # --login-only so misconfiguration fails fast. Otherwise let the env
-        # default decide. Google providers don't use ChatGPT credentials.
+        # Google and Claude providers don't use ChatGPT auto-login credentials.
         require_auto_login_credentials=False
-        if is_google_provider
+        if (is_google_provider or is_claude_provider)
         else (auto_login_override is True) or (not args.login_only),
     )
     auto_login = auto_login_override if auto_login_override is not None else settings.auto_login
@@ -82,7 +85,35 @@ def main(argv: list[str] | None = None) -> int:
     if not args.batch_id and not args.prompts_file:
         parser.error("one of --batch-id or --prompts-file is required unless --login-only is used")
 
-    if args.provider == "google-ai-overview":
+    if args.provider == "perplexity":
+        result = run_perplexity_extraction_job(
+            settings=settings,
+            batch_id=args.batch_id,
+            prompts_file=args.prompts_file,
+            brand_id=args.brand_id,
+            limit=args.limit,
+            skip=args.skip,
+            dry_run=args.dry_run,
+            headless=args.headless if args.headless is not None else settings.headless,
+            chrome_user_data_dir=args.chrome_user_data_dir,
+            force_rerun=args.force_rerun,
+            llm_model_filter=args.llm_model_filter,
+        )
+    elif args.provider == "claude":
+        result = run_claude_extraction_job(
+            settings=settings,
+            batch_id=args.batch_id,
+            prompts_file=args.prompts_file,
+            brand_id=args.brand_id,
+            limit=args.limit,
+            skip=args.skip,
+            dry_run=args.dry_run,
+            headless=args.headless if args.headless is not None else settings.headless,
+            chrome_user_data_dir=args.chrome_user_data_dir,
+            force_rerun=args.force_rerun,
+            llm_model_filter=args.llm_model_filter,
+        )
+    elif args.provider == "google-ai-overview":
         result = run_google_ai_overview_extraction_job(
             settings=settings,
             batch_id=args.batch_id,
@@ -170,7 +201,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run BrandSight prompts through ChatGPT and save outputs.")
     parser.add_argument(
         "--provider",
-        choices=["chatgpt", "google-ai-mode", "google-ai-overview"],
+        choices=["chatgpt", "claude", "perplexity", "google-ai-mode", "google-ai-overview"],
         default="chatgpt",
         help="Extraction provider to run. Defaults to chatgpt.",
     )

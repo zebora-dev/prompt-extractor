@@ -13,7 +13,9 @@ from typing import Any
 
 from .api_client import ApiClient
 from .chatgpt_runner import ChatGPTRunner
+from .claude_runner import ClaudeRunner
 from .config import Settings
+from .perplexity_runner import PerplexityRunner
 from .google_ai_mode_runner import GoogleAIModeRunner
 from .google_ai_overview_runner import GoogleAIOverviewRunner
 from .google_suggestions_runner import capture_people_also_ask
@@ -948,6 +950,314 @@ def run_google_ai_overview_extraction_job(
     )
 
 
+def run_claude_extraction_job(
+    *,
+    settings: Settings,
+    batch_id: str | None = None,
+    prompts_file: Path | None = None,
+    brand_id: str | None = None,
+    limit: int | None = None,
+    skip: int = 0,
+    dry_run: bool = False,
+    headless: bool | None = None,
+    chrome_user_data_dir: str | None = None,
+    force_rerun: bool = False,
+    llm_model_filter: str | None = "claude",
+    measurements_filter: str | None = None,
+) -> ExtractionRunResult:
+    if not batch_id and not prompts_file:
+        raise ValueError("one of batch_id or prompts_file is required")
+
+    api = ApiClient(
+        settings.api_base_url,
+        settings.anon_key,
+        supabase_url=settings.supabase_url,
+        prompt_outputs_table=settings.prompt_outputs_table,
+        prompt_output_products_table=settings.prompt_output_products_table,
+        prompt_output_entities_table=settings.prompt_output_entities_table,
+        prompt_output_suggestions_table=settings.prompt_output_suggestions_table,
+    )
+    prompts, resolved_batch_id, resolved_brand_id = load_prompt_work(
+        api=api,
+        batch_id=batch_id,
+        prompts_file=prompts_file,
+        brand_id=brand_id,
+        only_remaining=not force_rerun,
+        llm_model_filter=llm_model_filter,
+        measurements_filter=measurements_filter,
+    )
+
+    if skip:
+        prompts = prompts[skip:]
+    if limit is not None:
+        prompts = prompts[:limit]
+    if not prompts:
+        LOGGER.info("No Claude prompts to process. batch_id=%s brand_id=%s", resolved_batch_id, resolved_brand_id)
+        return ExtractionRunResult(
+            status="no_prompts",
+            loaded_count=0,
+            attempted_count=0,
+            saved_count=0,
+            skipped_count=0,
+            failed_count=0,
+            batch_id=resolved_batch_id,
+            brand_id=resolved_brand_id,
+            failures=[],
+            saved_outputs=[],
+            product_outputs=[],
+            entity_outputs=[],
+        )
+
+    saved_count = 0
+    skipped_count = 0
+    failed_count = 0
+    failures: list[dict[str, Any]] = []
+    saved_outputs: list[dict[str, Any]] = []
+
+    resolved_chrome_user_data_dir = chrome_user_data_dir or settings.claude_chrome_user_data_dir
+    LOGGER.info(
+        "Starting Claude browser session. chrome_user_data_dir=%s headless=%s",
+        resolved_chrome_user_data_dir,
+        headless if headless is not None else settings.headless,
+    )
+
+    with ClaudeRunner(
+        settings.claude_url,
+        headless=headless if headless is not None else settings.headless,
+        chrome_user_data_dir=resolved_chrome_user_data_dir,
+        login_wait_seconds=settings.login_wait_seconds,
+        response_timeout_seconds=settings.response_timeout_seconds,
+    ) as runner:
+        session_info: dict[str, Any] = {"logged_in": True}
+
+        for index, prompt in enumerate(prompts, start=1):
+            prompt_id = str(prompt.get("id") or "")
+            prompt_brand_id = str(prompt.get("brand_id") or resolved_brand_id or "")
+            if not prompt_id or not prompt_brand_id:
+                skipped_count += 1
+                LOGGER.warning("Skipping prompt missing id or brand_id: %s", prompt)
+                continue
+
+            existing_output = (
+                None
+                if force_rerun
+                else api.find_existing_prompt_output(
+                    prompt_id,
+                    prompt_brand_id,
+                    resolved_batch_id,
+                    llm_model_filter=llm_model_filter,
+                )
+            )
+            if existing_output:
+                skipped_count += 1
+                LOGGER.info(
+                    "[%s/%s] Skipping existing Claude output for prompt %s. output_id=%s",
+                    index,
+                    len(prompts),
+                    prompt_id,
+                    existing_output.get("output_id") or existing_output.get("id"),
+                )
+                continue
+
+            if not force_rerun:
+                claimed = api.try_claim_prompt(
+                    prompt_id,
+                    resolved_batch_id,
+                    prompt_brand_id,
+                    llm_model_filter or "claude",
+                    WORKER_ID,
+                )
+                if not claimed:
+                    LOGGER.info(
+                        "[%s/%s] Prompt %s already claimed by another worker — skipping.",
+                        index,
+                        len(prompts),
+                        prompt_id,
+                    )
+                    skipped_count += 1
+                    continue
+
+            text = prompt_text(prompt)
+            LOGGER.info("[%s/%s] Running Claude prompt %s", index, len(prompts), prompt_id)
+
+            try:
+                if dry_run:
+                    LOGGER.info("[%s/%s] Dry run — skipping browser call.", index, len(prompts))
+                    skipped_count += 1
+                    if not force_rerun:
+                        api.release_claim(prompt_id, resolved_batch_id, llm_model_filter or "claude")
+                    continue
+
+                capture = runner.run_prompt(text)
+                output = build_claude_prompt_output(
+                    prompt,
+                    capture.response,
+                    capture.markdown,
+                    capture.capture_method,
+                    capture.markdown_capture_method,
+                    capture.raw_html,
+                    capture.raw_html_capture_method,
+                    capture.llm_model,
+                    capture.url,
+                    resolved_batch_id,
+                    capture.sources,
+                    capture.source_capture_method,
+                    session_info=session_info,
+                    chrome_user_data_dir=resolved_chrome_user_data_dir,
+                )
+                LOGGER.info(
+                    "[%s/%s] Claude capture summary for prompt %s: response_length=%s markdown_length=%s llm_model=%s source_count=%s",
+                    index,
+                    len(prompts),
+                    prompt_id,
+                    len(capture.response or ""),
+                    len(capture.markdown or ""),
+                    capture.llm_model,
+                    len(capture.sources or []),
+                )
+
+                # Race-check before save
+                concurrent_output = (
+                    None
+                    if force_rerun
+                    else api.find_existing_prompt_output(
+                        prompt_id,
+                        prompt_brand_id,
+                        resolved_batch_id,
+                        llm_model_filter=capture.llm_model,
+                    )
+                )
+                if concurrent_output:
+                    skipped_count += 1
+                    LOGGER.warning(
+                        "[%s/%s] Concurrent worker already saved Claude prompt %s — discarding.",
+                        index,
+                        len(prompts),
+                        prompt_id,
+                    )
+                    continue
+
+                saved = api.save_prompt_output(output)
+                saved_count += 1
+                saved_output = normalize_saved_output(saved, output)
+                saved_outputs.append(saved_output)
+                LOGGER.info(
+                    "[%s/%s] Saved Claude prompt output for prompt %s. output_id=%s",
+                    index,
+                    len(prompts),
+                    prompt_id,
+                    saved_output.get("output_id"),
+                )
+
+                if not force_rerun:
+                    api.complete_claim(prompt_id, resolved_batch_id, llm_model_filter or "claude")
+
+            except Exception as exc:
+                failed_count += 1
+                LOGGER.exception("[%s/%s] Failed Claude prompt %s: %s", index, len(prompts), prompt_id, exc)
+                failures.append({"prompt_id": prompt_id, "brand_id": prompt_brand_id, "error": str(exc)})
+                if not force_rerun:
+                    try:
+                        api.release_claim(prompt_id, resolved_batch_id, llm_model_filter or "claude")
+                    except Exception:
+                        pass
+
+                delay = random.uniform(2, 5)
+                LOGGER.info("Waiting %ss before next Claude prompt after failure.", round(delay, 1))
+                time.sleep(delay)
+
+    status = "completed" if failed_count == 0 else "completed_with_failures"
+    return ExtractionRunResult(
+        status=status,
+        loaded_count=len(prompts),
+        attempted_count=len(prompts) - skipped_count,
+        saved_count=saved_count,
+        skipped_count=skipped_count,
+        failed_count=failed_count,
+        batch_id=resolved_batch_id,
+        brand_id=resolved_brand_id,
+        failures=failures,
+        saved_outputs=saved_outputs,
+        product_outputs=[],
+        entity_outputs=[],
+    )
+
+
+def _normalise_claude_model(display_name: str) -> str:
+    """
+    Convert Claude's UI display name to a stable kebab-case slug.
+
+    Examples:
+      "Sonnet 4.6 Low"  -> "claude-sonnet-4-6"
+      "Opus 4.8"        -> "claude-opus-4-8"
+      "Haiku 4.5"       -> "claude-haiku-4-5"
+      "claude-sonnet-4" -> "claude-sonnet-4"   (already normalised)
+    """
+    import re as _re
+
+    if not display_name:
+        return "claude"
+    # Strip private-use Unicode (e.g.  seen in Claude UI model names)
+    name = _re.sub(r"[-]", "", display_name).strip()
+    # Strip trailing qualifiers like "Low", "High", "Fast", etc. (space or hyphen-separated,
+    # with optional trailing separators after the qualifier e.g. "claude-sonnet-4-6-low-")
+    name = _re.sub(r"[-\s]+(low|high|fast|slow|extended|preview)[-\s]*$", "", name, flags=_re.IGNORECASE).strip()
+    # Strip leading "Claude " prefix before slugging (e.g. "Claude Sonnet 4.5")
+    name = _re.sub(r"^claude\s+", "", name, flags=_re.IGNORECASE)
+    # Already a proper slug — just clean up trailing dashes and return
+    if name.lower().startswith("claude-"):
+        return name.lower().rstrip("-")
+    # "Sonnet 4.6" -> "claude-sonnet-4-6"
+    slug = "claude-" + _re.sub(r"[\s.]+", "-", name.lower())
+    return slug.rstrip("-")
+
+
+def build_claude_prompt_output(
+    prompt: dict[str, Any],
+    response: str,
+    markdown: str,
+    capture_method: str,
+    markdown_capture_method: str,
+    raw_html: str,
+    raw_html_capture_method: str,
+    llm_model: str,
+    url: str,
+    batch_id: str | None,
+    sources: list[dict[str, Any]] | None = None,
+    source_capture_method: str = "none",
+    session_info: dict[str, Any] | None = None,
+    chrome_user_data_dir: str | None = None,
+) -> dict[str, Any]:
+    normalised_model = _normalise_claude_model(llm_model) if llm_model else "claude"
+    output = build_prompt_output(
+        prompt,
+        response,
+        markdown,
+        capture_method,
+        markdown_capture_method,
+        raw_html,
+        raw_html_capture_method,
+        normalised_model,
+        url,
+        batch_id,
+        sources,
+        source_capture_method,
+        session_info=session_info,
+        chrome_user_data_dir=chrome_user_data_dir,
+    )
+    output["config"] = {
+        **(output.get("config") or {}),
+        "site": "Anthropic",
+    }
+    metadata = output.get("output_metadata") if isinstance(output.get("output_metadata"), dict) else {}
+    output["output_metadata"] = {
+        **metadata,
+        "llm_model": normalised_model,
+        "site_used": "Anthropic",
+    }
+    return output
+
+
 def load_prompt_work(
     *,
     api: ApiClient,
@@ -956,6 +1266,7 @@ def load_prompt_work(
     brand_id: str | None,
     only_remaining: bool = True,
     llm_model_filter: str | None = "gpt",
+    measurements_filter: str | None = None,
 ) -> tuple[list[dict[str, Any]], str | None, str | None]:
     if prompts_file:
         with prompts_file.open("r", encoding="utf-8") as handle:
@@ -994,6 +1305,7 @@ def load_prompt_work(
             only_remaining=only_remaining,
             llm_model_filter=llm_model_filter,
             required_models=required_models,
+            measurements_filter=measurements_filter,
         ),
         batch_id,
         str(resolved_brand_id),
@@ -1383,4 +1695,301 @@ def build_flyout_summary_patch(
             },
         },
     }
+
+
+def _normalise_perplexity_model(display_name: str) -> str:
+    """
+    Convert Perplexity's UI model name to a stable kebab-case slug.
+
+    Examples:
+      "Sonar"              -> "perplexity-sonar"
+      "Claude Sonnet 4.5"  -> "perplexity-claude-sonnet-4-5"
+      "GPT-4o"             -> "perplexity-gpt-4o"
+    """
+    import re as _re
+
+    if not display_name:
+        return "perplexity"
+    name = display_name.strip()
+    if name.lower().startswith("perplexity-"):
+        return name.lower()
+    slug = "perplexity-" + _re.sub(r"[\s._]+", "-", name.lower()).strip("-")
+    return slug
+
+
+def build_perplexity_prompt_output(
+    prompt: dict[str, Any],
+    response: str,
+    markdown: str,
+    capture_method: str,
+    markdown_capture_method: str,
+    raw_html: str,
+    raw_html_capture_method: str,
+    llm_model: str,
+    url: str,
+    batch_id: str | None,
+    sources: list[dict[str, Any]] | None = None,
+    source_capture_method: str = "none",
+    session_info: dict[str, Any] | None = None,
+    chrome_user_data_dir: str | None = None,
+) -> dict[str, Any]:
+    normalised_model = _normalise_perplexity_model(llm_model) if llm_model else "perplexity"
+    output = build_prompt_output(
+        prompt,
+        response,
+        markdown,
+        capture_method,
+        markdown_capture_method,
+        raw_html,
+        raw_html_capture_method,
+        normalised_model,
+        url,
+        batch_id,
+        sources,
+        source_capture_method,
+        session_info=session_info,
+        chrome_user_data_dir=chrome_user_data_dir,
+    )
+    output["config"] = {
+        **(output.get("config") or {}),
+        "site": "Perplexity",
+    }
+    metadata = output.get("output_metadata") if isinstance(output.get("output_metadata"), dict) else {}
+    output["output_metadata"] = {
+        **metadata,
+        "llm_model": normalised_model,
+        "site_used": "Perplexity",
+    }
+    return output
+
+
+def run_perplexity_extraction_job(
+    *,
+    settings: Settings,
+    batch_id: str | None = None,
+    prompts_file: Path | None = None,
+    brand_id: str | None = None,
+    limit: int | None = None,
+    skip: int = 0,
+    dry_run: bool = False,
+    headless: bool | None = None,
+    chrome_user_data_dir: str | None = None,
+    force_rerun: bool = False,
+    llm_model_filter: str | None = "perplexity",
+    measurements_filter: str | None = None,
+) -> ExtractionRunResult:
+    if not batch_id and not prompts_file:
+        raise ValueError("one of batch_id or prompts_file is required")
+
+    api = ApiClient(
+        settings.api_base_url,
+        settings.anon_key,
+        supabase_url=settings.supabase_url,
+        prompt_outputs_table=settings.prompt_outputs_table,
+        prompt_output_products_table=settings.prompt_output_products_table,
+        prompt_output_entities_table=settings.prompt_output_entities_table,
+        prompt_output_suggestions_table=settings.prompt_output_suggestions_table,
+    )
+    prompts, resolved_batch_id, resolved_brand_id = load_prompt_work(
+        api=api,
+        batch_id=batch_id,
+        prompts_file=prompts_file,
+        brand_id=brand_id,
+        only_remaining=not force_rerun,
+        llm_model_filter=llm_model_filter,
+        measurements_filter=measurements_filter,
+    )
+
+    if skip:
+        prompts = prompts[skip:]
+    if limit is not None:
+        prompts = prompts[:limit]
+    if not prompts:
+        LOGGER.info("No Perplexity prompts to process. batch_id=%s brand_id=%s", resolved_batch_id, resolved_brand_id)
+        return ExtractionRunResult(
+            status="no_prompts",
+            loaded_count=0,
+            attempted_count=0,
+            saved_count=0,
+            skipped_count=0,
+            failed_count=0,
+            batch_id=resolved_batch_id,
+            brand_id=resolved_brand_id,
+            failures=[],
+            saved_outputs=[],
+            product_outputs=[],
+            entity_outputs=[],
+        )
+
+    saved_count = 0
+    skipped_count = 0
+    failed_count = 0
+    failures: list[dict[str, Any]] = []
+    saved_outputs: list[dict[str, Any]] = []
+
+    resolved_chrome_user_data_dir = chrome_user_data_dir or settings.perplexity_chrome_user_data_dir
+    LOGGER.info(
+        "Starting Perplexity browser session. chrome_user_data_dir=%s headless=%s",
+        resolved_chrome_user_data_dir,
+        headless if headless is not None else settings.headless,
+    )
+
+    with PerplexityRunner(
+        settings.perplexity_url,
+        headless=headless if headless is not None else settings.headless,
+        chrome_user_data_dir=resolved_chrome_user_data_dir,
+        login_wait_seconds=settings.login_wait_seconds,
+        response_timeout_seconds=settings.response_timeout_seconds,
+    ) as runner:
+        session_info: dict[str, Any] = {"logged_in": True}
+
+        for index, prompt in enumerate(prompts, start=1):
+            prompt_id = str(prompt.get("id") or "")
+            prompt_brand_id = str(prompt.get("brand_id") or resolved_brand_id or "")
+            if not prompt_id or not prompt_brand_id:
+                skipped_count += 1
+                LOGGER.warning("Skipping prompt missing id or brand_id: %s", prompt)
+                continue
+
+            existing_output = (
+                None
+                if force_rerun
+                else api.find_existing_prompt_output(
+                    prompt_id,
+                    prompt_brand_id,
+                    resolved_batch_id,
+                    llm_model_filter=llm_model_filter,
+                )
+            )
+            if existing_output:
+                skipped_count += 1
+                LOGGER.info(
+                    "[%s/%s] Skipping existing Perplexity output for prompt %s. output_id=%s",
+                    index,
+                    len(prompts),
+                    prompt_id,
+                    existing_output.get("output_id") or existing_output.get("id"),
+                )
+                continue
+
+            if not force_rerun:
+                claimed = api.try_claim_prompt(
+                    prompt_id,
+                    resolved_batch_id,
+                    prompt_brand_id,
+                    llm_model_filter or "perplexity",
+                    WORKER_ID,
+                )
+                if not claimed:
+                    LOGGER.info(
+                        "[%s/%s] Prompt %s already claimed by another worker — skipping.",
+                        index,
+                        len(prompts),
+                        prompt_id,
+                    )
+                    skipped_count += 1
+                    continue
+
+            text = prompt_text(prompt)
+            LOGGER.info("[%s/%s] Running Perplexity prompt %s", index, len(prompts), prompt_id)
+
+            try:
+                if dry_run:
+                    LOGGER.info("[%s/%s] Dry run — skipping browser call.", index, len(prompts))
+                    skipped_count += 1
+                    if not force_rerun:
+                        api.release_claim(prompt_id, resolved_batch_id, llm_model_filter or "perplexity")
+                    continue
+
+                capture = runner.run_prompt(text)
+                output = build_perplexity_prompt_output(
+                    prompt,
+                    capture.response,
+                    capture.markdown,
+                    capture.capture_method,
+                    capture.markdown_capture_method,
+                    capture.raw_html,
+                    capture.raw_html_capture_method,
+                    capture.llm_model,
+                    capture.url,
+                    resolved_batch_id,
+                    capture.sources,
+                    capture.source_capture_method,
+                    session_info=session_info,
+                    chrome_user_data_dir=resolved_chrome_user_data_dir,
+                )
+                LOGGER.info(
+                    "[%s/%s] Perplexity capture summary for prompt %s: response_length=%s llm_model=%s source_count=%s",
+                    index,
+                    len(prompts),
+                    prompt_id,
+                    len(capture.response or ""),
+                    capture.llm_model,
+                    len(capture.sources or []),
+                )
+
+                concurrent_output = (
+                    None
+                    if force_rerun
+                    else api.find_existing_prompt_output(
+                        prompt_id,
+                        prompt_brand_id,
+                        resolved_batch_id,
+                        llm_model_filter=capture.llm_model,
+                    )
+                )
+                if concurrent_output:
+                    skipped_count += 1
+                    LOGGER.warning(
+                        "[%s/%s] Concurrent worker already saved Perplexity prompt %s — discarding.",
+                        index,
+                        len(prompts),
+                        prompt_id,
+                    )
+                    continue
+
+                saved = api.save_prompt_output(output)
+                saved_count += 1
+                saved_output = normalize_saved_output(saved, output)
+                saved_outputs.append(saved_output)
+                LOGGER.info(
+                    "[%s/%s] Saved Perplexity prompt output for prompt %s. output_id=%s",
+                    index,
+                    len(prompts),
+                    prompt_id,
+                    saved_output.get("output_id"),
+                )
+
+                if not force_rerun:
+                    api.complete_claim(prompt_id, resolved_batch_id, llm_model_filter or "perplexity")
+
+            except Exception as exc:
+                failed_count += 1
+                LOGGER.exception("[%s/%s] Failed Perplexity prompt %s: %s", index, len(prompts), prompt_id, exc)
+                failures.append({"prompt_id": prompt_id, "brand_id": prompt_brand_id, "error": str(exc)})
+                if not force_rerun:
+                    try:
+                        api.release_claim(prompt_id, resolved_batch_id, llm_model_filter or "perplexity")
+                    except Exception:
+                        pass
+
+                delay = random.uniform(2, 5)
+                LOGGER.info("Waiting %ss before next Perplexity prompt after failure.", round(delay, 1))
+                time.sleep(delay)
+
+    status = "completed" if failed_count == 0 else "completed_with_failures"
+    return ExtractionRunResult(
+        status=status,
+        loaded_count=len(prompts),
+        attempted_count=len(prompts) - skipped_count,
+        saved_count=saved_count,
+        skipped_count=skipped_count,
+        failed_count=failed_count,
+        batch_id=resolved_batch_id,
+        brand_id=resolved_brand_id,
+        failures=failures,
+        saved_outputs=saved_outputs,
+        product_outputs=[],
+        entity_outputs=[],
+    )
     return {"output_metadata": updated_metadata}

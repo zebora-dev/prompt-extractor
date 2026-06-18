@@ -29,10 +29,14 @@ REGIONS = {
 def get_flows():
     from automated_extraction.workflows.dispatcher import dispatch_extraction_flow
     from automated_extraction.workflows.flows import (
+        claude_extraction_batch_flow,
+        claude_extraction_flow,
         google_ai_mode_extraction_batch_flow,
         google_ai_mode_extraction_flow,
         google_ai_overview_extraction_batch_flow,
         google_ai_overview_extraction_flow,
+        perplexity_extraction_batch_flow,
+        perplexity_extraction_flow,
         prompt_extraction_batch_flow,
         prompt_extraction_flow,
         prompt_output_processing_flow,
@@ -43,6 +47,68 @@ def get_flows():
     )
 
     return {
+        "perplexity-extraction-batch": {
+            "flow": perplexity_extraction_batch_flow,
+            "tags": ["perplexity", "extraction", "browser", "batch"],
+            "description": "Sequentially run perplexity-extraction in chunks until remaining prompts for a batch are covered.",
+            "parameters": {
+                "batch_id": None,
+                "model_filter": "perplexity",
+                "limit": 5,
+                "delay_seconds": 60,
+                "trigger_scoring": True,
+                "startup_delay_seconds": 0,
+            },
+        },
+        "perplexity-extraction": {
+            "flow": perplexity_extraction_flow,
+            "tags": ["perplexity", "extraction", "browser"],
+            "description": "Run BrandSight prompts through Perplexity.ai and save responses and sources.",
+            "parameters": {
+                "batch_id": None,
+                "prompts_file": None,
+                "brand_id": None,
+                "limit": None,
+                "skip": 0,
+                "dry_run": False,
+                "headless": None,
+                "chrome_user_data_dir": None,
+                "force_rerun": False,
+                "llm_model_filter": "perplexity",
+                "trigger_scoring": True,
+            },
+        },
+        "claude-extraction-batch": {
+            "flow": claude_extraction_batch_flow,
+            "tags": ["claude", "extraction", "browser", "batch"],
+            "description": "Sequentially run claude-extraction in chunks until remaining prompts for a batch are covered.",
+            "parameters": {
+                "batch_id": None,
+                "model_filter": "claude",
+                "limit": 5,
+                "delay_seconds": 60,
+                "trigger_scoring": True,
+                "startup_delay_seconds": 0,
+            },
+        },
+        "claude-extraction": {
+            "flow": claude_extraction_flow,
+            "tags": ["claude", "extraction", "browser"],
+            "description": "Run BrandSight prompts through Claude.ai and save markdown, raw HTML, and sources.",
+            "parameters": {
+                "batch_id": None,
+                "prompts_file": None,
+                "brand_id": None,
+                "limit": None,
+                "skip": 0,
+                "dry_run": False,
+                "headless": None,
+                "chrome_user_data_dir": None,
+                "force_rerun": False,
+                "llm_model_filter": "claude",
+                "trigger_scoring": True,
+            },
+        },
         "chatgpt-extraction-batch": {
             "flow": prompt_extraction_batch_flow,
             "tags": ["chatgpt", "extraction", "browser", "batch"],

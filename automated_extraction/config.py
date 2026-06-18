@@ -18,6 +18,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CHROME_USER_DATA_DIR = PROJECT_ROOT / ".chrome-profile"
 DEFAULT_GOOGLE_CHROME_USER_DATA_DIR = PROJECT_ROOT / ".google-chrome-profile"
 DEFAULT_LOGGED_IN_ACCOUNTS_DIR = PROJECT_ROOT / ".chrome-accounts"
+DEFAULT_CLAUDE_USER_DATA_DIR = PROJECT_ROOT / ".claude-profile"
+DEFAULT_PERPLEXITY_USER_DATA_DIR = PROJECT_ROOT / ".perplexity-profile"
 
 
 @dataclass(frozen=True)
@@ -48,6 +50,10 @@ class Settings:
     score_workflow_scorer_types: list[str]
     auto_login: bool
     login_email: str | None
+    claude_url: str
+    claude_chrome_user_data_dir: str | None
+    perplexity_url: str
+    perplexity_chrome_user_data_dir: str | None
     accounts: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     @classmethod
@@ -130,6 +136,10 @@ class Settings:
             score_workflow_scorer_types=parse_csv(os.getenv("BRANDSIGHT_SCORE_WORKFLOW_SCORER_TYPES")),
             auto_login=auto_login,
             login_email=login_email,
+            claude_url=os.getenv("CLAUDE_URL", "https://claude.ai").strip(),
+            claude_chrome_user_data_dir=os.getenv("CLAUDE_CHROME_USER_DATA_DIR") or str(DEFAULT_CLAUDE_USER_DATA_DIR),
+            perplexity_url=os.getenv("PERPLEXITY_URL", "https://www.perplexity.ai").strip(),
+            perplexity_chrome_user_data_dir=os.getenv("PERPLEXITY_CHROME_USER_DATA_DIR") or str(DEFAULT_PERPLEXITY_USER_DATA_DIR),
             accounts=accounts,
         )
 

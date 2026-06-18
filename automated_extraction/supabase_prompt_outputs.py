@@ -200,6 +200,7 @@ class SupabasePromptOutputRepository:
         only_remaining: bool = True,
         llm_model_filter: str | None = "gpt",
         required_models: list[str] | None = None,
+        measurements_filter: str | None = None,
     ) -> list[PromptDict]:
         response = (
             self.client.table("prompts")
@@ -215,6 +216,12 @@ class SupabasePromptOutputRepository:
             for row in response.data or []
             if isinstance(row, dict)
         ]
+        if measurements_filter:
+            needle = measurements_filter.lower()
+            prompts = [
+                p for p in prompts
+                if needle in str(p.get("measurements") or "").lower()
+            ]
         if not only_remaining:
             LOGGER.info("Loaded %s active prompt(s) for brand_id=%s without remaining filter.", len(prompts), brand_id)
             return prompts

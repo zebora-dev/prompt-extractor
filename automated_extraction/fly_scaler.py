@@ -56,6 +56,10 @@ _CLONE_LABEL_ENV_KEY = "FLY_CLONE_LABEL"
 _APP_REGION: dict[str, str] = {
     "prompt-extractor-uk": "lhr",
     "prompt-extractor-us": "iad",
+    "prompt-extractor-claude-uk": "lhr",
+    "prompt-extractor-claude-us": "iad",
+    "prompt-extractor-perplexity-uk": "lhr",
+    "prompt-extractor-perplexity-us": "iad",
 }
 
 

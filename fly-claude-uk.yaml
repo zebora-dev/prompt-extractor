@@ -1,0 +1,73 @@
+# fly-claude-uk.yaml — Fly.io worker configuration for Claude.ai extraction (UK)
+#
+# Creates prompt-extractor-claude-uk running in London (lhr).
+# This worker polls the prompt-extraction-claude-uk Prefect work pool so that
+# UK-tagged Claude deployments (claude-extraction-batch-uk) are routed here.
+#
+# Architecture: 1 dedicated machine to start.  The Chrome profile lives on a
+# local Fly volume at /data/chrome-profile — log in once via VNC.
+#
+# Initial deploy:
+#   fly apps create prompt-extractor-claude-uk
+#   fly vol create prompt_extractor_claude_uk -a prompt-extractor-claude-uk -r lhr --size 10
+#   fly deploy -a prompt-extractor-claude-uk -c fly-claude-uk.yaml
+#
+# Secrets (run once — copy from prompt-extractor-uk):
+#   fly secrets set -a prompt-extractor-claude-uk \
+#     BRANDSIGHT_API_BASE_URL=... \
+#     BRANDSIGHT_SUPABASE_URL=... \
+#     BRANDSIGHT_SUPABASE_ANON_KEY=... \
+#     BRANDSIGHT_SUPABASE_SERVICE_KEY=... \
+#     BRANDSIGHT_PROMPT_OUTPUTS_TABLE=... \
+#     BRANDSIGHT_PROMPT_OUTPUT_PRODUCTS_TABLE=... \
+#     BRANDSIGHT_PROMPT_OUTPUT_ENTITIES_TABLE=... \
+#     BRANDSIGHT_SCORE_WORKFLOW_URL=... \
+#     BRANDSIGHT_SCORE_WORKFLOW_FORCE_RUN=... \
+#     PREFECT_API_URL=https://prompt-extractor-prefect.fly.dev/api \
+#     WORKFLOW_API_KEY=... \
+#     SLACK_BOT_TOKEN=... \
+#     FLY_API_TOKEN=$(fly auth token)
+
+app: prompt-extractor-claude-uk
+primary_region: lhr
+kill_signal: SIGINT
+kill_timeout: 30s
+
+build:
+  dockerfile: Dockerfile
+
+env:
+  CLAUDE_URL: https://claude.ai
+  CLAUDE_CHROME_USER_DATA_DIR: /data/chrome-profile
+  CHATGPT_HEADLESS: "false"
+  PREFECT_WORKING_DIR: /app
+  PREFECT_WORK_POOL: prompt-extraction-claude-uk
+  PROMPT_EXTRACTOR_VNC: "true"
+  VNC_SCREEN: 1280x720x24
+  PREFECT_LOGGING_EXTRA_LOGGERS: automated_extraction
+  GOOGLE_SEARCH_COUNTRY: GB
+  GOOGLE_SEARCH_LANGUAGE: en
+
+processes:
+  app: python -m prefect worker start --pool prompt-extraction-claude-uk --type process --limit 1 --install-policy never
+
+mounts:
+  - source: prompt_extractor_claude_uk
+    destination: /data
+    processes:
+      - app
+
+http_service:
+  internal_port: 6080
+  force_https: false
+  auto_stop_machines: false
+  auto_start_machines: false
+  min_machines_running: 0
+  sticky_sessions: true
+  processes:
+    - app
+
+vm:
+  - memory: 8192mb
+    cpu_kind: performance
+    cpus: 2
