@@ -93,9 +93,12 @@ prompts whose `measurements` field contains that string (case-insensitive) are p
 
 ### 6. Fly.io deployment
 
-| App | Region | Work pool | Config |
-|---|---|---|---|
-| `prompt-extractor-perplexity-uk` | lhr (London) | `prompt-extraction-perplexity-uk` | `fly-perplexity-uk.yaml` |
+| App | Region | Work pool | Config | VM size |
+|---|---|---|---|---|
+| `prompt-extractor-perplexity-uk` | lhr (London) | `prompt-extraction-perplexity-uk` | `fly-perplexity-uk.yaml` | performance-2x, **8 GB RAM** |
+
+> **Why 8 GB?** Chrome + Prefect together peak at ~4–5 GB.  4 GB machines OOM-kill
+> Chrome mid-session.
 
 **Initial deploy (UK):**
 ```bash
@@ -179,6 +182,62 @@ Outputs land in `prompt_outputs` with:
 - `config.site`: `"Perplexity"`
 - `output_metadata.site_used`: `"Perplexity"`
 - `sources`: list of `{url, title}` dicts from the Links tab (typically 10–15 per response)
+
+---
+
+## Operational notes
+
+### Starting and stopping machines
+
+Stop the machine when no batch is running to avoid idle costs:
+```bash
+flyctl machine stop <MACHINE_ID> -a prompt-extractor-perplexity-uk
+# later:
+flyctl machine start <MACHINE_ID> -a prompt-extractor-perplexity-uk
+```
+
+The dispatch loop (`dispatch_perplexity_loop.py`) does this automatically at batch
+completion.
+
+### Chrome Preferences file corruption
+
+After extended sessions, Chrome's `Default/Preferences` JSON file can grow to several GB.
+Chrome crashes with SIGTRAP on the next startup when it tries to parse it.
+
+`PerplexityRunner.start()` auto-deletes `Default/Preferences` if it exceeds 100 MB before
+launching Chrome.  The login session (stored in cookies) is unaffected.
+
+Manual recovery:
+```bash
+flyctl ssh console -a prompt-extractor-perplexity-uk \
+  -C "bash -c 'rm -f /data/chrome-profile/Default/Preferences'"
+```
+
+### Chrome Singleton lock files
+
+Chrome crash → `SingletonLock` / `SingletonCookie` / `SingletonSocket` left in the profile
+root → next startup blocked.  `PerplexityRunner.start()` removes these automatically.
+
+Manual recovery:
+```bash
+flyctl ssh console -a prompt-extractor-perplexity-uk \
+  -C "bash -c 'rm -f /data/chrome-profile/Singleton*'"
+```
+
+### Registering Prefect deployments
+
+Always set `PREFECT_WORKING_DIR=/app` when registering from a local machine.  Without it
+Prefect stores the local filesystem path and the remote worker crashes:
+
+```bash
+PREFECT_API_URL=https://prompt-extractor-prefect.fly.dev/api \
+PREFECT_WORKING_DIR=/app \
+  python -m automated_extraction.workflows.register_deployments --deploy-local --region uk
+```
+
+`register_deployments.py` registers *all* flows against the same `PREFECT_WORK_POOL`.
+If multiple pools are in use, verify each deployment is on the correct pool after
+registering (see the Claude scraper doc for the API patch approach).
 
 ---
 

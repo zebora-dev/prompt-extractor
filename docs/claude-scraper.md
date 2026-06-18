@@ -86,10 +86,13 @@ Visibility measurement tracking.
 
 ### 6. Fly.io deployment
 
-| App | Region | Work pool | Config |
-|---|---|---|---|
-| `prompt-extractor-claude-uk` | lhr (London) | `prompt-extraction-claude-uk` | `fly-claude-uk.yaml` |
-| `prompt-extractor-claude-us` | iad (Washington DC) | `prompt-extraction-claude-us` | `fly-claude-us.yaml` |
+| App | Region | Work pool | Config | VM size |
+|---|---|---|---|---|
+| `prompt-extractor-claude-uk` | lhr (London) | `prompt-extraction-claude-uk` | `fly-claude-uk.yaml` | performance-2x, **8 GB RAM** |
+| `prompt-extractor-claude-us` | iad (Washington DC) | `prompt-extraction-claude-us` | `fly-claude-us.yaml` | performance-2x, 8 GB RAM |
+
+> **Why 8 GB?** Chrome + the Prefect process together peak at ~4–5 GB.  If two `prefect.engine`
+> processes briefly coexist (e.g. during a redeploy), a 4 GB machine will OOM-kill both.
 
 **Initial deploy (UK example):**
 ```bash
@@ -124,13 +127,29 @@ fly proxy 6080 -a prompt-extractor-claude-uk
 
 ### 7. Registering Prefect deployments
 
-After deploying a new worker or changing flow code:
+After deploying a new worker or changing flow code, run from the project root with
+`PREFECT_WORKING_DIR` pointing at the **remote** `/app` path:
+
 ```bash
-python -m automated_extraction.workflows.register_deployments
+PREFECT_API_URL=https://prompt-extractor-prefect.fly.dev/api \
+PREFECT_WORKING_DIR=/app \
+  python -m automated_extraction.workflows.register_deployments --deploy-local --region uk
 ```
 
-This registers `claude-extraction` and `claude-extraction-batch` deployments against the
-appropriate work pools.
+> **Important:** `register_deployments.py` registers *all* flows (ChatGPT, Claude, Perplexity,
+> Google) against whatever `PREFECT_WORK_POOL` is set.  After running it, verify that
+> each deployment is assigned to its correct pool.  If they end up on the wrong pool, patch
+> them individually via the Prefect API:
+> ```python
+> import httpx
+> PREFECT = "https://prompt-extractor-prefect.fly.dev/api"
+> # find deployment id from /deployments/filter, then:
+> httpx.patch(f"{PREFECT}/deployments/{id}", json={"work_pool_name": "prompt-extraction-claude-uk"})
+> ```
+>
+> Always set `PREFECT_WORKING_DIR=/app` when registering from a local Mac.  Without it,
+> Prefect stores the Mac filesystem path in the deployment and the remote worker crashes
+> with `FileNotFoundError`.
 
 ---
 
@@ -180,6 +199,59 @@ Outputs land in `prompt_outputs` with:
 - `config.site`: `"Anthropic"`
 - `output_metadata.site_used`: `"Anthropic"`
 - `sources`: list of `{url, title}` dicts extracted from inline links
+
+---
+
+## Operational notes
+
+### Starting and stopping machines
+
+Workers are not free to idle.  Stop them when no batch is running:
+```bash
+flyctl machine stop <MACHINE_ID> -a prompt-extractor-claude-uk
+# later:
+flyctl machine start <MACHINE_ID> -a prompt-extractor-claude-uk
+```
+
+The dispatch loop script (`dispatch_claude_loop.py`) does this automatically when a batch
+completes.
+
+### Chrome Preferences file corruption
+
+Chrome accumulates a `Default/Preferences` file in the profile directory.  After extended
+sessions this file can grow to several GB, causing Chrome to crash with SIGTRAP on the next
+startup (it tries to parse the giant JSON file at launch).
+
+`ClaudeRunner.start()` automatically deletes `Default/Preferences` if it exceeds 100 MB
+before launching Chrome.  Chrome recreates it with defaults; the login session (stored in
+cookies and `Network Persistent State`) is unaffected.
+
+If a worker is stuck and manual recovery is needed:
+```bash
+flyctl ssh console -a prompt-extractor-claude-uk \
+  -C "bash -c 'rm -f /data/chrome-profile/Default/Preferences'"
+```
+
+### Chrome Singleton lock files
+
+When Chrome crashes (OOM, SIGTRAP, or forceful kill), it leaves `SingletonLock`,
+`SingletonCookie`, and `SingletonSocket` files in the profile root.  On the next startup
+Chrome refuses to open: *"profile appears to be in use by another process"*.
+
+`ClaudeRunner.start()` automatically removes these files before launching Chrome.
+
+Manual recovery:
+```bash
+flyctl ssh console -a prompt-extractor-claude-uk \
+  -C "bash -c 'rm -f /data/chrome-profile/Singleton*'"
+```
+
+### Model name normalisation
+
+Claude's model selector occasionally includes private-use Unicode codepoints
+(`U+E000`–`U+F8FF`) in the display name (e.g. `"Sonnet 4.6 Low "`).
+`_normalise_claude_model()` strips these before producing the slug, so DB records always
+contain clean values like `claude-sonnet-4-6`.
 
 ---
 

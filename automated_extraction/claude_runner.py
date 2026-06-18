@@ -158,6 +158,10 @@ class ClaudeRunner:
                 if lock_path.exists():
                     LOGGER.info("Removing stale Chrome lock: %s", lock_path)
                     lock_path.unlink(missing_ok=True)
+            prefs = Path(self.chrome_user_data_dir) / "Default" / "Preferences"
+            if prefs.exists() and prefs.stat().st_size > 100 * 1024 * 1024:
+                LOGGER.warning("Removing oversized Chrome Preferences file (%d MB)", prefs.stat().st_size // (1024 * 1024))
+                prefs.unlink(missing_ok=True)
         options = Options()
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-dev-shm-usage")
