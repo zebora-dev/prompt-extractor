@@ -1197,7 +1197,8 @@ def _normalise_claude_model(display_name: str) -> str:
 
     if not display_name:
         return "claude"
-    name = display_name.strip()
+    # Strip private-use Unicode (e.g.  seen in Claude UI model names)
+    name = _re.sub(r"[-]", "", display_name).strip()
     # Strip trailing qualifiers like "Low", "High", "Fast", etc. (space or hyphen-separated,
     # with optional trailing separators after the qualifier e.g. "claude-sonnet-4-6-low-")
     name = _re.sub(r"[-\s]+(low|high|fast|slow|extended|preview)[-\s]*$", "", name, flags=_re.IGNORECASE).strip()
