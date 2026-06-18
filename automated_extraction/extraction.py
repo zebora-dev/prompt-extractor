@@ -1198,14 +1198,17 @@ def _normalise_claude_model(display_name: str) -> str:
     if not display_name:
         return "claude"
     name = display_name.strip()
-    # Already a proper slug — return as-is
+    # Strip trailing qualifiers like "Low", "High", "Fast", etc. (space or hyphen-separated,
+    # with optional trailing separators after the qualifier e.g. "claude-sonnet-4-6-low-")
+    name = _re.sub(r"[-\s]+(low|high|fast|slow|extended|preview)[-\s]*$", "", name, flags=_re.IGNORECASE).strip()
+    # Strip leading "Claude " prefix before slugging (e.g. "Claude Sonnet 4.5")
+    name = _re.sub(r"^claude\s+", "", name, flags=_re.IGNORECASE)
+    # Already a proper slug — just clean up trailing dashes and return
     if name.lower().startswith("claude-"):
-        return name.lower()
-    # Strip trailing qualifiers like "Low", "High", "Fast", etc.
-    name = _re.sub(r"\s+(Low|High|Fast|Slow|Extended|Preview)\s*$", "", name, flags=_re.IGNORECASE).strip()
+        return name.lower().rstrip("-")
     # "Sonnet 4.6" -> "claude-sonnet-4-6"
     slug = "claude-" + _re.sub(r"[\s.]+", "-", name.lower())
-    return slug
+    return slug.rstrip("-")
 
 
 def build_claude_prompt_output(
