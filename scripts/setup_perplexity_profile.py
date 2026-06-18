@@ -38,15 +38,22 @@ def main() -> int:
         runner.driver.get(args.url)
         print("\n" + "=" * 60)
         print("Chrome is open. Please log in to perplexity.ai in the browser.")
-        print("Once logged in and the search input is visible, press Enter here.")
+        print("The browser will stay open for 10 minutes — log in then close it.")
         print("=" * 60 + "\n")
-        input("Press Enter when logged in > ")
 
-        el = runner.find_first(CHAT_INPUT_SELECTORS)
-        if el:
-            LOGGER.info("✓ Chat input found! Profile is ready at: %s", args.profile)
+        import time as _time
+        deadline = _time.time() + 600
+        while _time.time() < deadline:
+            el = runner.find_first(CHAT_INPUT_SELECTORS)
+            if el:
+                LOGGER.info("✓ Chat input detected — profile looks ready. Keeping browser open 10s to finalise cookies.")
+                _time.sleep(10)
+                break
+            _time.sleep(3)
         else:
-            LOGGER.warning("Could not detect chat input — check selectors or try again.")
+            LOGGER.warning("Timed out waiting for chat input. Profile may still be usable if you logged in.")
+
+        LOGGER.info("Profile saved at: %s", args.profile)
 
     return 0
 

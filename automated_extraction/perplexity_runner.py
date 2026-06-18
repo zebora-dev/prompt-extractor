@@ -411,34 +411,35 @@ class PerplexityRunner:
             driver.switch_to.active_element.send_keys(Keys.ESCAPE)
         except WebDriverException:
             pass
-        selectors = [
-            "button[aria-label='Close']",
-            "button[aria-label='Dismiss']",
-            "button[data-testid*='close']",
-            "button[data-testid*='dismiss']",
-        ]
-        for selector in selectors:
-            for button in driver.find_elements(By.CSS_SELECTOR, selector):
-                if self.click_if_visible(button):
-                    time.sleep(0.5)
-                    return
-        for button in driver.find_elements(By.CSS_SELECTOR, "button"):
-            label = (
-                " ".join(
-                    v.strip()
-                    for v in [
-                        button.text or "",
-                        button.get_attribute("aria-label") or "",
-                        button.get_attribute("title") or "",
-                    ]
-                    if v and v.strip()
-                )
-                .strip()
-                .lower()
+        # Use JS to find and click dismiss buttons in one shot to avoid stale elements
+        try:
+            dismiss_labels = list(DISMISS_BUTTON_TEXT)
+            clicked = driver.execute_script(
+                """
+                const labels = arguments[0];
+                const buttons = Array.from(document.querySelectorAll('button'));
+                for (const btn of buttons) {
+                    const label = [
+                        btn.getAttribute('aria-label') || '',
+                        btn.getAttribute('title') || '',
+                        btn.innerText || '',
+                    ].join(' ').trim().toLowerCase();
+                    if (labels.some(l => label.includes(l))) {
+                        const rect = btn.getBoundingClientRect();
+                        if (rect.width > 0 && rect.height > 0) {
+                            btn.click();
+                            return true;
+                        }
+                    }
+                }
+                return false;
+                """,
+                dismiss_labels,
             )
-            if label in DISMISS_BUTTON_TEXT and self.click_if_visible(button):
+            if clicked:
                 time.sleep(0.5)
-                return
+        except (WebDriverException, JavascriptException):
+            pass
 
     # ── Response wait ──────────────────────────────────────────────────────────
 
@@ -446,43 +447,40 @@ class PerplexityRunner:
         """
         Wait for Perplexity's response to finish.
 
-        Perplexity goes through two phases after submit:
-          1. "Searching the web..." (2-5s) — sources load but no answer yet
-          2. Answer streams into .prose
+        Perplexity's submit button stays disabled even after completion (it only
+        enables when text is typed in the box), so we cannot use its re-enable
+        state as a signal. Instead we watch for the post-answer action buttons
+        ("Helpful", "Not helpful", "Copy", "Rewrite Session") which only appear
+        once a response is fully rendered.
 
-        Completion signal: submit button re-enables (aria-disabled removed / enabled).
         Fallback: .prose text stabilises over 3 consecutive 2s polls.
         """
-        # Brief initial wait to let the searching phase start
+        # Brief initial wait to let the searching phase begin
         time.sleep(3)
 
-        # Phase 1: wait for submit button to become disabled (confirms response started)
+        # Confirm streaming started: submit button goes disabled (or prose appears)
         submit_disabled_deadline = time.time() + 15
-        submit_went_disabled = False
         while time.time() < submit_disabled_deadline:
-            if self._is_submit_disabled():
-                submit_went_disabled = True
+            if self._is_submit_disabled() or self.latest_response_text():
+                LOGGER.info("Perplexity response started (submit disabled or prose visible).")
                 break
             time.sleep(0.5)
 
-        if submit_went_disabled:
-            LOGGER.info("Perplexity submit button disabled — response is streaming.")
-            # Phase 2: wait for submit button to re-enable
-            deadline = time.time() + self.response_timeout_seconds
-            while time.time() < deadline:
-                if not self._is_submit_disabled():
-                    LOGGER.info("Perplexity submit button re-enabled — response complete.")
-                    time.sleep(1)
-                    return
-                time.sleep(1)
-            raise TimeoutError(f"Timed out waiting for Perplexity response. {self.collect_page_signals()}")
+        # Primary completion signal: post-answer action buttons appear
+        deadline = time.time() + self.response_timeout_seconds
+        while time.time() < deadline:
+            if self._answer_actions_visible():
+                LOGGER.info("Perplexity answer action buttons detected — response complete.")
+                time.sleep(0.5)
+                return
+            time.sleep(1)
 
-        # Fallback: text stability
+        # Fallback: prose text stability (3 identical reads 2s apart)
         LOGGER.warning(
-            "Perplexity submit button state detection failed. Falling back to text stability. %s",
+            "Answer action buttons never appeared. Falling back to text stability. %s",
             self.collect_page_signals(),
         )
-        deadline = time.time() + self.response_timeout_seconds
+        deadline = time.time() + 30
         last_text = ""
         stable_checks = 0
         while time.time() < deadline:
@@ -496,7 +494,7 @@ class PerplexityRunner:
                 if stable_checks >= 3:
                     return
             time.sleep(2)
-        raise TimeoutError("Timed out waiting for Perplexity response to complete")
+        raise TimeoutError(f"Timed out waiting for Perplexity response. {self.collect_page_signals()}")
 
     def _is_submit_disabled(self) -> bool:
         """Return True if the submit button is currently disabled (response in progress)."""
@@ -520,6 +518,25 @@ class PerplexityRunner:
                 """
             )
             return bool(result)
+        except (WebDriverException, JavascriptException):
+            return False
+
+    def _answer_actions_visible(self) -> bool:
+        """
+        Return True when the post-answer action buttons are in the DOM.
+        These buttons (Helpful, Not helpful, Copy, Rewrite Session) only appear
+        once Perplexity has fully rendered the response.
+        """
+        driver = self.require_driver()
+        try:
+            return bool(driver.execute_script(
+                """
+                const labels = ['Helpful', 'Not helpful', 'Copy', 'Rewrite Session'];
+                return labels.some(label => !!document.querySelector(
+                    `button[aria-label="${label}"]`
+                ));
+                """
+            ))
         except (WebDriverException, JavascriptException):
             return False
 
@@ -609,73 +626,75 @@ class PerplexityRunner:
         except WebDriverException:
             pass
 
-        return "perplexity"
+        return "perplexity-sonar"
 
     # ── Source capture ─────────────────────────────────────────────────────────
 
     def capture_latest_sources(self) -> list[dict[str, Any]]:
         """
-        Capture sources from:
-        1. Inline <sup><a> citation links within the .prose response
-        2. Source cards / panel rendered outside the main prose element
+        Capture sources from the Perplexity Links tab.
+
+        Perplexity groups Answer / Links / Images in tabs. Sources are in the
+        Links tab. We click it, wait briefly, then scrape all external anchors
+        that appeared. Inline prose citations are also captured if present.
         """
         driver = self.require_driver()
+
+        # Click the Links tab to load source links
+        try:
+            clicked = driver.execute_script(
+                """
+                const btn = Array.from(document.querySelectorAll('button'))
+                    .find(b => (b.innerText || '').trim() === 'Links');
+                if (btn) { btn.click(); return true; }
+                return false;
+                """
+            )
+            if clicked:
+                time.sleep(1.5)
+        except (WebDriverException, JavascriptException):
+            pass
+
         try:
             raw_sources = driver.execute_script(
                 """
                 const results = [];
                 const seen = new Set();
+                const excluded = /perplexity\\.ai/;
 
-                // 1. Inline links within .prose (numbered citations and any <a> in response)
+                // All external links visible after clicking Links tab
+                document.querySelectorAll('a[href]').forEach(anchor => {
+                    const url = anchor.href;
+                    if (!url || !url.startsWith('http') || excluded.test(url) || seen.has(url)) return;
+                    seen.add(url);
+                    let hostname = '';
+                    try { hostname = new URL(url).hostname.replace('www.', ''); } catch(e) {}
+                    results.push({
+                        url,
+                        title: (anchor.innerText || anchor.textContent || '').trim().slice(0, 200),
+                        source: hostname,
+                        description: '',
+                        extraction_source: 'links_tab',
+                    });
+                });
+
+                // Also inline prose citations (sup > a)
                 const proseEls = document.querySelectorAll('.prose, [class*="prose"]');
                 const latestProse = proseEls[proseEls.length - 1];
                 if (latestProse) {
-                    const links = latestProse.querySelectorAll('a[href]');
-                    links.forEach((link, i) => {
-                        const url = link.href;
-                        if (/^https?:\\/\\//.test(url) && !seen.has(url)) {
-                            seen.add(url);
-                            results.push({
-                                url,
-                                title: (link.innerText || link.textContent || '').trim(),
-                                source: new URL(url).hostname.replace('www.', ''),
-                                description: link.getAttribute('title') || '',
-                                extraction_source: 'prose_inline',
-                            });
-                        }
-                    });
-                }
-
-                // 2. Source panel cards (rendered outside .prose, typically below the answer)
-                const sourceSelectors = [
-                    '[data-testid*="source"]',
-                    '[class*="SourceItem"]',
-                    '[class*="source-item"]',
-                    '[class*="CitationCard"]',
-                    '[class*="citation"]',
-                    'a[href][class*="source"]',
-                ];
-                for (const sel of sourceSelectors) {
-                    document.querySelectorAll(sel).forEach(el => {
-                        const anchor = el.tagName === 'A' ? el : el.querySelector('a[href]');
-                        if (!anchor) return;
-                        const url = anchor.href;
-                        if (/^https?:\\/\\//.test(url) && !seen.has(url)) {
-                            seen.add(url);
-                            const title = (
-                                el.querySelector('[class*="title"], h3, h4, strong')?.innerText
-                                || anchor.innerText
-                                || anchor.textContent
-                                || ''
-                            ).trim();
-                            results.push({
-                                url,
-                                title,
-                                source: new URL(url).hostname.replace('www.', ''),
-                                description: (el.querySelector('[class*="snippet"], [class*="desc"], p')?.innerText || '').trim(),
-                                extraction_source: 'source_panel',
-                            });
-                        }
+                    latestProse.querySelectorAll('sup a[href], a[href]').forEach(a => {
+                        const url = a.href;
+                        if (!url || !url.startsWith('http') || excluded.test(url) || seen.has(url)) return;
+                        seen.add(url);
+                        let hostname = '';
+                        try { hostname = new URL(url).hostname.replace('www.', ''); } catch(e) {}
+                        results.push({
+                            url,
+                            title: (a.innerText || '').trim(),
+                            source: hostname,
+                            description: '',
+                            extraction_source: 'prose_inline',
+                        });
                     });
                 }
                 return results;

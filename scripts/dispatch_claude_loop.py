@@ -145,36 +145,45 @@ def cancel_stale_flow_runs(deployment_name: str, batch_id: str) -> int:
     return cancelled
 
 
-def dispatch_workers(batch_id: str, extraction_type: str, region: str, worker_count: int,
+def dispatch_workers(batch_id: str, region: str, worker_count: int,
                      limit: int, measurements_filter: str | None) -> list[str]:
-    """Submit a dispatch-extraction flow run and return the submitted run ID(s)."""
+    """
+    Submit claude-extraction-batch flow runs directly to the UK/US work pool.
+    Bypasses dispatch-extraction (which runs on the US pool) so runs are picked
+    up immediately by the online Claude worker.
+    """
+    region_suffix = f"-{region}" if region != "us" else ""
+    deployment_full = f"claude-extraction-batch/claude-extraction-batch{region_suffix}"
+
     try:
-        resp = _prefect_get(f"/deployments/name/dispatch-extraction/dispatch-extraction")
+        flow_name, dep_name = deployment_full.split("/", 1)
+        resp = _prefect_get(f"/deployments/name/{flow_name}/{dep_name}")
         dep_id = resp["id"]
     except Exception as exc:
-        print(f"[error] Could not find dispatch-extraction deployment: {exc}")
+        print(f"[error] Could not find deployment {deployment_full!r}: {exc}")
         return []
 
-    params: dict = {
-        "batch_id": batch_id,
-        "extraction_type": extraction_type,
-        "worker_count": worker_count,
-        "region": region,
-        "limit": limit,
-        "delay_seconds": 30,
-        "trigger_scoring": True,
-    }
-    if measurements_filter:
-        params["measurements_filter"] = measurements_filter
+    submitted = []
+    for i in range(worker_count):
+        params: dict = {
+            "batch_id": batch_id,
+            "model_filter": "claude",
+            "limit": limit,
+            "delay_seconds": 30,
+            "trigger_scoring": True,
+            "startup_delay_seconds": i * 15,
+        }
+        if measurements_filter:
+            params["measurements_filter"] = measurements_filter
 
-    try:
-        result = _prefect_post(f"/deployments/{dep_id}/create_flow_run", {"parameters": params})
-        run_id = result.get("id", "?")
-        print(f"  [dispatch] Submitted dispatch run: {run_id}")
-        return [run_id]
-    except Exception as exc:
-        print(f"[error] Dispatch failed: {exc}")
-        return []
+        try:
+            result = _prefect_post(f"/deployments/{dep_id}/create_flow_run", {"parameters": params})
+            run_id = result.get("id", "?")
+            print(f"  [dispatch] Submitted worker {i+1}/{worker_count} run: {run_id}")
+            submitted.append(run_id)
+        except Exception as exc:
+            print(f"[error] Dispatch worker {i+1} failed: {exc}")
+    return submitted
 
 
 def scale_down_fly(region: str, dry_run: bool = False) -> None:
@@ -293,7 +302,6 @@ def run_loop(
                 if not dry_run:
                     dispatch_workers(
                         batch_id=batch_id,
-                        extraction_type="claude",
                         region=region,
                         worker_count=worker_count,
                         limit=limit,
