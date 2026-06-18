@@ -68,6 +68,6 @@ http_service:
     - app
 
 vm:
-  - memory: 4096mb
+  - memory: 8192mb
     cpu_kind: performance
     cpus: 2
