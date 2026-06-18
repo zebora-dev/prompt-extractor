@@ -2,6 +2,8 @@
 .venv/
 .chrome-profile/
 .google-chrome-profile/
+.claude-profile/
+.perplexity-profile/
 __pycache__/
 *.py[cod]
 *.egg-info/
