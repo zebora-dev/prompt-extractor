@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import os
 import platform
+from pathlib import Path
 import random
 import re
 import subprocess
@@ -151,6 +152,12 @@ class ClaudeRunner:
             return
 
         self._persistent_chrome = False
+        if self.chrome_user_data_dir:
+            for lock in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
+                lock_path = Path(self.chrome_user_data_dir) / lock
+                if lock_path.exists():
+                    LOGGER.info("Removing stale Chrome lock: %s", lock_path)
+                    lock_path.unlink(missing_ok=True)
         options = Options()
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-dev-shm-usage")
