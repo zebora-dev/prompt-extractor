@@ -266,31 +266,12 @@ def run_extraction_job(
                     len(capture.sources or []),
                     capture.source_capture_method,
                 )
-                # Re-check immediately before saving — another worker may have saved
-                # this specific model while Chrome was running it.
-                # Use the exact captured model (not required_models) so we don't
-                # create duplicate rows for a model we already have.
-                concurrent_output = (
-                    None
-                    if force_rerun
-                    else api.find_existing_prompt_output(
-                        prompt_id,
-                        prompt_brand_id,
-                        resolved_batch_id,
-                        llm_model_filter=capture.llm_model,
-                        required_models=None,
-                    )
-                )
-                if concurrent_output:
-                    skipped_count += 1
-                    LOGGER.warning(
-                        "[%s/%s] Concurrent worker already saved prompt %s — discarding our result. output_id=%s",
-                        index,
-                        len(prompts),
-                        prompt_id,
-                        concurrent_output.get("output_id") or concurrent_output.get("id"),
-                    )
-                    continue
+                # Removed: pre-save concurrent-worker dedup check. This re-checked for an
+                # existing active output right before saving and discarded the capture if one
+                # was found. In practice it excluded too many potentially useful prompts
+                # (e.g. re-runs after active=false + segment='v3' reset), so we now let the
+                # save proceed and rely on the upstream claim/active logic to prevent true
+                # duplicates.
 
                 saved = api.save_prompt_output(output)
                 saved_count += 1
