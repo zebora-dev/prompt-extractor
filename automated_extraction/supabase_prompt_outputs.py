@@ -300,6 +300,18 @@ class SupabasePromptOutputRepository:
                 batch_id,
                 brand_id,
             )
+            # If this extractor's llm_model_filter is not in required_models (e.g. running
+            # google-ai-overview on a batch whose required_models are gpt variants), also
+            # mark prompts that already have an output for this extractor as complete so they
+            # are not reloaded and immediately skipped.
+            if llm_model_filter and not any(
+                llm_model_filter.lower() in m.lower() or m.lower() in llm_model_filter.lower()
+                for m in required_models
+            ):
+                already_done = self._completed_output_ids(
+                    batch_id=batch_id, brand_id=brand_id, llm_model_filter=llm_model_filter
+                )
+                complete = complete | already_done
             # Also exclude any prompts currently claimed by another worker.
             return complete | self._active_claimed_ids(batch_id=batch_id, llm_model_filter=llm_model_filter)
 
