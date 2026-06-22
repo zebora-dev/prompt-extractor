@@ -93,47 +93,17 @@ def notify_cloudflare_challenge(
     region = ctx["region"]
     app = ctx["app_name"]
 
-    vnc_hint = (
-        f"Open `https://{app}.fly.dev/vnc.html` to VNC into this machine "
-        "(stop other machines first so the load balancer routes to this one)."
-        if app != "local"
-        else "VNC not available in local mode."
-    )
+    vnc_url = f"https://{app}.fly.dev/vnc.html" if app != "local" else None
+
+    summary = f"`{machine_id}` · {region or 'unknown'} · `{login_email}`"
+    vnc_line = f"<{vnc_url}|VNC in> to resolve — `{vnc_url}`\n(stop other machines first)" if vnc_url else "VNC not available locally."
 
     blocks: list[dict[str, Any]] = [
-        {
-            "type": "header",
-            "text": {"type": "plain_text", "text": "⚠️ Cloudflare Challenge Detected", "emoji": True},
-        },
-        {
-            "type": "section",
-            "fields": [
-                {"type": "mrkdwn", "text": f"*Machine ID*\n`{machine_id}`"},
-                {"type": "mrkdwn", "text": f"*Account*\n`{login_email}`"},
-                {"type": "mrkdwn", "text": f"*Region*\n`{region or 'unknown'}`"},
-                {"type": "mrkdwn", "text": f"*Context*\n`{context}`"},
-            ],
-        },
-        {
-            "type": "section",
-            "fields": [
-                {"type": "mrkdwn", "text": f"*Page title*\n{title or '(unknown)'}"},
-                {"type": "mrkdwn", "text": f"*Signals*\n`{'`, `'.join(signals) if signals else 'none'}`"},
-            ],
-        },
-        {
-            "type": "section",
-            "text": {"type": "mrkdwn", "text": f"*URL*\n<{url}|{url}>"},
-        },
         {
             "type": "section",
             "text": {
                 "type": "mrkdwn",
-                "text": (
-                    "*Action required:* The extraction run is paused and will resume automatically "
-                    "once the challenge is solved. The run will time out if not resolved.\n\n"
-                    f"{vnc_hint}"
-                ),
+                "text": f":warning: *Cloudflare challenge* — {summary}\n{vnc_line}",
             },
         },
     ]
