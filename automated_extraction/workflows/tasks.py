@@ -67,6 +67,7 @@ def extract_chatgpt_batch_task(
     login_email: str | None = None,
     capture_products: bool = False,
     capture_entities: bool = False,
+    measurements_filter: str | None = None,
 ) -> dict[str, Any]:
     """
     Run the current CLI extraction process as one observable Prefect task.
@@ -76,7 +77,7 @@ def extract_chatgpt_batch_task(
     """
     task_logger = get_run_logger()
     task_logger.info(
-        "Starting ChatGPT extraction task. batch_id=%s prompts_file=%s limit=%s skip=%s dry_run=%s force_rerun=%s llm_model_filter=%s auto_login=%s login_email=%s capture_products=%s capture_entities=%s",
+        "Starting ChatGPT extraction task. batch_id=%s prompts_file=%s limit=%s skip=%s dry_run=%s force_rerun=%s llm_model_filter=%s auto_login=%s login_email=%s capture_products=%s capture_entities=%s measurements_filter=%s",
         batch_id,
         prompts_file,
         limit,
@@ -88,6 +89,7 @@ def extract_chatgpt_batch_task(
         login_email or "<env>",
         capture_products,
         capture_entities,
+        measurements_filter or "any",
     )
     settings = Settings.from_env(
         require_api_key=True,
@@ -110,6 +112,7 @@ def extract_chatgpt_batch_task(
         login_email=login_email,
         capture_products=capture_products,
         capture_entities=capture_entities,
+        measurements_filter=measurements_filter,
     )
     payload = asdict(result)
     task_logger.info("Finished ChatGPT extraction task: %s", summarize_extraction_payload(payload))
@@ -154,13 +157,14 @@ def extract_google_ai_mode_batch_task(
     language: str | None = None,
     debug_pause_seconds: int = 0,
     use_proxy: bool = False,
+    measurements_filter: str | None = None,
 ) -> dict[str, Any]:
     """
     Run BrandSight prompts through Google Search and capture AI Mode output.
     """
     task_logger = get_run_logger()
     task_logger.info(
-        "Starting Google AI Mode extraction task. batch_id=%s prompts_file=%s limit=%s skip=%s dry_run=%s force_rerun=%s llm_model_filter=%s country=%s language=%s use_proxy=%s",
+        "Starting Google AI Mode extraction task. batch_id=%s prompts_file=%s limit=%s skip=%s dry_run=%s force_rerun=%s llm_model_filter=%s country=%s language=%s use_proxy=%s measurements_filter=%s",
         batch_id,
         prompts_file,
         limit,
@@ -171,6 +175,7 @@ def extract_google_ai_mode_batch_task(
         country or "<env>",
         language or "<env>",
         use_proxy,
+        measurements_filter or "any",
     )
     settings = Settings.from_env(require_api_key=True, require_auto_login_credentials=False)
     result = run_google_ai_mode_extraction_job(
@@ -189,6 +194,7 @@ def extract_google_ai_mode_batch_task(
         language=language,
         debug_pause_seconds=debug_pause_seconds,
         use_proxy=use_proxy,
+        measurements_filter=measurements_filter,
     )
     payload = asdict(result)
     task_logger.info("Finished Google AI Mode extraction task: %s", summarize_extraction_payload(payload))
@@ -234,13 +240,14 @@ def extract_google_ai_overview_batch_task(
     debug_pause_seconds: int = 0,
     use_proxy: bool = False,
     paa_titles_only: bool = True,
+    measurements_filter: str | None = None,
 ) -> dict[str, Any]:
     """
     Run BrandSight prompts through Google Search and capture AI Overview output.
     """
     task_logger = get_run_logger()
     task_logger.info(
-        "Starting Google AI Overview extraction task. batch_id=%s prompts_file=%s limit=%s skip=%s dry_run=%s force_rerun=%s llm_model_filter=%s country=%s language=%s use_proxy=%s",
+        "Starting Google AI Overview extraction task. batch_id=%s prompts_file=%s limit=%s skip=%s dry_run=%s force_rerun=%s llm_model_filter=%s country=%s language=%s use_proxy=%s measurements_filter=%s",
         batch_id,
         prompts_file,
         limit,
@@ -251,6 +258,7 @@ def extract_google_ai_overview_batch_task(
         country or "<env>",
         language or "<env>",
         use_proxy,
+        measurements_filter or "any",
     )
     settings = Settings.from_env(require_api_key=True, require_auto_login_credentials=False)
     result = run_google_ai_overview_extraction_job(
@@ -270,6 +278,7 @@ def extract_google_ai_overview_batch_task(
         debug_pause_seconds=debug_pause_seconds,
         use_proxy=use_proxy,
         paa_titles_only=paa_titles_only,
+        measurements_filter=measurements_filter,
     )
     payload = asdict(result)
     task_logger.info("Finished Google AI Overview extraction task: %s", summarize_extraction_payload(payload))

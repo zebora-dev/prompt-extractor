@@ -349,6 +349,7 @@ def dispatch_extraction_flow(
                 "country": country,
                 "language": language,
                 "trigger_scoring": trigger_scoring,
+                **({"measurements_filter": measurements_filter} if measurements_filter else {}),
             }
         )
     elif extraction_type == "claude":
@@ -376,6 +377,7 @@ def dispatch_extraction_flow(
                 "capture_products": capture_products,
                 "capture_entities": capture_entities,
                 "trigger_scoring": trigger_scoring,
+                **({"measurements_filter": measurements_filter} if measurements_filter else {}),
             }
         )
 

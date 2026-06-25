@@ -41,6 +41,7 @@ def prompt_extraction_batch_flow(
     max_prompts: int | None = None,
     startup_delay_seconds: int = 0,
     trigger_scoring: bool = True,
+    measurements_filter: str | None = None,
 ) -> dict[str, Any]:
     """
     Sequentially run chatgpt-extraction until the currently remaining prompt set
@@ -97,13 +98,14 @@ def prompt_extraction_batch_flow(
         only_remaining=True,
         llm_model_filter=model_filter,
         required_models=required_models,
+        measurements_filter=measurements_filter,
     )
     remaining_count = max(0, len(remaining_prompts) - skip)
     run_count = math.ceil(remaining_count / limit) if remaining_count else 0
     if max_prompts is not None:
         run_count = min(run_count, math.ceil(max_prompts / limit))
     flow_logger.info(
-        "Starting sequential prompt extraction batch. batch_id=%s brand_id=%s model_filter=%s remaining_count=%s skip=%s limit_per_run=%s planned_runs=%s auto_login=%s capture_products=%s capture_entities=%s delay_seconds=%s max_prompts=%s trigger_scoring=%s required_models=%s",
+        "Starting sequential prompt extraction batch. batch_id=%s brand_id=%s model_filter=%s remaining_count=%s skip=%s limit_per_run=%s planned_runs=%s auto_login=%s capture_products=%s capture_entities=%s delay_seconds=%s max_prompts=%s trigger_scoring=%s required_models=%s measurements_filter=%s",
         batch_id,
         brand_id,
         model_filter or "any",
@@ -118,6 +120,7 @@ def prompt_extraction_batch_flow(
         max_prompts,
         trigger_scoring,
         required_models or "none",
+        measurements_filter or "any",
     )
 
     run_results: list[dict[str, Any]] = []
@@ -145,6 +148,7 @@ def prompt_extraction_batch_flow(
             capture_products=capture_products,
             capture_entities=capture_entities,
             trigger_scoring=trigger_scoring,
+            measurements_filter=measurements_filter,
         )
         run_results.append(result)
         flow_logger.info(
@@ -369,6 +373,7 @@ def prompt_extraction_flow(
     capture_products: bool = True,
     capture_entities: bool = True,
     trigger_scoring: bool = True,
+    measurements_filter: str | None = None,
 ) -> dict[str, Any]:
     """
     Orchestrate a ChatGPT prompt extraction run.
@@ -411,6 +416,7 @@ def prompt_extraction_flow(
         login_email=login_email,
         capture_products=capture_products,
         capture_entities=capture_entities,
+        measurements_filter=measurements_filter,
     )
     product_output_refs = result.pop("product_outputs", []) or []
     entity_output_refs = result.pop("entity_outputs", []) or []
@@ -835,6 +841,7 @@ def google_ai_mode_extraction_batch_flow(
     max_prompts: int | None = None,
     startup_delay_seconds: int = 0,
     trigger_scoring: bool = True,
+    measurements_filter: str | None = None,
 ) -> dict[str, Any]:
     """
     Sequentially run google-ai-mode-extraction until all remaining prompts in
@@ -877,13 +884,14 @@ def google_ai_mode_extraction_batch_flow(
         str(brand_id),
         only_remaining=True,
         llm_model_filter=model_filter,
+        measurements_filter=measurements_filter,
     )
     remaining_count = max(0, len(remaining_prompts) - skip)
     run_count = math.ceil(remaining_count / limit) if remaining_count else 0
     if max_prompts is not None:
         run_count = min(run_count, math.ceil(max_prompts / limit))
     flow_logger.info(
-        "Starting sequential Google AI Mode batch. batch_id=%s brand_id=%s model_filter=%s remaining_count=%s skip=%s limit_per_run=%s planned_runs=%s delay_seconds=%s country=%s language=%s max_prompts=%s",
+        "Starting sequential Google AI Mode batch. batch_id=%s brand_id=%s model_filter=%s remaining_count=%s skip=%s limit_per_run=%s planned_runs=%s delay_seconds=%s country=%s language=%s max_prompts=%s measurements_filter=%s",
         batch_id,
         brand_id,
         model_filter or "any",
@@ -895,6 +903,7 @@ def google_ai_mode_extraction_batch_flow(
         country or "<env>",
         language or "<env>",
         max_prompts,
+        measurements_filter or "any",
     )
 
     run_results: list[dict[str, Any]] = []
@@ -921,6 +930,7 @@ def google_ai_mode_extraction_batch_flow(
             language=language,
             use_proxy=use_proxy,
             trigger_scoring=trigger_scoring,
+            measurements_filter=measurements_filter,
         )
         run_results.append(result)
         flow_logger.info(
@@ -960,6 +970,7 @@ def google_ai_mode_extraction_batch_flow(
                 str(brand_id),
                 only_remaining=True,
                 llm_model_filter=model_filter,
+                measurements_filter=measurements_filter,
             )
             if not still_remaining:
                 stopped_reason = "batch_exhausted"
@@ -1114,6 +1125,7 @@ def google_ai_overview_extraction_batch_flow(
     startup_delay_seconds: int = 0,
     trigger_scoring: bool = True,
     paa_titles_only: bool = True,
+    measurements_filter: str | None = None,
 ) -> dict[str, Any]:
     """
     Sequentially run google-ai-overview-extraction until all remaining prompts
@@ -1157,13 +1169,14 @@ def google_ai_overview_extraction_batch_flow(
         str(brand_id),
         only_remaining=True,
         llm_model_filter=model_filter,
+        measurements_filter=measurements_filter,
     )
     remaining_count = max(0, len(remaining_prompts) - skip)
     run_count = math.ceil(remaining_count / limit) if remaining_count else 0
     if max_prompts is not None:
         run_count = min(run_count, math.ceil(max_prompts / limit))
     flow_logger.info(
-        "Starting sequential Google AI Overview batch. batch_id=%s brand_id=%s model_filter=%s remaining_count=%s skip=%s limit_per_run=%s planned_runs=%s delay_seconds=%s country=%s language=%s use_proxy=%s max_prompts=%s",
+        "Starting sequential Google AI Overview batch. batch_id=%s brand_id=%s model_filter=%s remaining_count=%s skip=%s limit_per_run=%s planned_runs=%s delay_seconds=%s country=%s language=%s use_proxy=%s max_prompts=%s measurements_filter=%s",
         batch_id,
         brand_id,
         model_filter or "any",
@@ -1176,6 +1189,7 @@ def google_ai_overview_extraction_batch_flow(
         language or "<env>",
         use_proxy,
         max_prompts,
+        measurements_filter or "any",
     )
 
     run_results: list[dict[str, Any]] = []
@@ -1203,6 +1217,7 @@ def google_ai_overview_extraction_batch_flow(
             use_proxy=use_proxy,
             trigger_scoring=trigger_scoring,
             paa_titles_only=paa_titles_only,
+            measurements_filter=measurements_filter,
         )
         run_results.append(result)
         flow_logger.info(
@@ -1242,6 +1257,7 @@ def google_ai_overview_extraction_batch_flow(
                 str(brand_id),
                 only_remaining=True,
                 llm_model_filter=model_filter,
+                measurements_filter=measurements_filter,
             )
             if not still_remaining:
                 stopped_reason = "batch_exhausted"
@@ -1400,6 +1416,7 @@ def google_ai_mode_extraction_flow(
     debug_pause_seconds: int = 0,
     use_proxy: bool = False,
     trigger_scoring: bool = True,
+    measurements_filter: str | None = None,
 ) -> dict[str, Any]:
     """
     Orchestrate a Google AI Mode prompt extraction run.
@@ -1409,7 +1426,7 @@ def google_ai_mode_extraction_flow(
         raise ValueError("one of batch_id or prompts_file is required")
 
     flow_logger.info(
-        "Starting Google AI Mode extraction flow. batch_id=%s prompts_file=%s brand_id=%s limit=%s skip=%s force_rerun=%s llm_model_filter=%s country=%s language=%s",
+        "Starting Google AI Mode extraction flow. batch_id=%s prompts_file=%s brand_id=%s limit=%s skip=%s force_rerun=%s llm_model_filter=%s country=%s language=%s measurements_filter=%s",
         batch_id,
         prompts_file,
         brand_id,
@@ -1419,6 +1436,7 @@ def google_ai_mode_extraction_flow(
         llm_model_filter or "any",
         country or "<env>",
         language or "<env>",
+        measurements_filter or "any",
     )
     result = extract_google_ai_mode_batch_task(
         batch_id=batch_id,
@@ -1435,6 +1453,7 @@ def google_ai_mode_extraction_flow(
         language=language,
         debug_pause_seconds=debug_pause_seconds,
         use_proxy=use_proxy,
+        measurements_filter=measurements_filter,
     )
 
     processing_result: dict[str, Any] | None = None
@@ -1491,6 +1510,7 @@ def google_ai_overview_extraction_flow(
     use_proxy: bool = False,
     trigger_scoring: bool = True,
     paa_titles_only: bool = True,
+    measurements_filter: str | None = None,
 ) -> dict[str, Any]:
     """
     Orchestrate a Google AI Overview prompt extraction run.
@@ -1500,7 +1520,7 @@ def google_ai_overview_extraction_flow(
         raise ValueError("one of batch_id or prompts_file is required")
 
     flow_logger.info(
-        "Starting Google AI Overview extraction flow. batch_id=%s prompts_file=%s brand_id=%s limit=%s skip=%s force_rerun=%s llm_model_filter=%s country=%s language=%s",
+        "Starting Google AI Overview extraction flow. batch_id=%s prompts_file=%s brand_id=%s limit=%s skip=%s force_rerun=%s llm_model_filter=%s country=%s language=%s measurements_filter=%s",
         batch_id,
         prompts_file,
         brand_id,
@@ -1510,6 +1530,7 @@ def google_ai_overview_extraction_flow(
         llm_model_filter or "any",
         country or "<env>",
         language or "<env>",
+        measurements_filter or "any",
     )
     result = extract_google_ai_overview_batch_task(
         batch_id=batch_id,
@@ -1527,6 +1548,7 @@ def google_ai_overview_extraction_flow(
         debug_pause_seconds=debug_pause_seconds,
         use_proxy=use_proxy,
         paa_titles_only=paa_titles_only,
+        measurements_filter=measurements_filter,
     )
 
     processing_result: dict[str, Any] | None = None

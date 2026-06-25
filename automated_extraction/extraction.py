@@ -62,6 +62,7 @@ def run_extraction_job(
     login_email: str | None = None,
     capture_products: bool = False,
     capture_entities: bool = False,
+    measurements_filter: str | None = None,
 ) -> ExtractionRunResult:
     if not batch_id and not prompts_file:
         raise ValueError("one of batch_id or prompts_file is required")
@@ -82,6 +83,7 @@ def run_extraction_job(
         brand_id=brand_id,
         only_remaining=not force_rerun,
         llm_model_filter=llm_model_filter,
+        measurements_filter=measurements_filter,
     )
     prompts = prompts[max(0, skip) :]
     if limit:
@@ -415,6 +417,7 @@ def run_google_ai_mode_extraction_job(
     language: str | None = None,
     debug_pause_seconds: int = 0,
     use_proxy: bool = False,
+    measurements_filter: str | None = None,
 ) -> ExtractionRunResult:
     if not batch_id and not prompts_file:
         raise ValueError("one of batch_id or prompts_file is required")
@@ -435,6 +438,7 @@ def run_google_ai_mode_extraction_job(
         brand_id=brand_id,
         only_remaining=not force_rerun,
         llm_model_filter=llm_model_filter,
+        measurements_filter=measurements_filter,
     )
     prompts = prompts[max(0, skip) :]
     if limit:
@@ -681,6 +685,7 @@ def run_google_ai_overview_extraction_job(
     debug_pause_seconds: int = 0,
     use_proxy: bool = False,
     paa_titles_only: bool = True,
+    measurements_filter: str | None = None,
 ) -> ExtractionRunResult:
     if not batch_id and not prompts_file:
         raise ValueError("one of batch_id or prompts_file is required")
@@ -701,6 +706,7 @@ def run_google_ai_overview_extraction_job(
         brand_id=brand_id,
         only_remaining=not force_rerun,
         llm_model_filter=llm_model_filter,
+        measurements_filter=measurements_filter,
     )
     prompts = prompts[max(0, skip) :]
     if limit:
