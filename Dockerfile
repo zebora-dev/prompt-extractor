@@ -14,6 +14,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     fonts-liberation \
     fluxbox \
+    gettext-base \
     gnupg \
     libasound2 \
     libatk-bridge2.0-0 \
