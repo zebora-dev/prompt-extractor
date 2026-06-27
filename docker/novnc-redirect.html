@@ -14,12 +14,33 @@
     (function () {
       var params = new URLSearchParams(window.location.search);
       var machine = params.get('machine');
-      if (machine) {
-        // Fly.io reads fly_instance_id to route the next request to a specific machine.
-        // Setting it here means the subsequent /vnc.html request lands on the right worker.
-        document.cookie = 'fly_instance_id=' + encodeURIComponent(machine) + '; path=/; SameSite=Lax';
+
+      if (!machine) {
+        window.location.replace('/vnc.html');
+        return;
       }
-      window.location.replace('/vnc.html');
+
+      // Fly.io won't route via a cookie set by JS — it requires the
+      // fly-force-instance-id request *header*. We fetch /vnc.html with
+      // that header, then replace the current page with the response so
+      // the browser is already connected to the correct machine when
+      // noVNC opens its WebSocket (which inherits the same connection).
+      fetch('/vnc.html', {
+        headers: { 'fly-force-instance-id': machine }
+      })
+        .then(function (res) {
+          if (!res.ok) throw new Error('HTTP ' + res.status);
+          return res.text();
+        })
+        .then(function (html) {
+          document.open();
+          document.write(html);
+          document.close();
+        })
+        .catch(function (err) {
+          document.querySelector('p').textContent = 'Error connecting to machine: ' + err.message;
+          setTimeout(function () { window.location.replace('/vnc.html'); }, 3000);
+        });
     })();
   </script>
 </body>
