@@ -93,10 +93,12 @@ def notify_cloudflare_challenge(
     region = ctx["region"]
     app = ctx["app_name"]
 
-    vnc_url = f"https://{app}.fly.dev/vnc.html" if app != "local" else None
+    # vnc-redirect.html sets fly_instance_id cookie via JS so Fly's LB routes
+    # the subsequent /vnc.html request directly to this machine.
+    vnc_url = f"https://{app}.fly.dev/vnc-redirect.html?machine={machine_id}" if app != "local" else None
 
     summary = f"`{machine_id}` · {region or 'unknown'} · `{login_email}`"
-    vnc_line = f"<{vnc_url}|VNC in> to resolve — `{vnc_url}`\n(stop other machines first)" if vnc_url else "VNC not available locally."
+    vnc_line = f"<{vnc_url}|VNC in to machine `{machine_id}`>" if vnc_url else "VNC not available locally."
 
     blocks: list[dict[str, Any]] = [
         {

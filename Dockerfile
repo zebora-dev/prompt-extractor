@@ -55,6 +55,7 @@ RUN python -m pip install --upgrade pip \
     && python -m pip install -e .
 
 COPY docker/entrypoint.sh /usr/local/bin/prompt-extractor-entrypoint
+COPY docker/novnc-redirect.html /usr/share/novnc/vnc-redirect.html
 RUN chmod +x /usr/local/bin/prompt-extractor-entrypoint \
     && mkdir -p /app/.chrome-profile
 
