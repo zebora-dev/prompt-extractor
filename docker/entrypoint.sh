@@ -60,8 +60,18 @@ if [[ "${PROMPT_EXTRACTOR_VNC:-false}" == "true" ]]; then
   sleep 2   # give Xvfb a moment to initialise before Chrome tries to connect
   fluxbox >/tmp/fluxbox.log 2>&1 &
   x11vnc -display "${DISPLAY}" -forever -shared -nopw -rfbport 5900 -loop >/tmp/x11vnc.log 2>&1 &
-  websockify --web=/usr/share/novnc/ 6080 localhost:5900 >/tmp/novnc.log 2>&1 &
-  echo "noVNC is available on port 6080. Open http://<server>:6080/vnc.html"
+
+  # websockify serves noVNC on port 6081; nginx fronts it on port 6080 and
+  # handles Fly-Replay routing so /vnc/<machine_id>/... always reaches the
+  # correct worker regardless of which machine the LB initially picks.
+  websockify --web=/usr/share/novnc/ 6081 localhost:5900 >/tmp/novnc.log 2>&1 &
+
+  MACHINE_ID="${FLY_MACHINE_ID:-local-dev}"
+  envsubst '${FLY_MACHINE_ID}' \
+    < /etc/nginx/conf.d/vnc.conf.template \
+    > /etc/nginx/conf.d/default.conf
+  nginx
+  echo "noVNC available via nginx on port 6080 — direct link: http://<server>:6080/vnc/${MACHINE_ID}/vnc.html"
 
   # Xvfb is now running — safe to start persistent Chrome with a real window
   _start_persistent_chrome
