@@ -173,6 +173,7 @@ Account pool (last 24h):
 Flow states: a1b2c3d4 RUNNING · e5f6g7h8 RUNNING · i9j0k1l2 COMPLETED→replaced
 Replacements: 1
 Next check: 5 min
+Prefect UI: https://prompt-extractor-prefect.fly.dev/runs?state=RUNNING
 ─────────────────────────────────────────────────────────
 ```
 
