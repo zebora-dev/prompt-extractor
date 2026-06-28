@@ -121,6 +121,8 @@ done
 | `locked_by` | `FLY_MACHINE_ID` of the current holder, or `'disabled'` for permanently locked accounts |
 | `lock_expires_at` | Safety TTL — claim auto-expires after 4 hours |
 | `last_uploaded_at` | When the profile was last saved to Tigris |
+| `cooldown_until` | When set, the account is skipped by `acquire_chatgpt_profile` until this timestamp passes |
+| `cooldown_reason` | Why the cooldown was set: `rate_limit`, `login_expired`, `cloudflare`, or `consecutive_downgrades` |
 
 The pool ordering prefers accounts with the oldest `last_uploaded_at` (least recently used), so new accounts without an upload history are always initialised first.
 
@@ -136,6 +138,21 @@ To re-enable:
 UPDATE chatgpt_profiles
 SET is_locked = false, locked_by = NULL, lock_expires_at = NULL
 WHERE "index" = 12;
+```
+
+To manually clear a cooldown (e.g. after re-logging in via VNC):
+```sql
+SELECT clear_chatgpt_profile_cooldown(12);
+-- or directly:
+UPDATE chatgpt_profiles SET cooldown_until = NULL, cooldown_reason = NULL WHERE "index" = 12;
+```
+
+To see which accounts are currently cooling down:
+```sql
+SELECT "index", email, cooldown_until, cooldown_reason
+FROM chatgpt_profiles
+WHERE cooldown_until > NOW()
+ORDER BY cooldown_until;
 ```
 
 ---

@@ -378,6 +378,52 @@ def release_profile(index: int, worker_id: str) -> bool:
         return False
 
 
+def set_profile_cooldown(
+    index: int,
+    worker_id: str,
+    cooldown_hours: float = 2.0,
+    reason: str = "rate_limit",
+) -> bool:
+    """
+    Mark a profile as cooling down so acquire_chatgpt_profile skips it.
+
+    Called when the worker detects a "too many requests" modal or repeated
+    model downgrades from the same account.  The profile is automatically
+    re-eligible after ``cooldown_hours``.
+
+    Returns True if the cooldown was recorded, False on failure (non-fatal).
+    """
+    try:
+        client = _get_client(prefer_service_key=True)
+        resp = client.rpc(
+            "set_chatgpt_profile_cooldown",
+            {
+                "p_index": index,
+                "p_worker_id": worker_id,
+                "p_cooldown_hours": cooldown_hours,
+                "p_reason": reason,
+            },
+        ).execute()
+        ok: bool = bool((resp.data or [False])[0])
+        if ok:
+            LOGGER.info(
+                "Set cooldown on profile slot %d for %.1f h (reason=%s).",
+                index,
+                cooldown_hours,
+                reason,
+            )
+        else:
+            LOGGER.warning(
+                "Could not set cooldown on profile slot %d — not held by worker %s.",
+                index,
+                worker_id,
+            )
+        return ok
+    except Exception as exc:
+        LOGGER.warning("Error setting cooldown on profile slot %d: %s", index, exc)
+        return False
+
+
 def refresh_profile_lock(
     index: int,
     worker_id: str,

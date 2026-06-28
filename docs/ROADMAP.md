@@ -6,6 +6,18 @@ Ranked by impact / effort. Items marked **[quick win]** are low-effort and high-
 
 ## Recently Completed
 
+### ✅ **[DONE]** Rate-limit detection, cooldown tracking, login check, claim TTL fix
+Analysis of batch `de54724b` (614 prompts × 2 models) revealed duplicates from expired claims,
+silent model downgrades, stale profiles running logged-out, and undetected "too many requests" modals.
+See [docs/CHATGPT_EXTRACTION_IMPROVEMENTS.md](CHATGPT_EXTRACTION_IMPROVEMENTS.md) for full analysis.
+- Claim TTL increased 5→20 min (primary dupe fix)
+- Pre-session login abort: runs with expired session cookies immediately stop and set 24h cooldown
+- `check_rate_limit_state()` JS probe detects "too many requests" modals after each capture
+- Consecutive model-downgrade counter (threshold=3) triggers 2h account cooldown and session stop
+- `set_profile_cooldown()` + `cooldown_until`/`cooldown_reason` columns on `chatgpt_profiles`
+- `acquire_chatgpt_profile` RPC skips cooled-down accounts automatically
+Migration: `migrations/002_chatgpt_profiles_cooldown.sql`
+
 ### ✅ **[DONE]** Prompt claiming / concurrent worker protection
 Atomic per-prompt locking via a `prompt_claims` Supabase table and a Postgres RPC (`try_claim_prompt`). Three-layer protection: prompts with active claims are excluded from the remaining list, the RPC atomically gates Chrome opening, and claims are completed or released on outcome. 20-minute TTL provides automatic crash recovery. `force_rerun=True` bypasses claiming entirely. Migration at `docs/migrations/001_prompt_claims.sql`. Fails open if the table does not exist.
 
