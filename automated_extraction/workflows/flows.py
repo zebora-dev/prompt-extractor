@@ -42,6 +42,7 @@ def prompt_extraction_batch_flow(
     startup_delay_seconds: int = 0,
     trigger_scoring: bool = True,
     measurements_filter: str | None = None,
+    max_prompts_per_session: int = 50,
 ) -> dict[str, Any]:
     """
     Sequentially run chatgpt-extraction until the currently remaining prompt set
@@ -149,6 +150,7 @@ def prompt_extraction_batch_flow(
             capture_entities=capture_entities,
             trigger_scoring=trigger_scoring,
             measurements_filter=measurements_filter,
+            max_prompts_per_session=max_prompts_per_session,
         )
         run_results.append(result)
         flow_logger.info(
@@ -261,6 +263,7 @@ def prompt_extraction_batch_flow(
                     capture_products=capture_products,
                     capture_entities=capture_entities,
                     trigger_scoring=trigger_scoring,
+                    max_prompts_per_session=max_prompts_per_session,
                 )
                 mop_up_results.append(result)
                 flow_logger.info(
@@ -374,6 +377,7 @@ def prompt_extraction_flow(
     capture_entities: bool = True,
     trigger_scoring: bool = True,
     measurements_filter: str | None = None,
+    max_prompts_per_session: int = 50,
 ) -> dict[str, Any]:
     """
     Orchestrate a ChatGPT prompt extraction run.
@@ -387,7 +391,7 @@ def prompt_extraction_flow(
         raise ValueError("one of batch_id or prompts_file is required")
 
     flow_logger.info(
-        "Starting prompt extraction flow. batch_id=%s prompts_file=%s brand_id=%s limit=%s skip=%s force_rerun=%s llm_model_filter=%s auto_login=%s login_email=%s capture_products=%s capture_entities=%s",
+        "Starting prompt extraction flow. batch_id=%s prompts_file=%s brand_id=%s limit=%s skip=%s force_rerun=%s llm_model_filter=%s auto_login=%s login_email=%s capture_products=%s capture_entities=%s max_prompts_per_session=%s",
         batch_id,
         prompts_file,
         brand_id,
@@ -399,6 +403,7 @@ def prompt_extraction_flow(
         login_email or "<env>",
         capture_products,
         capture_entities,
+        max_prompts_per_session,
     )
     result = extract_chatgpt_batch_task(
         batch_id=batch_id,
@@ -417,6 +422,7 @@ def prompt_extraction_flow(
         capture_products=capture_products,
         capture_entities=capture_entities,
         measurements_filter=measurements_filter,
+        max_prompts_per_session=max_prompts_per_session,
     )
     product_output_refs = result.pop("product_outputs", []) or []
     entity_output_refs = result.pop("entity_outputs", []) or []
