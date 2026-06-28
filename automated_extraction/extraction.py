@@ -182,6 +182,42 @@ def run_extraction_job(
             resolved_chrome_user_data_dir,
         )
 
+        # Abort early if the profile session has expired — prevents producing
+        # logged-out gpt-5-3-mini outputs that look like valid extractions.
+        if not session_info.get("logged_in") and session_info.get("login_button_present"):
+            LOGGER.warning(
+                "ChatGPT session is NOT authenticated (login button detected). "
+                "Profile %s may have an expired session cookie. "
+                "Aborting run — re-login via VNC and re-upload the profile to Tigris. "
+                "chrome_profile_index=%s account_email=%r",
+                chrome_profile_index or "<unset>",
+                chrome_profile_index or "<unset>",
+                chrome_profile_email or "<unknown>",
+            )
+            # Set a short cooldown so this profile is skipped until re-authenticated.
+            if chrome_profile_index is not None:
+                try:
+                    from automated_extraction.profile_manager import set_profile_cooldown
+                    set_profile_cooldown(int(chrome_profile_index), WORKER_ID, cooldown_hours=24.0, reason="login_expired")
+                except Exception as _cooldown_exc:
+                    LOGGER.debug("Could not set login_expired cooldown: %s", _cooldown_exc)
+            return ExtractionRunResult(
+                status="aborted_not_logged_in",
+                loaded_count=len(prompts),
+                attempted_count=0,
+                saved_count=0,
+                skipped_count=len(prompts),
+                failed_count=0,
+                batch_id=resolved_batch_id,
+                brand_id=resolved_brand_id,
+                failures=[],
+                saved_outputs=[],
+                product_outputs=[],
+                entity_outputs=[],
+            )
+
+        consecutive_downgrades = 0  # tracks model downgrades within this session
+
         for index, prompt in enumerate(prompts, start=1):
             prompt_id = str(prompt.get("id") or "")
             prompt_brand_id = str(prompt.get("brand_id") or resolved_brand_id or "")
@@ -224,6 +260,7 @@ def run_extraction_job(
                     prompt_brand_id,
                     llm_model_filter or "gpt",
                     WORKER_ID,
+                    ttl_minutes=20,  # 20 min — covers slow ChatGPT responses + Cloudflare delays
                 )
                 if not claimed:
                     LOGGER.info(
@@ -373,6 +410,42 @@ def run_extraction_job(
                 )
                 if not force_rerun:
                     api.complete_claim(prompt_id, resolved_batch_id, llm_model_filter or "gpt")
+
+                # Track model downgrade: when required model is gpt-5 but account returned mini.
+                expected_model_prefix = "gpt-5-5" if required_models and any("gpt-5-5" in m for m in required_models) else None
+                if expected_model_prefix and capture.llm_model and expected_model_prefix not in capture.llm_model:
+                    consecutive_downgrades += 1
+                    LOGGER.info(
+                        "[%s/%s] Model downgrade detected. expected=%s got=%s consecutive=%s prompt_id=%s",
+                        index, len(prompts), expected_model_prefix, capture.llm_model,
+                        consecutive_downgrades, prompt_id,
+                    )
+                else:
+                    consecutive_downgrades = 0
+
+                # Check for rate-limiting after each successful capture.
+                rate_limited = runner.check_rate_limit_state()
+                if rate_limited or consecutive_downgrades >= 3:
+                    trigger = "rate_limit_modal" if rate_limited else "consecutive_downgrades"
+                    LOGGER.warning(
+                        "[%s/%s] Account throttling detected (%s). Setting cooldown and stopping session. "
+                        "chrome_profile_index=%s account_email=%r",
+                        index, len(prompts), trigger, chrome_profile_index or "<unset>",
+                        chrome_profile_email or "<unknown>",
+                    )
+                    if chrome_profile_index is not None:
+                        try:
+                            from automated_extraction.profile_manager import set_profile_cooldown
+                            set_profile_cooldown(
+                                int(chrome_profile_index), WORKER_ID,
+                                cooldown_hours=2.0, reason=trigger,
+                            )
+                        except Exception as _cd_exc:
+                            LOGGER.debug("Could not set cooldown: %s", _cd_exc)
+                    # Stop processing — the batch flow will re-dispatch fresh workers
+                    # that will acquire a different (cooled-in) profile.
+                    break
+
             except Exception as exc:
                 failed_count += 1
                 failure = {"prompt_id": prompt_id, "brand_id": prompt_brand_id, "error": str(exc)}

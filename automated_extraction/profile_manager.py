@@ -44,6 +44,10 @@ from pathlib import Path
 LOGGER = logging.getLogger(__name__)
 
 BUCKET_NAME = os.getenv("CHROME_PROFILE_BUCKET", "chrome-profiles")
+
+# When PROFILE_STORAGE_BACKEND=tigris the upload/download functions use S3
+# (Fly Tigris) instead of Supabase Storage.  Set by fly-gpt-uk.yaml.
+_STORAGE_BACKEND = os.getenv("PROFILE_STORAGE_BACKEND", "supabase")
 _OBJECT_PREFIX = "profile_"
 
 # Chrome subdirectories that are pure cache / ephemeral state and add bulk
@@ -178,12 +182,13 @@ def _add_dir(tar: tarfile.TarFile, src: Path, arc_base: Path) -> None:
 
 def upload_profile(index: int, profile_dir: str | Path) -> None:
     """
-    Tar the given Chrome profile directory and upload it to Supabase Storage
-    as profile_{index}.tar.gz.  Cache directories are excluded to keep the
-    archive small.  Existing objects are overwritten.
-
-    Requires BRANDSIGHT_SUPABASE_SERVICE_KEY to bypass RLS.
+    Tar the given Chrome profile directory and upload it to storage.
+    When PROFILE_STORAGE_BACKEND=tigris delegates to upload_profile_tigris.
+    Otherwise uploads to Supabase Storage.  Existing objects are overwritten.
     """
+    if _STORAGE_BACKEND == "tigris":
+        upload_profile_tigris(index, profile_dir)
+        return
     profile_dir = Path(profile_dir).expanduser()
     if not profile_dir.exists():
         raise FileNotFoundError(f"Chrome profile directory not found: {profile_dir}")
@@ -239,11 +244,12 @@ def upload_profile(index: int, profile_dir: str | Path) -> None:
 
 def download_profile(index: int, dest_dir: str | Path) -> bool:
     """
-    Download profile_{index}.tar.gz from Supabase Storage and extract it to
-    dest_dir.  Returns True on success, False if the object does not exist.
-
-    dest_dir is created if it does not already exist.
+    Download and extract profile_{index}.tar.gz.
+    When PROFILE_STORAGE_BACKEND=tigris delegates to download_profile_tigris.
+    Returns True on success, False if the object does not exist.
     """
+    if _STORAGE_BACKEND == "tigris":
+        return download_profile_tigris(index, dest_dir)
     dest_dir = Path(dest_dir).expanduser()
     object_name = _object_name(index)
 
@@ -372,6 +378,52 @@ def release_profile(index: int, worker_id: str) -> bool:
         return False
 
 
+def set_profile_cooldown(
+    index: int,
+    worker_id: str,
+    cooldown_hours: float = 2.0,
+    reason: str = "rate_limit",
+) -> bool:
+    """
+    Mark a profile as cooling down so acquire_chatgpt_profile skips it.
+
+    Called when the worker detects a "too many requests" modal or repeated
+    model downgrades from the same account.  The profile is automatically
+    re-eligible after ``cooldown_hours``.
+
+    Returns True if the cooldown was recorded, False on failure (non-fatal).
+    """
+    try:
+        client = _get_client(prefer_service_key=True)
+        resp = client.rpc(
+            "set_chatgpt_profile_cooldown",
+            {
+                "p_index": index,
+                "p_worker_id": worker_id,
+                "p_cooldown_hours": cooldown_hours,
+                "p_reason": reason,
+            },
+        ).execute()
+        ok: bool = bool((resp.data or [False])[0])
+        if ok:
+            LOGGER.info(
+                "Set cooldown on profile slot %d for %.1f h (reason=%s).",
+                index,
+                cooldown_hours,
+                reason,
+            )
+        else:
+            LOGGER.warning(
+                "Could not set cooldown on profile slot %d — not held by worker %s.",
+                index,
+                worker_id,
+            )
+        return ok
+    except Exception as exc:
+        LOGGER.warning("Error setting cooldown on profile slot %d: %s", index, exc)
+        return False
+
+
 def refresh_profile_lock(
     index: int,
     worker_id: str,
@@ -404,6 +456,117 @@ def refresh_profile_lock(
     except Exception as exc:
         LOGGER.warning("Error refreshing profile lock for slot %d: %s", index, exc)
         return False
+
+
+# ── Tigris (S3-compatible) storage ───────────────────────────────────────────
+# Used when PROFILE_STORAGE_BACKEND=tigris (set in fly-gpt-uk.yaml).
+# Credentials come from Fly secrets injected by `flyctl storage create`.
+
+def _tigris_client():
+    import boto3  # type: ignore[import]
+
+    return boto3.client(
+        "s3",
+        endpoint_url=os.environ.get("AWS_ENDPOINT_URL_S3", "https://fly.storage.tigris.dev"),
+        aws_access_key_id=os.environ["AWS_ACCESS_KEY_ID"],
+        aws_secret_access_key=os.environ["AWS_SECRET_ACCESS_KEY"],
+        region_name=os.environ.get("AWS_REGION", "auto"),
+    )
+
+
+def _tigris_bucket() -> str:
+    return os.environ.get("BUCKET_NAME", "gpt-extractor-profiles")
+
+
+def _profile_key(index: int) -> str:
+    return f"chatgpt/profile_{index}.tar.gz"
+
+
+def upload_profile_tigris(index: int, profile_dir: str | Path) -> None:
+    """Archive and upload profile_{index} to Tigris (S3)."""
+    profile_dir = Path(profile_dir).expanduser()
+    if not profile_dir.exists():
+        raise FileNotFoundError(f"Chrome profile directory not found: {profile_dir}")
+
+    key = _profile_key(index)
+    LOGGER.info("Archiving %s → Tigris/%s (excluding cache dirs) …", profile_dir, key)
+
+    with tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False) as tmp:
+        tmp_path = Path(tmp.name)
+
+    try:
+        with tarfile.open(tmp_path, "w:gz", compresslevel=9) as tar:
+            _add_dir(tar, profile_dir, Path("chrome-profile"))
+
+        size_mb = tmp_path.stat().st_size / 1_048_576
+        LOGGER.info("Archive size: %.1f MB — uploading to Tigris …", size_mb)
+        _tigris_client().upload_file(str(tmp_path), _tigris_bucket(), key)
+        LOGGER.info("✅ Profile %d uploaded to Tigris (%s).", index, key)
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+
+def download_profile_tigris(index: int, dest_dir: str | Path) -> bool:
+    """Download profile_{index} from Tigris and extract it to dest_dir."""
+    from botocore.exceptions import ClientError  # type: ignore[import]
+
+    dest_dir = Path(dest_dir).expanduser()
+    key = _profile_key(index)
+    LOGGER.info("Downloading Tigris/%s → %s …", key, dest_dir)
+
+    with tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False) as tmp:
+        tmp_path = Path(tmp.name)
+
+    try:
+        try:
+            _tigris_client().download_file(_tigris_bucket(), key, str(tmp_path))
+        except ClientError as exc:
+            if exc.response["Error"]["Code"] in ("NoSuchKey", "404"):
+                LOGGER.warning("No profile in Tigris for index %d — fresh profile will be created.", index)
+                return False
+            raise
+
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        size_mb = tmp_path.stat().st_size / 1_048_576
+        LOGGER.info("Extracting %.1f MB to %s …", size_mb, dest_dir)
+        with tarfile.open(tmp_path, "r:gz") as tar:
+            for member in tar.getmembers():
+                parts = Path(member.name).parts
+                if len(parts) > 1:
+                    member.name = str(Path(*parts[1:]))
+                elif member.name in {"chrome-profile", "."}:
+                    continue
+                tar.extract(member, dest_dir, filter="data")
+        LOGGER.info("✅ Profile %d restored from Tigris to %s.", index, dest_dir)
+        return True
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+
+def save_and_release(index: int, worker_id: str, profile_dir: str | Path) -> None:
+    """
+    Upload the current profile snapshot then release the DB lock.
+
+    Called from entrypoint.sh EXIT trap so it fires on SIGTERM, script error,
+    and normal exit. For hard failures (SIGKILL) the 4-hour lock_expires_at
+    acts as the safety net.
+    """
+    profile_dir = Path(profile_dir).expanduser()
+    LOGGER.info("Saving and releasing profile %d (worker %s) …", index, worker_id)
+
+    if profile_dir.exists():
+        try:
+            if _STORAGE_BACKEND == "tigris":
+                upload_profile_tigris(index, profile_dir)
+            else:
+                upload_profile(index, profile_dir)
+            refresh_profile_lock(index, worker_id)
+        except Exception as exc:
+            LOGGER.warning("Profile upload failed (non-fatal — lock will auto-expire): %s", exc)
+    else:
+        LOGGER.warning("Profile dir %s not found — skipping upload.", profile_dir)
+
+    release_profile(index, worker_id)
 
 
 # ── Profile builder (local use only) ─────────────────────────────────────────
@@ -554,6 +717,16 @@ def main() -> None:
     rfr.add_argument("--worker-id", required=True, help="Worker ID that holds the lock.")
     rfr.add_argument("--lock-hours", type=float, default=_LOCK_HOURS_DEFAULT, help="New lock duration in hours.")
 
+    # ── Save + release (entrypoint EXIT trap) ─────────────────────────────────
+    sar = sub.add_parser(
+        "save-and-release",
+        help="Upload the current profile to storage then release the DB lock. "
+             "Called from entrypoint.sh EXIT trap.",
+    )
+    sar.add_argument("--index", type=int, required=True, help="Profile slot index.")
+    sar.add_argument("--worker-id", required=True, help="FLY_MACHINE_ID of this worker.")
+    sar.add_argument("--dir", required=True, help="Chrome profile directory to archive.")
+
     # ── Builder ───────────────────────────────────────────────────────────────
     bld = sub.add_parser(
         "build",
@@ -599,6 +772,9 @@ def main() -> None:
         ok = refresh_profile_lock(args.index, args.worker_id, lock_hours=args.lock_hours)
         if not ok:
             LOGGER.warning("Lock refresh had no effect for profile %d / worker %s.", args.index, args.worker_id)
+
+    elif args.command == "save-and-release":
+        save_and_release(args.index, args.worker_id, args.dir)
 
     elif args.command == "build":
         build_profile(args.index, args.email)

@@ -512,6 +512,39 @@ class ChatGPTRunner:
                 "login_button_present": False,
             }
 
+    def check_rate_limit_state(self) -> bool:
+        """
+        Returns True if ChatGPT is currently rate-limiting this account.
+
+        Detects the "Too many requests" / "You've reached your limit" modal or
+        inline message that ChatGPT shows when an account hits its usage cap.
+        Also matches the "Try GPT-4o mini" / upgrade prompt that appears when
+        the account is being downgraded due to overuse.
+        """
+        try:
+            result = self.require_driver().execute_script("""
+                const patterns = [
+                    /too many requests/i,
+                    /you.ve reached your (gpt|chatgpt|daily|free)/i,
+                    /try again in/i,
+                    /you.re sending too many/i,
+                    /usage (cap|limit) reached/i,
+                    /slow down/i,
+                ];
+                // Check dialogs/modals first (most reliable signal)
+                const dialogs = document.querySelectorAll(
+                    '[role="dialog"], [role="alertdialog"], [data-testid*="rate"], [data-testid*="limit"]'
+                );
+                const dialogText = Array.from(dialogs).map(d => d.innerText || '').join(' ');
+                if (patterns.some(p => p.test(dialogText))) return true;
+                // Fallback: scan a limited portion of body text
+                const bodySnippet = (document.body?.innerText || '').slice(0, 3000);
+                return patterns.some(p => p.test(bodySnippet));
+            """)
+            return bool(result)
+        except Exception:
+            return False
+
     def recover_chrome_error_page(self, *, context: str, max_attempts: int = 2) -> bool:
         """
         Chrome can occasionally render its own HTTP error interstitial for chatgpt.com.
