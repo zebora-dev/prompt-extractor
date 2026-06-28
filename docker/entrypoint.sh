@@ -112,9 +112,28 @@ if [[ "${PROMPT_EXTRACTOR_VNC:-false}" == "true" ]]; then
   # Xvfb is now running — safe to start persistent Chrome with a real window
   _start_persistent_chrome
 
-  exec "$@"
+  if [[ "${ACCOUNT_POOL_ENABLED:-false}" == "true" ]]; then
+    # Keep bash alive as PID 1 so the EXIT trap fires on SIGTERM.
+    # exec would replace bash, losing the trap entirely.
+    "$@" &
+    WORKER_PID=$!
+    # Forward SIGTERM/SIGINT to the worker so it shuts down gracefully.
+    trap 'kill -TERM $WORKER_PID 2>/dev/null || true' SIGTERM SIGINT
+    wait $WORKER_PID || true
+    # EXIT trap (_release_profile) runs here automatically.
+  else
+    exec "$@"
+  fi
+  exit 0
 fi
 
 # Non-VNC path: xvfb-run manages the display; persistent Chrome not supported
 # in this mode (no stable display reference before exec).
-exec xvfb-run -a --server-args="-screen 0 ${VNC_SCREEN:-1920x1080x24} -ac +extension GLX +render -noreset" "$@"
+if [[ "${ACCOUNT_POOL_ENABLED:-false}" == "true" ]]; then
+  xvfb-run -a --server-args="-screen 0 ${VNC_SCREEN:-1920x1080x24} -ac +extension GLX +render -noreset" "$@" &
+  WORKER_PID=$!
+  trap 'kill -TERM $WORKER_PID 2>/dev/null || true' SIGTERM SIGINT
+  wait $WORKER_PID || true
+else
+  exec xvfb-run -a --server-args="-screen 0 ${VNC_SCREEN:-1920x1080x24} -ac +extension GLX +render -noreset" "$@"
+fi
