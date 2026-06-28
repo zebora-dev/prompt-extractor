@@ -93,9 +93,15 @@ def notify_cloudflare_challenge(
     region = ctx["region"]
     app = ctx["app_name"]
 
-    # vnc-redirect.html sets fly_instance_id cookie via JS so Fly's LB routes
-    # the subsequent /vnc.html request directly to this machine.
-    vnc_url = f"https://{app}.fly.dev/vnc-redirect.html?machine={machine_id}" if app != "local" else None
+    # /vnc/<machine_id>/vnc.html routes via nginx Fly-Replay: every request
+    # (HTML, assets, WebSocket) carries the machine ID in its path, so nginx
+    # on any machine returns Fly-Replay: instance=<machine_id> and Fly proxy
+    # replays it to exactly the right worker.
+    vnc_url = (
+        f"https://{app}.fly.dev/vnc/{machine_id}/vnc.html"
+        f"?autoconnect=true&path=vnc/{machine_id}/websockify"
+        if app != "local" else None
+    )
 
     summary = f"`{machine_id}` · {region or 'unknown'} · `{login_email}`"
     vnc_line = f"<{vnc_url}|VNC in to machine `{machine_id}`>" if vnc_url else "VNC not available locally."

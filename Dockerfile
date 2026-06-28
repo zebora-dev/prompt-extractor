@@ -28,6 +28,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxdamage1 \
     libxkbcommon0 \
     libxrandr2 \
+    nginx \
     novnc \
     procps \
     unzip \
@@ -55,7 +56,9 @@ RUN python -m pip install --upgrade pip \
     && python -m pip install -e .
 
 COPY docker/entrypoint.sh /usr/local/bin/prompt-extractor-entrypoint
-COPY docker/novnc-redirect.html /usr/share/novnc/vnc-redirect.html
+COPY docker/nginx.conf.template /etc/nginx/conf.d/vnc.conf.template
+# Remove the default nginx site so it doesn't conflict with our config on port 6080
+RUN rm -f /etc/nginx/sites-enabled/default /etc/nginx/conf.d/default.conf
 RUN chmod +x /usr/local/bin/prompt-extractor-entrypoint \
     && mkdir -p /app/.chrome-profile
 
