@@ -1,0 +1,65 @@
+# fly-gpt-uk.yaml — ChatGPT extractor, UK region (lhr)
+#
+# Stateless workers: no Fly volumes. Chrome profiles are stored as tarballs in
+# Tigris object storage and claimed dynamically from the chatgpt_profiles table
+# at startup. Any worker can run any account — scale freely without pre-assigning
+# machines to accounts.
+#
+# Deploy:   fly deploy -a gpt-extractor-uk -c fly-gpt-uk.yaml
+#
+# Secrets (run once):
+#   fly secrets set -a gpt-extractor-uk \
+#     BRANDSIGHT_API_BASE_URL=... \
+#     BRANDSIGHT_SUPABASE_URL=... \
+#     BRANDSIGHT_SUPABASE_ANON_KEY=... \
+#     BRANDSIGHT_SUPABASE_SERVICE_KEY=... \
+#     PREFECT_API_URL=https://prompt-extractor-prefect.fly.dev/api \
+#     WORKFLOW_API_KEY=... \
+#     GOOGLE_PROXY_URL=http://user-country-gb:password@gw.dataimpulse.com:823
+#
+# Tigris credentials (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, BUCKET_NAME,
+# AWS_ENDPOINT_URL_S3) are set automatically by `flyctl storage create`.
+
+app: gpt-extractor-uk
+primary_region: lhr
+kill_signal: SIGTERM
+kill_timeout: 120s  # give the EXIT trap time to upload the profile
+
+build:
+  dockerfile: Dockerfile
+
+env:
+  # Profile stored in ephemeral local disk (no volume needed)
+  CHATGPT_CHROME_USER_DATA_DIR: /tmp/chrome-profile
+  CHATGPT_HEADLESS: "false"
+  PREFECT_WORKING_DIR: /app
+  PREFECT_WORK_POOL: gpt-extraction-uk
+  PROMPT_EXTRACTOR_VNC: "true"
+  VNC_SCREEN: 1280x720x24
+  PREFECT_LOGGING_EXTRA_LOGGERS: automated_extraction
+  GOOGLE_SEARCH_COUNTRY: GB
+  GOOGLE_SEARCH_LANGUAGE: en
+  CHATGPT_PERSISTENT_CHROME: "true"
+  # Account pool: claim a profile from chatgpt_profiles at startup
+  ACCOUNT_POOL_ENABLED: "true"
+  PROFILE_STORAGE_BACKEND: tigris
+
+processes:
+  app: python -m prefect worker start --pool gpt-extraction-uk --type process --limit 1 --install-policy never
+
+# No mounts — profiles live in Tigris, not Fly volumes
+
+http_service:
+  internal_port: 6080
+  force_https: false
+  auto_stop_machines: false
+  auto_start_machines: false
+  min_machines_running: 0
+  sticky_sessions: true
+  processes:
+    - app
+
+vm:
+  - memory: 2048mb
+    cpu_kind: performance
+    cpus: 1
