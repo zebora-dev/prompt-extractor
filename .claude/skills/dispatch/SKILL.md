@@ -350,6 +350,23 @@ Workers automatically detect rate-limiting and model downgrades, set a cooldown 
 current account, and stop — the batch loop will dispatch a replacement that picks up a fresh
 account. No manual intervention needed unless accounts are running out.
 
+#### GPT-UK only — additional capture options:
+```
+AskUserQuestion:
+  question: "Which additional data types should be captured alongside the response?"
+  header: "Capture"
+  multiSelect: true
+  options:
+    - label: "Products"
+      description: "Extract product mentions from the response (capture_products=true)"
+    - label: "Entities"
+      description: "Extract named entities from the response (capture_entities=true)"
+```
+
+If the user selects neither, both default to false. Map selections to:
+- "Products" selected → `capture_products: true`
+- "Entities" selected → `capture_entities: true`
+
 #### All types:
 ```
 AskUserQuestion:
@@ -378,6 +395,8 @@ Ready to dispatch:
   Delay between runs: 120s
   Measurements:       All
   Trigger scoring:    Yes
+  Capture products:   Yes / No
+  Capture entities:   Yes / No
 
   Account pool: 9 available · 3 in use · 1 cooling down
   ⚠  1 account on cooldown (rate_limit) — will be skipped until cooldown expires.
@@ -412,11 +431,11 @@ Build params:
 {
   "batch_id": "<batch_id>",
   "model_filter": "gpt",
-  "limit": 25,
+  "limit": <limit>,
   "delay_seconds": 120,
-  "trigger_scoring": true,
-  "capture_products": false,
-  "capture_entities": false,
+  "trigger_scoring": <trigger_scoring>,
+  "capture_products": <capture_products>,
+  "capture_entities": <capture_entities>,
   "startup_delay_seconds": <i * 15>
 }
 ```
