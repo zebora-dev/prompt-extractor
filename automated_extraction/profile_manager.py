@@ -306,7 +306,7 @@ def profile_exists(index: int) -> bool:
 # Calls Postgres RPC functions defined in migrations/001_chatgpt_profiles.sql.
 # All functions use the service role key so RLS doesn't interfere.
 
-_LOCK_HOURS_DEFAULT: float = 4.0
+_LOCK_HOURS_DEFAULT: float = 1.5  # Opt 3: reduced from 4.0 — locks refresh every ~30 min; 1.5h releases crashed-machine orphans sooner
 
 
 def acquire_profile(
@@ -456,6 +456,77 @@ def refresh_profile_lock(
     except Exception as exc:
         LOGGER.warning("Error refreshing profile lock for slot %d: %s", index, exc)
         return False
+
+
+def acquire_profile_quality(
+    worker_id: str,
+    dest_dir: str | Path,
+    lock_hours: float = _LOCK_HOURS_DEFAULT,
+) -> dict[str, int | str] | None:
+    """
+    Quality-aware variant of acquire_profile. Prefers accounts with a higher
+    historical gpt-5-5 success rate over equally-rested low-quality accounts.
+    New accounts (no history) are treated as neutral (0.5 rate) and claimed
+    before known-low-quality ones.
+
+    Use for gpt-uk batches with required_models=[gpt-5-5, ...].
+    Falls back to the same return shape as acquire_profile.
+    """
+    client = _get_client(prefer_service_key=True)
+    resp = client.rpc(
+        "acquire_chatgpt_profile_quality",
+        {"p_worker_id": worker_id, "p_lock_hours": lock_hours},
+    ).execute()
+
+    rows = resp.data or []
+    if not rows:
+        LOGGER.warning("No available Chrome profile (quality-aware) — all slots held.")
+        return None
+
+    row = rows[0]
+    index: int = row["profile_index"]
+    email: str = row["profile_email"]
+    LOGGER.info("Acquired profile slot %d (%s) via quality-aware claim for worker %s.", index, email, worker_id)
+
+    ok = download_profile(index, dest_dir)
+    if not ok:
+        LOGGER.info("No existing snapshot for profile %d — Chrome will start empty.", index)
+
+    return {"index": index, "email": email}
+
+
+def update_session_stats(
+    index: int,
+    worker_id: str,
+    gpt55_count: int,
+    total_count: int,
+) -> None:
+    """
+    Increment lifetime gpt-5-5 and total output counters for a profile after
+    a session ends. Non-fatal — logging only on failure.
+
+    Call at every session exit point (session cap, downgrade rotation, normal
+    completion) so quality-aware claiming has accurate data next time.
+    """
+    if total_count <= 0:
+        return
+    try:
+        client = _get_client(prefer_service_key=True)
+        client.rpc(
+            "update_profile_session_stats",
+            {
+                "p_index": index,
+                "p_worker_id": worker_id,
+                "p_gpt55_count": gpt55_count,
+                "p_total_count": total_count,
+            },
+        ).execute()
+        LOGGER.info(
+            "Updated lifetime stats for profile slot %d: +%d gpt55 / +%d total.",
+            index, gpt55_count, total_count,
+        )
+    except Exception as exc:
+        LOGGER.warning("Could not update session stats for profile slot %d: %s", index, exc)
 
 
 # ── Tigris (S3-compatible) storage ───────────────────────────────────────────

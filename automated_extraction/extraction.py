@@ -45,6 +45,27 @@ class ExtractionRunResult:
     entity_outputs: list[dict[str, Any]]
 
 
+def _emit_session_stats(
+    chrome_profile_index: str | int | None,
+    gpt55_session_count: int,
+    saved_count: int,
+) -> None:
+    """Opt 2: Update lifetime quality counters for quality-aware claiming. Non-fatal."""
+    if chrome_profile_index is None or saved_count <= 0:
+        return
+    try:
+        from automated_extraction.profile_manager import update_session_stats
+        import os
+        update_session_stats(
+            int(chrome_profile_index),
+            os.environ.get("FLY_MACHINE_ID", "local"),
+            gpt55_session_count,
+            saved_count,
+        )
+    except Exception as exc:
+        LOGGER.debug("Could not emit session stats for profile %s: %s", chrome_profile_index, exc)
+
+
 def run_extraction_job(
     *,
     settings: Settings,
@@ -143,6 +164,8 @@ def run_extraction_job(
     saved_outputs: list[dict[str, Any]] = []
     product_outputs: list[dict[str, Any]] = []
     entity_outputs: list[dict[str, Any]] = []
+    gpt55_session_count = 0       # Opt 2: initialised here so _emit_session_stats is safe
+    _session_stats_emitted = False  # Opt 2: guard against double-counting on early break
 
     resolved_auto_login = settings.auto_login if auto_login is None else auto_login
     resolved_login_email = login_email or settings.login_email
@@ -220,6 +243,7 @@ def run_extraction_job(
 
         consecutive_downgrades = 0  # tracks model downgrades within this session
         gpt55_session_count = 0     # gpt-5-5 captures this session (used for early-exit)
+        _recent_model_results: list[bool] = []  # Opt 4: rolling window for rate-based rotation
 
         for index, prompt in enumerate(prompts, start=1):
             prompt_id = str(prompt.get("id") or "")
@@ -254,23 +278,6 @@ def run_extraction_job(
                 )
                 continue
 
-            # Model-aware skip: when session model state is established and required_models is set,
-            # skip prompts that already have the model this account is currently serving.
-            # Claiming and running them would only produce a duplicate.
-            if session_model_state and required_models and not force_rerun:
-                _existing_for_session_model = api.find_existing_prompt_output(
-                    prompt_id,
-                    prompt_brand_id,
-                    resolved_batch_id,
-                    llm_model_filter=session_model_state,
-                )
-                if _existing_for_session_model:
-                    LOGGER.info(
-                        "[%s/%s] Skipping prompt %s — already has %s and account is in %s mode.",
-                        index, len(prompts), prompt_id, session_model_state, session_model_state,
-                    )
-                    skipped_count += 1
-                    continue
 
             # Claim the prompt so no other worker starts processing it concurrently.
             # Skipped when force_rerun=True (intentional re-processing).
@@ -445,7 +452,8 @@ def run_extraction_job(
                 # Track model downgrade: when required model is gpt-5 but account returned mini.
                 expected_model_prefix = "gpt-5-5" if required_models and any("gpt-5-5" in m for m in required_models) else None
                 if expected_model_prefix and capture.llm_model:
-                    if expected_model_prefix in capture.llm_model:
+                    got_premium = expected_model_prefix in capture.llm_model
+                    if got_premium:
                         gpt55_session_count += 1
                         consecutive_downgrades = 0
                     else:
@@ -455,12 +463,25 @@ def run_extraction_job(
                             index, len(prompts), expected_model_prefix, capture.llm_model,
                             consecutive_downgrades, gpt55_session_count, prompt_id,
                         )
+                    # Opt 4: maintain a rolling window of the last 10 model results to detect
+                    # alternating downgrade patterns that reset the consecutive counter.
+                    _recent_model_results.append(got_premium)
+                    if len(_recent_model_results) > 10:
+                        _recent_model_results.pop(0)
 
                 # Early exit once account has served its gpt-5-5 budget for this session:
                 # - If ≥20 gpt-5-5 captured: rotate on the 1st mini (don't waste prompts waiting for 3)
                 # - Hard cap: stop after 40 gpt-5-5 captures so the account can rest before next session
                 downgrade_threshold = 1 if gpt55_session_count >= 20 else 3
                 gpt55_cap_reached = gpt55_session_count >= 40
+
+                # Opt 4: rolling rate rotation — if gpt-5-5 rate drops below 40% over the
+                # last 10 prompts the account is degraded even if consecutive counter reset.
+                # Only active after at least 10 prompts so we don't trigger on warm-up noise.
+                _rolling_rate_degraded = (
+                    len(_recent_model_results) >= 10
+                    and (sum(_recent_model_results) / len(_recent_model_results)) < 0.4
+                )
 
                 # Session cap: stop after max_prompts_per_session saved outputs so the profile
                 # rotates and a rested account can be claimed by the next dispatcher.
@@ -469,22 +490,27 @@ def run_extraction_job(
                         "[%s/%s] Session cap reached (%s prompts saved). Stopping to allow profile rotation.",
                         index, len(prompts), saved_count,
                     )
+                    _emit_session_stats(chrome_profile_index, gpt55_session_count, saved_count)
+                    _session_stats_emitted = True
                     break
 
                 # Check for rate-limiting after each successful capture.
                 rate_limited = runner.check_rate_limit_state()
-                if rate_limited or consecutive_downgrades >= downgrade_threshold or gpt55_cap_reached:
+                if rate_limited or consecutive_downgrades >= downgrade_threshold or gpt55_cap_reached or _rolling_rate_degraded:
                     if rate_limited:
                         trigger = "rate_limit_modal"
                     elif gpt55_cap_reached:
                         trigger = "gpt55_session_cap"
+                    elif _rolling_rate_degraded:
+                        trigger = "rate_degraded"
                     else:
                         trigger = "consecutive_downgrades"
                     LOGGER.warning(
                         "[%s/%s] Session stopping (%s). Setting cooldown and handing off. "
-                        "chrome_profile_index=%s account_email=%r gpt55_this_session=%s",
+                        "chrome_profile_index=%s account_email=%r gpt55_this_session=%s rolling_rate=%.0f%%",
                         index, len(prompts), trigger, chrome_profile_index or "<unset>",
                         chrome_profile_email or "<unknown>", gpt55_session_count,
+                        100 * sum(_recent_model_results) / max(len(_recent_model_results), 1),
                     )
                     if chrome_profile_index is not None:
                         try:
@@ -498,6 +524,8 @@ def run_extraction_job(
                             )
                         except Exception as _cd_exc:
                             LOGGER.debug("Could not set cooldown: %s", _cd_exc)
+                    _emit_session_stats(chrome_profile_index, gpt55_session_count, saved_count)
+                    _session_stats_emitted = True
                     # Stop processing — the batch flow will re-dispatch fresh workers
                     # that will acquire a different (rested) profile.
                     break
@@ -511,6 +539,10 @@ def run_extraction_job(
                     api.release_claim(
                         prompt_id, resolved_batch_id, llm_model_filter or "gpt", error_message=str(exc)[:500]
                     )
+
+    # Opt 2: record lifetime stats if the loop ran to natural completion (no early break)
+    if not _session_stats_emitted:
+        _emit_session_stats(chrome_profile_index, gpt55_session_count, saved_count)
 
     status = "completed" if failed_count == 0 else "completed_with_failures"
     return ExtractionRunResult(
