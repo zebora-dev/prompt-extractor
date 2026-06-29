@@ -217,9 +217,8 @@ def run_extraction_job(
                 entity_outputs=[],
             )
 
-        consecutive_downgrades = 0  # tracks undesired downgrades (needed gpt-5-5, no prior capture, got mini)
-        session_model_state: str | None = None  # "gpt-5-5" or "gpt-5-3-mini" once established
-        consecutive_same_model = 0  # used to establish session_model_state
+        consecutive_downgrades = 0  # tracks model downgrades within this session
+        gpt55_session_count = 0     # gpt-5-5 captures this session (used for early-exit)
 
         for index, prompt in enumerate(prompts, start=1):
             prompt_id = str(prompt.get("id") or "")
@@ -442,40 +441,25 @@ def run_extraction_job(
                 if not force_rerun:
                     api.complete_claim(prompt_id, resolved_batch_id, llm_model_filter or "gpt")
 
-                # Update session model state based on what ChatGPT actually served.
-                # Once 2 consecutive captures return the same model family, the state is established.
-                captured_is_mini = bool(capture.llm_model and "gpt-5-5" not in capture.llm_model)
-                if capture.llm_model:
-                    detected_state = "gpt-5-3-mini" if captured_is_mini else "gpt-5-5"
-                    if detected_state == session_model_state:
-                        consecutive_same_model += 1
+                # Track model downgrade: when required model is gpt-5 but account returned mini.
+                expected_model_prefix = "gpt-5-5" if required_models and any("gpt-5-5" in m for m in required_models) else None
+                if expected_model_prefix and capture.llm_model:
+                    if expected_model_prefix in capture.llm_model:
+                        gpt55_session_count += 1
+                        consecutive_downgrades = 0
                     else:
-                        consecutive_same_model = 1
-                    if consecutive_same_model >= 2 and session_model_state != detected_state:
+                        consecutive_downgrades += 1
                         LOGGER.info(
-                            "[%s/%s] Session model state established: %s (was %s).",
-                            index, len(prompts), detected_state, session_model_state or "unknown",
+                            "[%s/%s] Model downgrade detected. expected=%s got=%s consecutive=%s gpt55_this_session=%s prompt_id=%s",
+                            index, len(prompts), expected_model_prefix, capture.llm_model,
+                            consecutive_downgrades, gpt55_session_count, prompt_id,
                         )
-                        session_model_state = detected_state
 
-                # Undesired downgrade = we needed gpt-5-5, this prompt had no prior gpt-5-5
-                # capture, and the account returned mini. Getting mini on a prompt that already
-                # has gpt-5-5 is the desired outcome — that resets the counter.
-                needs_premium = required_models and any("gpt-5-5" in m for m in required_models)
-                if needs_premium and captured_is_mini and not prompt_already_had_premium:
-                    consecutive_downgrades += 1
-                    LOGGER.info(
-                        "[%s/%s] Undesired downgrade — needed gpt-5-5, no prior capture, got %s. "
-                        "consecutive=%s prompt_id=%s",
-                        index, len(prompts), capture.llm_model, consecutive_downgrades, prompt_id,
-                    )
-                else:
-                    if consecutive_downgrades:
-                        LOGGER.info(
-                            "[%s/%s] Downgrade counter reset. model=%s already_had_premium=%s",
-                            index, len(prompts), capture.llm_model, prompt_already_had_premium,
-                        )
-                    consecutive_downgrades = 0
+                # Early exit once account has served its gpt-5-5 budget for this session:
+                # - If ≥20 gpt-5-5 captured: rotate on the 1st mini (don't waste prompts waiting for 3)
+                # - Hard cap: stop after 40 gpt-5-5 captures so the account can rest before next session
+                downgrade_threshold = 1 if gpt55_session_count >= 20 else 3
+                gpt55_cap_reached = gpt55_session_count >= 40
 
                 # Session cap: stop after max_prompts_per_session saved outputs so the profile
                 # rotates and a rested account can be claimed by the next dispatcher.
@@ -488,25 +472,33 @@ def run_extraction_job(
 
                 # Check for rate-limiting after each successful capture.
                 rate_limited = runner.check_rate_limit_state()
-                if rate_limited or consecutive_downgrades >= 3:
-                    trigger = "rate_limit_modal" if rate_limited else "consecutive_downgrades"
+                if rate_limited or consecutive_downgrades >= downgrade_threshold or gpt55_cap_reached:
+                    if rate_limited:
+                        trigger = "rate_limit_modal"
+                    elif gpt55_cap_reached:
+                        trigger = "gpt55_session_cap"
+                    else:
+                        trigger = "consecutive_downgrades"
                     LOGGER.warning(
-                        "[%s/%s] Account throttling detected (%s). Setting cooldown and stopping session. "
-                        "chrome_profile_index=%s account_email=%r",
+                        "[%s/%s] Session stopping (%s). Setting cooldown and handing off. "
+                        "chrome_profile_index=%s account_email=%r gpt55_this_session=%s",
                         index, len(prompts), trigger, chrome_profile_index or "<unset>",
-                        chrome_profile_email or "<unknown>",
+                        chrome_profile_email or "<unknown>", gpt55_session_count,
                     )
                     if chrome_profile_index is not None:
                         try:
                             from automated_extraction.profile_manager import set_profile_cooldown
+                            # Use a shorter cooldown for downgrade/cap — accounts recover their
+                            # gpt-5-5 window faster than 2h; rate_limit keeps the longer window.
+                            cooldown_hours = 2.0 if trigger == "rate_limit_modal" else 0.5
                             set_profile_cooldown(
                                 int(chrome_profile_index), WORKER_ID,
-                                cooldown_hours=2.0, reason=trigger,
+                                cooldown_hours=cooldown_hours, reason=trigger,
                             )
                         except Exception as _cd_exc:
                             LOGGER.debug("Could not set cooldown: %s", _cd_exc)
                     # Stop processing — the batch flow will re-dispatch fresh workers
-                    # that will acquire a different (cooled-in) profile.
+                    # that will acquire a different (rested) profile.
                     break
 
             except Exception as exc:
