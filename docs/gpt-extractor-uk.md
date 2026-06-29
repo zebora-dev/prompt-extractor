@@ -32,7 +32,7 @@ dynamically claimed at startup — any worker can run any account.
 - **Stateless machines** — no Fly volumes, no per-machine account assignment
 - **Atomic claiming** — Postgres `SELECT FOR UPDATE SKIP LOCKED` prevents two workers ever using the same account simultaneously
 - **Automatic session persistence** — on any exit (SIGTERM, error, normal), an `EXIT` trap re-archives the Chrome profile and uploads it to Tigris before releasing the claim
-- **Failure recovery** — claims have a 4-hour TTL (`lock_expires_at`). If a machine is hard-killed (SIGKILL, power failure), the account auto-releases after 4 hours so other workers can pick it up
+- **Failure recovery** — claims have a 1.5-hour TTL (`lock_expires_at`). Locks are refreshed every ~30 min during active use, so live sessions are never affected. If a machine is hard-killed (SIGKILL, power failure), the account auto-releases within 1.5 hours so other workers can pick it up
 - **Scale freely** — spin up as many machines as you have available accounts; add accounts without touching machines
 
 ---
@@ -119,17 +119,27 @@ done
 | `email` | ChatGPT account email |
 | `is_locked` | `true` = not available to the pool |
 | `locked_by` | `FLY_MACHINE_ID` of the current holder, or `'disabled'` for permanently locked accounts |
-| `lock_expires_at` | Safety TTL — claim auto-expires after 4 hours |
+| `lock_expires_at` | Safety TTL — claim auto-expires after 1.5 hours (refreshed every ~30 min during active use) |
 | `last_uploaded_at` | Stamped on every **acquire** (not just upload) — used as the LRU sort key to distribute load |
 | `cooldown_until` | When set, the account is skipped by `acquire_chatgpt_profile` until this timestamp passes |
 | `cooldown_reason` | Why the cooldown was set: `rate_limit`, `login_expired`, `cloudflare`, `consecutive_downgrades`, or `gpt55_session_cap` |
+| `gpt55_lifetime_count` | All-time count of gpt-5-5 outputs produced by this account |
+| `total_lifetime_count` | All-time count of all outputs produced by this account |
 
 ### Profile selection ordering
 
-`acquire_chatgpt_profile` uses a two-tier ordering to distribute load evenly:
+Two RPCs are available for claiming profiles:
 
-1. **30-minute rest threshold** — accounts used in the last 30 minutes are deprioritised. Accounts idle for longer are always preferred, preventing the same accounts being reclaimed immediately after a cooldown expires.
-2. **Longest-rested first** — within each tier, the account with the oldest `last_uploaded_at` is picked. New accounts with no upload history are always initialised first.
+**`acquire_chatgpt_profile`** — standard LRU claiming:
+1. New accounts (`last_uploaded_at IS NULL`) are always claimed first.
+2. Among rested accounts: longest-idle first (`last_uploaded_at ASC`).
+
+**`acquire_chatgpt_profile_quality`** — quality-aware claiming (preferred for required-model batches):
+1. New accounts first (unknown success rate treated as neutral 0.5 — worth trying).
+2. Among rested accounts: highest gpt-5-5 success rate first (`gpt55_lifetime_count / total_lifetime_count`).
+3. Tiebreak: longest-idle first.
+
+This ensures high-performing accounts are preferred when running batches where gpt-5-5 is the bottleneck, while new accounts are still tried before known-low-quality ones.
 
 **Critical:** `last_uploaded_at` is stamped at **acquire time** (not just on Tigris upload). This means that even if a session is cancelled or crashes before the profile is uploaded, the account still moves to the back of the queue. Without this, cancelled sessions left `last_uploaded_at` frozen at the previous clean upload — causing burned-out accounts to look like the most rested and be selected repeatedly.
 
@@ -154,6 +164,8 @@ SELECT * FROM chatgpt_profile_stats ORDER BY "index";
 | `last24h_gpt55_pct` | Percentage of last-24h outputs that were gpt-5-5 |
 | `last_run_at` | Timestamp of the most recent output from this account |
 | `lifetime_gpt55` / `lifetime_mini` | All-time output counts |
+
+`gpt55_lifetime_count` and `total_lifetime_count` are updated automatically by `extraction.py` at the end of each session (cap, downgrade, or normal completion) via the `update_profile_session_stats` RPC.
 
 To disable an account without deleting it:
 ```sql
@@ -194,10 +206,13 @@ Free ChatGPT accounts serve `gpt-5-5` for approximately 30–50 prompts after a 
 |---|---|---|---|
 | `gpt55_session_cap` | ≥40 gpt-5-5 outputs captured this session | 30 min | Account has delivered its budget — release early so it can rest |
 | `consecutive_downgrades` | 1st mini output once ≥20 gpt-5-5 captured; or 3rd mini if fewer than 20 | 30 min | Account has downgraded — rotate to a fresher account |
+| `rate_degraded` | gpt-5-5 rate < 40% over the last 10 prompts | 30 min | Rolling rate degradation — catches accounts alternating gpt-5-5/mini that never trip the consecutive counter |
 | `rate_limit_modal` | ChatGPT "Too many requests" modal detected | 2 hours | Hard rate limit — needs a longer rest |
 | `login_expired` | Session cookie invalid at startup | 24 hours | Requires manual VNC re-login |
 
-The 30-minute cooldown for downgrade/cap triggers (down from 2h) reflects that accounts can recover their gpt-5-5 window faster than previously assumed. After 30 minutes, the account re-enters the pool and will be picked again once it has been idle longer than other available accounts.
+The 30-minute cooldown for downgrade/cap triggers reflects that accounts can recover their gpt-5-5 window faster than previously assumed. After 30 minutes, the account re-enters the pool and will be picked again once it has been idle longer than other available accounts.
+
+**Rolling rate detection** (`rate_degraded`) uses a 10-prompt circular buffer tracking whether each response was gpt-5-5. If the rate drops below 40% after at least 10 prompts, rotation triggers — this catches accounts that alternate gpt-5-5/mini without ever producing 3 consecutive mini responses.
 
 Both `gpt-5-5` and `gpt-5-3-mini` outputs are always saved to `prompts_outputs` — workers never discard a response. The rotation only stops further prompts being sent to a downgraded account so a fresher one can take over for gpt-5-5 captures.
 
@@ -248,7 +263,7 @@ SELECT "index", email, is_locked, locked_by, lock_expires_at
 FROM chatgpt_profiles
 ORDER BY "index";
 ```
-If claims are stuck (machine died mid-job), they'll auto-expire after 4 hours. To force-release immediately:
+If claims are stuck (machine died mid-job), they'll auto-expire after 1.5 hours. To force-release immediately:
 ```sql
 UPDATE chatgpt_profiles
 SET is_locked = false, locked_by = NULL, lock_expires_at = NULL
@@ -256,4 +271,4 @@ WHERE locked_by != 'disabled' AND lock_expires_at < NOW();
 ```
 
 **Profile upload failed on stop**
-The profile upload is best-effort — a failure logs a warning but doesn't block shutdown. The claim TTL will expire after 4 hours. The account will then be claimable again, but the next worker will start with whatever was last successfully uploaded (or a fresh profile if nothing was ever saved).
+The profile upload is best-effort — a failure logs a warning but doesn't block shutdown. The claim TTL will expire after 1.5 hours. The account will then be claimable again, but the next worker will start with whatever was last successfully uploaded (or a fresh profile if nothing was ever saved).

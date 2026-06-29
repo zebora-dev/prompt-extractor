@@ -2,7 +2,8 @@
 name: dispatch
 description: Interactive dispatch wizard for BrandSight prompt extraction. Guides you through extraction type, batch, workers, and params — then monitors until complete and stops machines. Trigger with /dispatch [type] [batch_id].
 argument-hint: [gpt|gpt-uk|google-ai-overview|google-ai-mode|claude|perplexity] [batch-id] [--monitor batch_id=X flow_runs=id1,id2,id3 machines=m1,m2,m3 worker_count=N extraction_type=T]
-allowed-tools: Bash, mcp__supabase__execute_sql, AskUserQuestion, ScheduleWakeup, PushNotification---
+allowed-tools: Bash, mcp__supabase__execute_sql, AskUserQuestion, ScheduleWakeup, PushNotification
+# Note: Supabase writes (lock releases) use supabase-py via Bash, not mcp__supabase__execute_sql (read-only)---
 
 # BrandSight Extraction Dispatch Wizard
 
@@ -26,6 +27,9 @@ If `$ARGUMENTS` contains `--monitor`, extract these values:
 - `deployment_id` — Prefect deployment ID for replacements
 - `app` — Fly.io app name
 - `required_models` — comma-separated required models (e.g. `gpt-5-5,gpt-5-3-mini`), if set
+- `prev_output_counts` — (optional) `index:last24h_total` pairs from previous iteration, e.g. `9:42,5:21`
+- `zero_output_accounts` — (optional) `index:consecutive_zero_iterations` pairs, e.g. `8:1,5:2`
+- `prev_model_counts` — (optional) `model:unique_done` pairs from previous iteration, e.g. `gpt-5-5:333,gpt-5-3-mini:635`
 
 Then run one monitoring iteration:
 
@@ -88,29 +92,165 @@ ORDER BY last24h_total DESC;
 Include this table in the Step 6 report. It shows which accounts are hot (high `last24h_total`),
 cooling down, or downgraded — so each monitor iteration gives a full picture without a separate query.
 
-### 3. Check flow run states
+#### 2a. Stale lock detection (gpt-uk only)
+
+After getting account stats, check for locks held by machines that are NOT in the active `machines=` list.
+These are orphaned locks from dead processes that will never self-release.
+
+Run the following Python to detect and auto-release stale locks:
+```python
+import os, sys
+from dotenv import load_dotenv
+load_dotenv()
+from supabase import create_client
+
+url = os.environ.get('BRANDSIGHT_SUPABASE_URL') or 'https://hmwgplzdzffivawkflci.supabase.co'
+key = os.environ.get('BRANDSIGHT_SUPABASE_SERVICE_KEY')
+client = create_client(url, key)
+
+active_machines = ['<machine_id_1>', '<machine_id_2>', ...]  # from machines= arg
+
+# Find accounts locked by machines NOT in the active list
+result = client.table('chatgpt_profiles').select(
+    '"index", email, locked_by, locked_at'
+).eq('is_locked', True).neq('locked_by', 'disabled').execute()
+
+stale = [r for r in result.data if r['locked_by'] not in active_machines]
+if stale:
+    stale_indices = [r['index'] for r in stale]
+    client.table('chatgpt_profiles').update({
+        'is_locked': False, 'locked_by': None, 'locked_at': None, 'lock_expires_at': None
+    }).in_('"index"', stale_indices).execute()
+    for r in stale:
+        print(f"Auto-released stale lock: index={r['index']} email={r['email']} was held by {r['locked_by']}")
+else:
+    print("No stale locks found.")
+```
+
+Report any auto-released locks in the iteration output with ⚠ prefix.
+
+#### 2b. Zero-output account detection (gpt-uk only)
+
+After getting account stats, compare current `last24h_total` for each `in_use` account against
+the `prev_output_counts=` values from the previous iteration. Track how many consecutive
+iterations an account has shown no new output.
+
+```python
+# Parse state from prompt args
+prev_counts = {}  # {index: last24h_total} from prev_output_counts= arg
+zero_counts = {}  # {index: consecutive_zero_iterations} from zero_output_accounts= arg
+
+# For each currently in_use account:
+#   current_total = last24h_total from chatgpt_profile_stats
+#   prev_total = prev_counts.get(index, None)
+#   if prev_total is not None and current_total == prev_total:
+#       zero_counts[index] = zero_counts.get(index, 0) + 1
+#   else:
+#       zero_counts.pop(index, None)  # reset counter if output increased
+
+# Accounts with zero_counts[index] >= 2 → trigger rotation (see Step 4b)
+accounts_to_rotate = [idx for idx, cnt in zero_counts.items() if cnt >= 2]
+
+# Build updated prev_output_counts for next iteration (in_use accounts only)
+new_prev_counts = {r['index']: r['last24h_total'] for r in stats if r['status'] == 'in_use'}
+```
+
+### 3. Reconcile active flows from deployment (Fix 4)
+
+**Always query the deployment's live flow runs first**, then reconcile with tracked IDs.
+This catches flows dispatched outside the monitor's view and drops phantom stale IDs.
 
 ```bash
 curl -s -X POST "https://prompt-extractor-prefect.fly.dev/api/flow_runs/filter" \
   -H "Content-Type: application/json" \
-  -d '{"flow_runs":{"id":{"any_":["<id1>","<id2>","<id3>"]}}}' \
-  | python3 -c "
-import sys,json
-runs=json.load(sys.stdin)
+  -d '{
+    "deployments": {"id": {"any_": ["<deployment_id>"]}},
+    "sort": "START_TIME_DESC",
+    "limit": 15
+  }' | python3 -c "
+import sys, json
+from datetime import datetime, timezone
+
+runs = json.load(sys.stdin)
+now = datetime.now(timezone.utc)
+tracked = set('<flow_runs_from_prompt>'.split(','))
+
+live = []
 for r in runs:
-    print(r['id'][:8], r['state']['type'], r['state'].get('message','')[:80])
+    state = r['state']['type']
+    rid = r['id']
+    created = datetime.fromisoformat(r['created'].replace('Z', '+00:00'))
+    age_min = (now - created).total_seconds() / 60
+    if state in ('RUNNING', 'SCHEDULED', 'PENDING'):
+        live.append({'id': rid, 'state': state, 'age_min': round(age_min, 1)})
+    elif rid in tracked and state in ('CANCELLED', 'COMPLETED', 'FAILED', 'CRASHED'):
+        print(f'DROP {rid[:8]} — {state} (was tracked)')
+
+# Union: live from deployment + any tracked IDs still in RUNNING/SCHEDULED
+print('LIVE:', json.dumps(live))
 "
 ```
 
+**Reconciliation rules:**
+1. Start with all live RUNNING/SCHEDULED/PENDING flows from the deployment query
+2. Add any tracked IDs not in the deployment results that are still RUNNING (they may have been dispatched very recently)
+3. Drop any tracked ID that is CANCELLED, COMPLETED, FAILED, or CRASHED
+4. The reconciled set becomes the authoritative flow list for this iteration
+
+Note flows that were SCHEDULED for >15 minutes — these indicate a blocked worker slot (Fix 1).
+
+```python
+# After reconciliation, check for stuck SCHEDULED flows
+stuck_scheduled = [f for f in live_flows if f['state'] == 'SCHEDULED' and f['age_min'] > 15]
+```
+
+### 4. Check flow states and replace
+
+Using the reconciled flow list from Step 3:
+
 Map flow state to action:
-- `RUNNING` / `PENDING` / `SCHEDULED` → healthy, no action
+- `RUNNING` / `PENDING` → healthy, no action
+- `SCHEDULED` and age < 15 min → healthy, allow time to be picked up
+- `SCHEDULED` and age ≥ 15 min → **blocked worker slot** — trigger machine cycle (see 4a)
 - `FAILED` / `CRASHED` → replace immediately
 - `COMPLETED` → remove from tracking; dispatch replacement if remaining > 0
 - `CANCELLING` / `CANCELLED` → replace immediately
 
-### 4. Replace failed/completed flows
+#### Opt 6: Dynamic worker count scale-down
 
-For each flow that needs replacement:
+Before dispatching replacements, compute the effective worker count based on remaining work.
+As the batch nears completion, fewer workers are needed — holding extra accounts locked is wasteful.
+
+```python
+remaining = total_prompts - fully_complete
+limit = 25  # prompts per worker run (from original dispatch params)
+effective_workers = max(1, min(worker_count, math.ceil(remaining / limit)))
+```
+
+If `effective_workers < worker_count`:
+- Do NOT dispatch a replacement when a COMPLETED flow finishes — let the active count naturally drain to `effective_workers`
+- Report the scale-down: `Scaling 3→1 workers (22 prompts remaining)`
+
+Only dispatch up to `effective_workers` flows at any time.
+
+#### 4a. Machine cycle for blocked/cancelled workers (Fix 1)
+
+When replacing a flow that was SCHEDULED ≥15 min, CANCELLED, or CRASHED — the old Python
+process may still be blocking the Prefect worker slot on the machine. Always stop/start the
+machine before dispatching the replacement to guarantee a clean worker slot.
+
+```bash
+# For each machine associated with a flow needing replacement:
+# (For gpt-uk: check which machine holds the lock for the account that was on that flow.
+#  If unknown, cycle ALL machines that have no current RUNNING flow.)
+
+flyctl machines stop <machine_id> -a <app> 2>&1 | tail -1
+sleep 5
+flyctl machines start <machine_id> -a <app> 2>&1 | tail -1
+sleep 15  # allow Prefect worker process to reconnect before dispatching
+```
+
+Then dispatch the replacement flow:
 ```bash
 curl -s -X POST \
   "https://prompt-extractor-prefect.fly.dev/api/deployments/<deployment_id>/create_flow_run" \
@@ -118,9 +258,7 @@ curl -s -X POST \
   -d '{"parameters": <params_json>}'
 ```
 
-Keep exactly `worker_count` flows running at all times.
-
-For `gpt-uk`, params:
+For `gpt-uk`, replacement params:
 ```json
 {
   "batch_id": "<batch_id>",
@@ -133,6 +271,23 @@ For `gpt-uk`, params:
   "startup_delay_seconds": 0
 }
 ```
+
+#### 4b. Zero-output account rotation (Fix 2)
+
+For each account index in `accounts_to_rotate` (from Step 2b — 2+ consecutive zero-output iterations):
+
+1. **Find and cancel its flow** — the account's `worker` field in chatgpt_profile_stats is the machine ID; check which tracked flow is RUNNING on that machine
+2. **Release the profile lock:**
+```python
+client.table('chatgpt_profiles').update({
+    'is_locked': False, 'locked_by': None, 'locked_at': None, 'lock_expires_at': None
+}).eq('"index"', stale_index).execute()
+```
+3. **Cycle the machine** (Fix 1 pattern — stop/start)
+4. **Dispatch a replacement flow**
+5. **Remove from zero_counts** — reset counter for this account
+
+Report auto-rotations with ⚠ prefix in the iteration output.
 
 ### 5. Check completion
 
@@ -155,38 +310,102 @@ On completion:
 
 ### 6. Report & reschedule
 
-Print a progress table:
+#### Opt 1: Δ (delta) tracking
+
+Parse `prev_model_counts=` from the prompt args to compute output change since the last iteration:
+```python
+prev = {}  # {model: unique_done} from prev_model_counts= arg
+delta = {model: current_done - prev.get(model, current_done) for model, current_done in current_counts.items()}
+stalled_models = [m for m, d in delta.items() if d == 0]
+```
+
+Print the progress table with Δ column:
 ```
 ── Iteration N · HH:MM UTC ──────────────────────────────
-Model            Unique done   Total outputs   Dupes
-gpt-5-5          234           237             3
-gpt-5-3-mini     290           295             5
-Fully complete:  229 / 614
+Model          Done    Δ    Total   Dupes
+gpt-5-5         345   +12   345     0
+gpt-5-3-mini    648    +9   648     3
+Fully complete:  218 / 759   Δ+10
+
+⚠ STALLED: gpt-5-5 showed 0 new outputs this iteration
+```
+
+Show `⚠ STALLED` if any required model had Δ=0 this iteration. If Δ=0 for 2 consecutive
+iterations on the same model, escalate: `🚨 STALLED 2 ITERATIONS — consider forced rotation`.
 
 Account pool (last 24h):
-#   Email                  Status     Worker        24h-55   24h-mini  24h-total  55%
-1   anna@zebora.io         active     worker-abc    42       18        60         70%
-2   bob@zebora.io          cooldown   —             31       12        43         72%
-3   carol@zebora.io        active     worker-def    28       9         37         76%
+```
+#   Email                  Status     Worker            24h-55  24h-mini  Total  55%    Zero-iters
+9   anna@zebora.io         in_use     7845165c921478    42      18        60     70%    —
+8   john@zebora.io         in_use     7845142f919668    0       0         0      —      ⚠2 (→rotating)
+2   bob@zebora.io          cooldown   —                 31      12        43     72%    —
 ...
+```
 
-Flow states: a1b2c3d4 RUNNING · e5f6g7h8 RUNNING · i9j0k1l2 COMPLETED→replaced
-Replacements: 1
+Add `Zero-iters` column for in_use accounts (from `zero_output_accounts=`).
+Accounts with `status = 'cooldown'` show `cooldown_reason` in the Status column.
+Omit this table for non-gpt-uk extraction types.
+
+Auto-action notes:
+```
+⚠ Auto-released stale lock: index=17 (emily) was held by dead machine d896d6da7573e8
+⚠ Auto-rotating index=8 (john) — 2 consecutive zero-output iterations
+Scaling 3→1 workers (22 prompts remaining)
+```
+
+Flow states:
+```
+Flow states: a1b2c3d4 RUNNING · e5f6g7h8 RUNNING (age:3min) · i9j0k1l2 SCHEDULED→blocked(18min)→cycling+replaced
+Reconciled from deployment: added f9g8h7i6 (newly RUNNING, not previously tracked)
+Replacements: 2 · Effective workers: 2/3
 Next check: 5 min
 Prefect UI: https://prompt-extractor-prefect.fly.dev/runs?state=RUNNING
 ─────────────────────────────────────────────────────────
 ```
 
-Include all accounts from `chatgpt_profile_stats` in the account pool table, sorted by `last24h_total DESC`.
-Accounts with `status = 'cooldown'` show the `cooldown_reason` in the Status column.
-Omit this table for non-gpt-uk extraction types.
+#### Opt 5: Explicit stop — write resume state
 
-Then call ScheduleWakeup directly with the **updated** flow run IDs (replace any completed/failed
-IDs with their replacements before building the prompt — this is critical):- `delaySeconds`: 300
+If the user asks to stop/pause the monitor mid-batch (not because it completed), before stopping
+machines write a resume state file:
+
+```bash
+cat > .brandsight-resume.json << 'EOF'
+{
+  "batch_id": "<batch_id>",
+  "paused_at": "<ISO timestamp>",
+  "fully_complete": <N>,
+  "total": <total>,
+  "gpt55_done": <N>,
+  "mini_done": <N>,
+  "machines": ["<m1>", "<m2>", ...],
+  "extraction_type": "<type>",
+  "deployment_id": "<id>",
+  "app": "<app>",
+  "required_models": ["<model1>", "<model2>"],
+  "resume_prompt": "/dispatch --monitor batch_id=<batch_id> flow_runs=<ids> machines=<machines> worker_count=<N> extraction_type=<type> deployment_id=<id> app=<app> required_models=<models>"
+}
+EOF
+```
+
+Print the `resume_prompt` value so it can be copied directly.
+
+On the next `/dispatch` invocation (wizard mode), if `.brandsight-resume.json` exists, offer:
+```
+Resume state found: Range Rover Jun-2026 — 210/759 complete (paused 2026-06-29T16:01Z)
+Resume the paused batch? [Yes / Start fresh]
+```
+
+#### Reschedule
+
+Call ScheduleWakeup with the **updated** flow run IDs (use reconciled IDs from Step 3):
+
+- `delaySeconds`: 300
 - `reason`: "Polling batch <batch_id> — <done> / <total> complete, <N> flows active"
-- `prompt`: `/dispatch --monitor batch_id=<batch_id> flow_runs=<updated_ids> machines=<machines> worker_count=<N> extraction_type=<type> deployment_id=<id> app=<app> required_models=<models>`
+- `prompt`: `/dispatch --monitor batch_id=<batch_id> flow_runs=<reconciled_ids> machines=<machines> worker_count=<N> extraction_type=<type> deployment_id=<id> app=<app> required_models=<models> prev_output_counts=<index:total,...> zero_output_accounts=<index:count,...> prev_model_counts=<model:done,...>`
 
 Omit `required_models` from the prompt if the batch doesn't have them.
+Omit `prev_output_counts`, `zero_output_accounts`, `prev_model_counts` if empty.
+Only include `zero_output_accounts` for accounts still in_use with non-zero counters (reset on rotation).
 
 ---
 
@@ -590,6 +809,38 @@ Free ChatGPT accounts serve `gpt-5-5` for the first ~30–50 prompts after rest,
 to `gpt-5-3-mini`. Outputs from both models are saved (always — we want the data). The 3-
 consecutive-downgrade threshold triggers a rotation to bring in a rested account and resume
 `gpt-5-5` captures.
+
+### Forced rotation procedure
+
+Use when an account is stuck (zero output), a flow is blocked, or you want to swap out a
+specific account for a fresher one. Steps:
+
+1. **Cancel the stuck flow** via Prefect API (CANCELLING state)
+2. **Release the profile lock** via supabase-py:
+   ```python
+   import os
+   from dotenv import load_dotenv; load_dotenv()
+   from supabase import create_client
+   client = create_client(
+       os.environ.get('BRANDSIGHT_SUPABASE_URL') or 'https://hmwgplzdzffivawkflci.supabase.co',
+       os.environ['BRANDSIGHT_SUPABASE_SERVICE_KEY']
+   )
+   client.table('chatgpt_profiles').update({
+       'is_locked': False, 'locked_by': None, 'locked_at': None, 'lock_expires_at': None
+   }).eq('"index"', <account_index>).execute()
+   ```
+3. **Stop the machine** to kill the old Python process:
+   ```bash
+   flyctl machines stop <machine_id> -a <app> 2>&1 | tail -1
+   sleep 5
+   flyctl machines start <machine_id> -a <app> 2>&1 | tail -1
+   sleep 15
+   ```
+4. **Dispatch a replacement flow** — a fresh worker will claim a rested account
+
+**Why the stop/start is mandatory:** Cancelling a Prefect flow does not kill the machine's
+Python process. The old process keeps running and holds the Prefect worker slot, so any newly
+SCHEDULED replacement flow never gets picked up. The stop/start guarantees a clean slot.
 
 ### Completion check for required_models batches
 A batch with `required_models: ["gpt-5-5", "gpt-5-3-mini"]` is only complete when every
