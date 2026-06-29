@@ -2,7 +2,7 @@
 name: dispatch
 description: Interactive dispatch wizard for BrandSight prompt extraction. Guides you through extraction type, batch, workers, and params — then monitors until complete and stops machines. Trigger with /dispatch [type] [batch_id].
 argument-hint: [gpt|gpt-uk|google-ai-overview|google-ai-mode|claude|perplexity] [batch-id] [--monitor batch_id=X flow_runs=id1,id2,id3 machines=m1,m2,m3 worker_count=N extraction_type=T]
-allowed-tools: Bash, mcp__supabase__execute_sql, AskUserQuestion, ScheduleWakeup
+allowed-tools: Bash, mcp__supabase__execute_sql, AskUserQuestion, ScheduleWakeup, PushNotification
 ---
 
 # BrandSight Extraction Dispatch Wizard
@@ -151,7 +151,10 @@ for MACHINE_ID in <machines>; do
 done
 ```
 
-Report a final summary and do NOT call ScheduleWakeup.
+On completion:
+1. Stop all machines
+2. Send `PushNotification` with a summary: batch name, model counts, total time
+3. Report a final summary and do NOT call ScheduleWakeup (loop ends)
 
 ### 6. Report & reschedule
 
@@ -170,10 +173,13 @@ Next check: 5 min
 ─────────────────────────────────────────────────────────
 ```
 
-Then ScheduleWakeup:
+Then call ScheduleWakeup directly with the **updated** flow run IDs (replace any completed/failed
+IDs with their replacements before building the prompt — this is critical):
 - `delaySeconds`: 300
-- `reason`: "Polling batch <batch_id> — <fully_complete> complete, <N> flows active"
+- `reason`: "Polling batch <batch_id> — <done> / <total> complete, <N> flows active"
 - `prompt`: `/dispatch --monitor batch_id=<batch_id> flow_runs=<updated_ids> machines=<machines> worker_count=<N> extraction_type=<type> deployment_id=<id> app=<app> required_models=<models>`
+
+Omit `required_models` from the prompt if the batch doesn't have them.
 
 ---
 
@@ -482,17 +488,31 @@ Collect all dispatched flow run IDs.
 
 ### Step 9 — Start monitoring loop
 
-Report dispatched flows, then ScheduleWakeup to begin 5-minute polling:
+Report dispatched flows, then schedule the first monitor iteration via `ScheduleWakeup`.
+Each monitor iteration (Step 6) rebuilds the prompt with updated flow IDs before rescheduling,
+so replacements are always tracked correctly.
+
+Build the monitor prompt (a single string with all state inline):
 
 ```
-ScheduleWakeup(
-  delaySeconds=300,
-  reason="First check 5min after dispatching batch <batch_id>",
-  prompt="/dispatch --monitor batch_id=<batch_id> flow_runs=<id1,id2,...> machines=<m1,m2,...> worker_count=<N> extraction_type=<type> deployment_id=<deployment_id> app=<fly_app> required_models=<model1,model2>"
-)
+/dispatch --monitor batch_id=<batch_id> flow_runs=<id1,id2,...> machines=<m1,m2,...> worker_count=<N> extraction_type=<type> deployment_id=<deployment_id> app=<fly_app> required_models=<model1,model2>
 ```
 
-Omit `required_models` from the prompt if the batch doesn't have them.
+Omit `required_models` if the batch doesn't have them.
+
+Then call ScheduleWakeup directly:
+- `delaySeconds`: 300
+- `reason`: "First monitor check for batch <batch_id> — <N> workers dispatched"
+- `prompt`: the monitor prompt above
+
+**Do NOT use the `/loop` skill here.** The loop skill uses `CronCreate` with a static prompt,
+which cannot update flow IDs when replacements are dispatched. `ScheduleWakeup` is the correct
+mechanism — monitor mode rebuilds the prompt with current IDs on every iteration.
+
+When the monitor detects batch completion (all `fully_complete = total`):
+1. Stop all machines
+2. Call `PushNotification` with a summary: batch name, total captured, time taken
+3. Report a final summary and do NOT call ScheduleWakeup (loop ends)
 
 ---
 
