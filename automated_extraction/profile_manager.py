@@ -778,6 +778,7 @@ def main() -> None:
     acq.add_argument("--worker-id", required=True, help="Unique identifier for this worker (e.g. FLY_MACHINE_ID).")
     acq.add_argument("--dest", required=True, help="Destination directory for the extracted profile.")
     acq.add_argument("--lock-hours", type=float, default=_LOCK_HOURS_DEFAULT, help="Lock duration in hours.")
+    acq.add_argument("--quality", action="store_true", help="Use quality-aware claiming (prefers high gpt-5-5 rate + load balance over pure LRU).")
 
     rel = sub.add_parser("release", help="Release a held profile lock.")
     rel.add_argument("--index", type=int, required=True, help="Profile slot index.")
@@ -825,7 +826,10 @@ def main() -> None:
         print(f"Profile {args.index}: {'EXISTS' if found else 'NOT FOUND'}")
 
     elif args.command == "acquire":
-        result = acquire_profile(args.worker_id, args.dest, lock_hours=args.lock_hours)
+        if args.quality:
+            result = acquire_profile_quality(args.worker_id, args.dest, lock_hours=args.lock_hours)
+        else:
+            result = acquire_profile(args.worker_id, args.dest, lock_hours=args.lock_hours)
         if result:
             # Print parseable output for entrypoint.sh — stdout only, no other noise.
             # entrypoint.sh reads: "2 bob@theround.com"
