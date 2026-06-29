@@ -12,6 +12,7 @@ from automated_extraction.api_client import ApiClient
 from automated_extraction.config import Settings
 from automated_extraction.workflows.tasks import (
     entity_output_process_task,
+    extract_api_batch_task,
     extract_chatgpt_batch_task,
     extract_claude_batch_task,
     extract_google_ai_mode_batch_task,
@@ -820,6 +821,175 @@ def perplexity_extraction_batch_flow(
         )
         if run_index < run_count - 1 and delay_seconds > 0:
             flow_logger.info("Waiting %ss before next Perplexity run.", delay_seconds)
+            time.sleep(delay_seconds)
+
+    return {
+        "status": "completed",
+        "batch_id": batch_id,
+        "runs_completed": run_count,
+        "total_saved": total_saved,
+    }
+
+
+@flow(
+    name="api-extraction",
+    flow_run_name="api-extraction-{batch_id}",
+    log_prints=True,
+)
+def api_extraction_flow(
+    batch_id: str | None = None,
+    brand_id: str | None = None,
+    limit: int | None = None,
+    force_rerun: bool = False,
+    llm_model_filter: str | None = "api:",
+    model_name: str = "gpt-4o",
+    use_web_search: bool = False,
+    temperature: float = 0.0,
+    measurements_filter: str | None = None,
+    trigger_scoring: bool = True,
+) -> dict[str, Any]:
+    """Orchestrate a single LLM API prompt extraction run."""
+    flow_logger = get_run_logger()
+    flow_logger.info("WORKER machine_id=%s", os.getenv("FLY_MACHINE_ID", "local"))
+    if not batch_id:
+        raise ValueError("batch_id is required")
+
+    flow_logger.info(
+        "Starting API extraction flow. batch_id=%s limit=%s model_name=%s use_web_search=%s measurements_filter=%s",
+        batch_id,
+        limit,
+        model_name,
+        use_web_search,
+        measurements_filter or "any",
+    )
+    result = extract_api_batch_task(
+        batch_id=batch_id,
+        brand_id=brand_id,
+        limit=limit,
+        force_rerun=force_rerun,
+        llm_model_filter=llm_model_filter,
+        model_name=model_name,
+        use_web_search=use_web_search,
+        temperature=temperature,
+        measurements_filter=measurements_filter,
+    )
+
+    score_workflow_result: dict[str, Any] | None = None
+    if trigger_scoring and result.get("saved_outputs"):
+        score_workflow_result = score_workflow_trigger_task(
+            saved_outputs=result.get("saved_outputs") or [], force=False
+        )
+
+    combined_result = {
+        **result,
+        "score_workflow_trigger": score_workflow_result,
+    }
+    flow_logger.info("API extraction flow finished: %s", combined_result)
+    return combined_result
+
+
+@flow(
+    name="api-extraction-batch",
+    flow_run_name="api-extraction-batch-{batch_id}",
+    log_prints=True,
+)
+def api_extraction_batch_flow(
+    batch_id: str | None = None,
+    model_filter: str | None = "api:",
+    limit: int = 10,
+    skip: int = 0,
+    delay_seconds: int = 10,
+    max_prompts: int | None = None,
+    startup_delay_seconds: int = 0,
+    trigger_scoring: bool = True,
+    measurements_filter: str | None = None,
+    model_name: str = "gpt-4o",
+    use_web_search: bool = False,
+    temperature: float = 0.0,
+) -> dict[str, Any]:
+    """
+    Sequentially run api-extraction until the remaining prompt set is exhausted.
+    Mirrors claude_extraction_batch_flow but for direct LLM API calls.
+    """
+    flow_logger = get_run_logger()
+    flow_logger.info("WORKER machine_id=%s", os.getenv("FLY_MACHINE_ID", "local"))
+    if not batch_id:
+        raise ValueError("batch_id is required")
+    if limit <= 0:
+        raise ValueError("limit must be greater than 0")
+    if startup_delay_seconds > 0:
+        flow_logger.info("Staggered startup: waiting %ss before beginning work.", startup_delay_seconds)
+        time.sleep(startup_delay_seconds)
+
+    settings = Settings.from_env(require_api_key=True, require_auto_login_credentials=False)
+    api = ApiClient(
+        settings.api_base_url,
+        settings.anon_key,
+        supabase_url=settings.supabase_url,
+        prompt_outputs_table=settings.prompt_outputs_table,
+        prompt_output_products_table=settings.prompt_output_products_table,
+        prompt_output_entities_table=settings.prompt_output_entities_table,
+    )
+
+    batch = api.get_batch(batch_id)
+    brand_id = batch.get("brand_id")
+    if not brand_id:
+        raise RuntimeError(f"Batch {batch_id} does not include brand_id")
+
+    effective_filter = f"api:{model_name}" if model_filter == "api:" else model_filter
+    remaining_prompts = api.get_prompts(
+        batch_id,
+        str(brand_id),
+        only_remaining=True,
+        llm_model_filter=effective_filter,
+        measurements_filter=measurements_filter,
+    )
+    remaining_count = max(0, len(remaining_prompts) - skip)
+    run_count = math.ceil(remaining_count / limit) if remaining_count else 0
+    if max_prompts is not None:
+        run_count = min(run_count, math.ceil(max_prompts / limit))
+    flow_logger.info(
+        "API batch flow: batch_id=%s brand_id=%s remaining=%s run_count=%s limit=%s model_name=%s use_web_search=%s measurements_filter=%s",
+        batch_id,
+        brand_id,
+        remaining_count,
+        run_count,
+        limit,
+        model_name,
+        use_web_search,
+        measurements_filter or "any",
+    )
+
+    if run_count == 0:
+        flow_logger.info("No remaining API prompts. Exiting.")
+        return {"status": "no_prompts", "batch_id": batch_id, "runs_completed": 0}
+
+    total_saved = 0
+    all_saved_outputs: list[dict[str, Any]] = []
+    for run_index in range(run_count):
+        flow_logger.info("API batch run %s/%s. batch_id=%s", run_index + 1, run_count, batch_id)
+        run_result = api_extraction_flow(
+            batch_id=batch_id,
+            limit=limit,
+            llm_model_filter=model_filter,
+            model_name=model_name,
+            use_web_search=use_web_search,
+            temperature=temperature,
+            measurements_filter=measurements_filter,
+            trigger_scoring=trigger_scoring,
+        )
+        saved = run_result.get("saved_count") or 0
+        total_saved += saved
+        all_saved_outputs.extend(run_result.get("saved_outputs") or [])
+        flow_logger.info(
+            "API batch run %s/%s finished. saved=%s total_saved=%s",
+            run_index + 1,
+            run_count,
+            saved,
+            total_saved,
+        )
+        if run_index < run_count - 1 and delay_seconds > 0:
+            flow_logger.info("Waiting %ss before next API run.", delay_seconds)
             time.sleep(delay_seconds)
 
     return {

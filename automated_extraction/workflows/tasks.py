@@ -17,6 +17,7 @@ from prefect.logging import get_run_logger  # noqa: E402
 from automated_extraction.config import Settings  # noqa: E402
 from automated_extraction.entity_output_processor import process_entity_outputs  # noqa: E402
 from automated_extraction.extraction import (  # noqa: E402
+    run_api_extraction_job,
     run_claude_extraction_job,
     run_extraction_job,
     run_google_ai_mode_extraction_job,
@@ -418,6 +419,68 @@ def extract_perplexity_batch_task(
     task_logger.info("Finished Perplexity extraction task: %s", summarize_extraction_payload(payload))
     if result.failed_count:
         task_logger.warning("Perplexity extraction completed with %s failed prompt(s).", result.failed_count)
+    return payload
+
+
+def _extract_api_batch_task_run_name() -> str:
+    try:
+        from prefect.runtime import task_run
+
+        params = getattr(task_run, "parameters", None) or {}
+        batch_id = params.get("batch_id") or "local-prompts"
+        model_name = params.get("model_name") or "gpt-4o"
+        return f"extract-api-{model_name}-{batch_id}"
+    except Exception as exc:
+        LOGGER.debug("Prefect runtime not available: %s", exc)
+        return "extract-api-batch"
+
+
+@task(
+    name="extract-api-batch",
+    task_run_name=_extract_api_batch_task_run_name,
+    retries=0,
+    timeout_seconds=None,
+    tags=["api", "extraction", "llm"],
+    cache_result_in_memory=False,
+)
+def extract_api_batch_task(
+    *,
+    batch_id: str | None = None,
+    brand_id: str | None = None,
+    limit: int | None = None,
+    force_rerun: bool = False,
+    llm_model_filter: str | None = "api:",
+    model_name: str = "gpt-4o",
+    use_web_search: bool = False,
+    temperature: float = 0.0,
+    measurements_filter: str | None = None,
+) -> dict[str, Any]:
+    task_logger = get_run_logger()
+    task_logger.info(
+        "Starting API extraction task. batch_id=%s limit=%s model_name=%s use_web_search=%s measurements_filter=%s",
+        batch_id,
+        limit,
+        model_name,
+        use_web_search,
+        measurements_filter or "any",
+    )
+    settings = Settings.from_env(require_api_key=True, require_auto_login_credentials=False)
+    result = run_api_extraction_job(
+        settings=settings,
+        batch_id=batch_id,
+        brand_id=brand_id,
+        limit=limit,
+        force_rerun=force_rerun,
+        llm_model_filter=llm_model_filter,
+        model_name=model_name,
+        use_web_search=use_web_search,
+        temperature=temperature,
+        measurements_filter=measurements_filter,
+    )
+    payload = asdict(result)
+    task_logger.info("Finished API extraction task: %s", summarize_extraction_payload(payload))
+    if result.failed_count:
+        task_logger.warning("API extraction completed with %s failed prompt(s).", result.failed_count)
     return payload
 
 

@@ -7,7 +7,7 @@ from pathlib import Path
 
 from .config import Settings
 from .entity_output_processor import process_entity_outputs
-from .extraction import run_claude_extraction_job, run_extraction_job, run_google_ai_mode_extraction_job, run_google_ai_overview_extraction_job, run_perplexity_extraction_job
+from .extraction import run_api_extraction_job, run_claude_extraction_job, run_extraction_job, run_google_ai_mode_extraction_job, run_google_ai_overview_extraction_job, run_perplexity_extraction_job
 from .product_output_processor import process_product_outputs
 from .workflow_trigger import trigger_score_workflows
 
@@ -32,12 +32,14 @@ def main(argv: list[str] | None = None) -> int:
             args.llm_model_filter = "claude"
         elif args.provider == "perplexity":
             args.llm_model_filter = "perplexity"
+        elif args.provider == "api":
+            args.llm_model_filter = "api:"
         else:
             args.llm_model_filter = "gpt"
 
     auto_login_override = args.auto_login
     is_google_provider = args.provider in {"google-ai-mode", "google-ai-overview"}
-    is_claude_provider = args.provider in {"claude", "perplexity"}
+    is_claude_provider = args.provider in {"claude", "perplexity", "api"}
     settings = Settings.from_env(
         require_api_key=not args.login_only,
         # Google and Claude providers don't use ChatGPT auto-login credentials.
@@ -85,7 +87,20 @@ def main(argv: list[str] | None = None) -> int:
     if not args.batch_id and not args.prompts_file:
         parser.error("one of --batch-id or --prompts-file is required unless --login-only is used")
 
-    if args.provider == "perplexity":
+    if args.provider == "api":
+        result = run_api_extraction_job(
+            settings=settings,
+            batch_id=args.batch_id,
+            brand_id=args.brand_id,
+            limit=args.limit,
+            llm_model_filter=args.llm_model_filter,
+            model_name=args.model,
+            use_web_search=args.use_web_search,
+            temperature=args.temperature,
+            force_rerun=args.force_rerun,
+            measurements_filter=getattr(args, "measurements_filter", None),
+        )
+    elif args.provider == "perplexity":
         result = run_perplexity_extraction_job(
             settings=settings,
             batch_id=args.batch_id,
@@ -201,7 +216,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run BrandSight prompts through ChatGPT and save outputs.")
     parser.add_argument(
         "--provider",
-        choices=["chatgpt", "claude", "perplexity", "google-ai-mode", "google-ai-overview"],
+        choices=["chatgpt", "claude", "perplexity", "google-ai-mode", "google-ai-overview", "api"],
         default="chatgpt",
         help="Extraction provider to run. Defaults to chatgpt.",
     )
@@ -266,6 +281,28 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         default=False,
         help="Enable entity flyout capture after each response. Disabled by default.",
+    )
+    parser.add_argument(
+        "--model",
+        default="gpt-4o",
+        help="LLM model name for --provider api. Defaults to gpt-4o.",
+    )
+    parser.add_argument(
+        "--use-web-search",
+        action="store_true",
+        default=False,
+        help="Enable native web search tool for --provider api.",
+    )
+    parser.add_argument(
+        "--temperature",
+        type=float,
+        default=0.0,
+        help="Sampling temperature for --provider api. Defaults to 0.0.",
+    )
+    parser.add_argument(
+        "--measurements-filter",
+        default=None,
+        help="Only process prompts whose measurements field contains this string (case-insensitive).",
     )
     parser.add_argument("--verbose", action="store_true", help="Enable debug logging.")
 

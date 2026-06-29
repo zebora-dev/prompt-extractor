@@ -15,6 +15,7 @@ from .api_client import ApiClient
 from .chatgpt_runner import ChatGPTRunner
 from .claude_runner import ClaudeRunner
 from .config import Settings
+from .llm_api_runner import LLMApiRunner
 from .perplexity_runner import PerplexityRunner
 from .google_ai_mode_runner import GoogleAIModeRunner
 from .google_ai_overview_runner import GoogleAIOverviewRunner
@@ -2108,3 +2109,278 @@ def run_perplexity_extraction_job(
         entity_outputs=[],
     )
     return {"output_metadata": updated_metadata}
+
+
+# ── LLM API extraction (direct SDK — no browser) ──────────────────────────────
+
+
+def run_api_extraction_job(
+    *,
+    settings: Settings,
+    batch_id: str | None = None,
+    prompts_file: Path | None = None,
+    brand_id: str | None = None,
+    limit: int | None = None,
+    skip: int = 0,
+    dry_run: bool = False,
+    force_rerun: bool = False,
+    llm_model_filter: str = "api:",
+    model_name: str = "gpt-4o",
+    use_web_search: bool = False,
+    temperature: float = 0.0,
+    measurements_filter: str | None = None,
+) -> ExtractionRunResult:
+    """Run LLM API extraction without a browser — calls OpenAI/Anthropic/Gemini directly."""
+    if not batch_id and not prompts_file:
+        raise ValueError("one of batch_id or prompts_file is required")
+
+    api = ApiClient(
+        settings.api_base_url,
+        settings.anon_key,
+        supabase_url=settings.supabase_url,
+        prompt_outputs_table=settings.prompt_outputs_table,
+        prompt_output_products_table=settings.prompt_output_products_table,
+        prompt_output_entities_table=settings.prompt_output_entities_table,
+        prompt_output_suggestions_table=settings.prompt_output_suggestions_table,
+    )
+
+    # Filter uses the model-specific prefix so e.g. "api:gpt-4o" prompts don't show as
+    # remaining when running "api:claude-sonnet-4-6".  Fall back to "api:" for any model.
+    effective_filter = f"api:{model_name}" if llm_model_filter == "api:" else llm_model_filter
+
+    prompts, resolved_batch_id, resolved_brand_id = load_prompt_work(
+        api=api,
+        batch_id=batch_id,
+        prompts_file=prompts_file,
+        brand_id=brand_id,
+        only_remaining=not force_rerun,
+        llm_model_filter=effective_filter,
+        measurements_filter=measurements_filter,
+    )
+
+    if skip:
+        prompts = prompts[skip:]
+    if limit is not None:
+        prompts = prompts[:limit]
+
+    if not prompts:
+        LOGGER.info(
+            "No API prompts to process. model=%s batch_id=%s brand_id=%s",
+            model_name, resolved_batch_id, resolved_brand_id,
+        )
+        return ExtractionRunResult(
+            status="no_prompts",
+            loaded_count=0,
+            attempted_count=0,
+            saved_count=0,
+            skipped_count=0,
+            failed_count=0,
+            batch_id=resolved_batch_id,
+            brand_id=resolved_brand_id,
+            failures=[],
+            saved_outputs=[],
+            product_outputs=[],
+            entity_outputs=[],
+        )
+
+    LOGGER.info(
+        "Starting LLM API extraction. model=%s use_web_search=%s prompts=%s batch_id=%s",
+        model_name, use_web_search, len(prompts), resolved_batch_id,
+    )
+
+    runner = LLMApiRunner(
+        model_name,
+        use_web_search=use_web_search,
+        temperature=temperature,
+        response_timeout_seconds=settings.api_response_timeout_seconds,
+        langfuse_public_key=settings.langfuse_public_key,
+        langfuse_secret_key=settings.langfuse_secret_key,
+        langfuse_host=settings.langfuse_host,
+    )
+
+    saved_count = 0
+    skipped_count = 0
+    failed_count = 0
+    failures: list[dict[str, Any]] = []
+    saved_outputs: list[dict[str, Any]] = []
+
+    for index, prompt in enumerate(prompts, start=1):
+        prompt_id = str(prompt.get("id") or "")
+        prompt_brand_id = str(prompt.get("brand_id") or resolved_brand_id or "")
+        if not prompt_id or not prompt_brand_id:
+            skipped_count += 1
+            LOGGER.warning("Skipping prompt missing id or brand_id: %s", prompt)
+            continue
+
+        existing_output = (
+            None
+            if force_rerun
+            else api.find_existing_prompt_output(
+                prompt_id,
+                prompt_brand_id,
+                resolved_batch_id,
+                llm_model_filter=effective_filter,
+            )
+        )
+        if existing_output:
+            skipped_count += 1
+            LOGGER.info(
+                "[%s/%s] Skipping existing API output for prompt %s. output_id=%s",
+                index, len(prompts), prompt_id,
+                existing_output.get("output_id") or existing_output.get("id"),
+            )
+            continue
+
+        if not force_rerun:
+            claimed = api.try_claim_prompt(
+                prompt_id, resolved_batch_id, prompt_brand_id,
+                effective_filter, WORKER_ID,
+            )
+            if not claimed:
+                LOGGER.info(
+                    "[%s/%s] Prompt %s already claimed — skipping.", index, len(prompts), prompt_id,
+                )
+                skipped_count += 1
+                continue
+
+        text = prompt_text(prompt)
+        LOGGER.info("[%s/%s] Running API prompt %s (model=%s)", index, len(prompts), prompt_id, model_name)
+
+        try:
+            if dry_run:
+                LOGGER.info("[%s/%s] Dry run — skipping API call.", index, len(prompts))
+                skipped_count += 1
+                if not force_rerun:
+                    api.release_claim(prompt_id, resolved_batch_id, effective_filter)
+                continue
+
+            capture = runner.run_prompt(
+                text,
+                trace_metadata={
+                    "batch_id": resolved_batch_id,
+                    "prompt_id": prompt_id,
+                    "brand_id": prompt_brand_id,
+                    "model": model_name,
+                },
+            )
+
+            output = build_api_prompt_output(prompt, capture, resolved_batch_id)
+
+            LOGGER.info(
+                "[%s/%s] API capture: prompt=%s model=%s tokens=%s/%s sources=%s queries=%s latency_ms=%s",
+                index, len(prompts), prompt_id, capture.model_slug,
+                capture.usage.get("input_tokens"), capture.usage.get("output_tokens"),
+                len(capture.sources), capture.web_search_query_count, capture.latency_ms,
+            )
+
+            concurrent_output = (
+                None
+                if force_rerun
+                else api.find_existing_prompt_output(
+                    prompt_id, prompt_brand_id, resolved_batch_id,
+                    llm_model_filter=capture.model_slug,
+                )
+            )
+            if concurrent_output:
+                skipped_count += 1
+                LOGGER.warning(
+                    "[%s/%s] Concurrent worker already saved API prompt %s — discarding.",
+                    index, len(prompts), prompt_id,
+                )
+                continue
+
+            saved = api.save_prompt_output(output)
+            saved_count += 1
+            saved_output = normalize_saved_output(saved, output)
+            saved_outputs.append(saved_output)
+            LOGGER.info(
+                "[%s/%s] Saved API prompt output. prompt=%s output_id=%s",
+                index, len(prompts), prompt_id, saved_output.get("output_id"),
+            )
+
+            if not force_rerun:
+                api.complete_claim(prompt_id, resolved_batch_id, effective_filter)
+
+        except Exception as exc:
+            failed_count += 1
+            LOGGER.exception("[%s/%s] Failed API prompt %s: %s", index, len(prompts), prompt_id, exc)
+            failures.append({"prompt_id": prompt_id, "brand_id": prompt_brand_id, "error": str(exc)})
+            if not force_rerun:
+                try:
+                    api.release_claim(prompt_id, resolved_batch_id, effective_filter)
+                except Exception:
+                    pass
+            delay = random.uniform(1, 3)
+            time.sleep(delay)
+
+    status = "completed" if failed_count == 0 else "completed_with_failures"
+    return ExtractionRunResult(
+        status=status,
+        loaded_count=len(prompts),
+        attempted_count=len(prompts) - skipped_count,
+        saved_count=saved_count,
+        skipped_count=skipped_count,
+        failed_count=failed_count,
+        batch_id=resolved_batch_id,
+        brand_id=resolved_brand_id,
+        failures=failures,
+        saved_outputs=saved_outputs,
+        product_outputs=[],
+        entity_outputs=[],
+    )
+
+
+def build_api_prompt_output(
+    prompt: dict[str, Any],
+    capture: Any,
+    batch_id: str | None,
+) -> dict[str, Any]:
+    """Build a prompt_outputs DB record from an ApiCapture."""
+    from .llm_api_runner import model_is_anthropic, model_is_gemini
+
+    model_name = capture.model_slug.removeprefix("api:")
+    if model_is_anthropic(model_name):
+        site = "Anthropic API"
+    elif model_is_gemini(model_name):
+        site = "Google API"
+    else:
+        site = "OpenAI API"
+
+    output = build_prompt_output(
+        prompt,
+        capture.response,
+        capture.response,      # markdown = same as response (plain text from API)
+        "api_response",
+        "api_response",
+        "",                    # raw_html — none from API
+        "none",
+        capture.model_slug,
+        "",                    # url — no browser URL
+        batch_id,
+        capture.sources,
+        "api_tool_result" if capture.sources else "none",
+    )
+    output["config"] = {
+        **(output.get("config") or {}),
+        "site": site,
+    }
+    metadata = output.get("output_metadata") if isinstance(output.get("output_metadata"), dict) else {}
+    output["output_metadata"] = {
+        **metadata,
+        "llm_model": capture.model_slug,
+        "site_used": site,
+        "original_metadata": {
+            **(metadata.get("original_metadata") or {}),
+            "model_name": model_name,
+            "use_web_search": bool(capture.tool_calls_used),
+            "tool_calls_used": capture.tool_calls_used,
+            "token_usage": capture.usage,
+            "finish_reason": capture.finish_reason,
+            "latency_ms": capture.latency_ms,
+            "langfuse_trace_url": capture.langfuse_trace_url,
+            "web_search_queries": capture.web_search_queries,
+            "web_search_query_count": capture.web_search_query_count,
+            "web_search_results_per_query": capture.web_search_results_per_query,
+        },
+    }
+    return output
