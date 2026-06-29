@@ -15,7 +15,7 @@ if [[ "${ACCOUNT_POOL_ENABLED:-false}" == "true" ]]; then
 
   # acquire outputs: "<index> <email>"
   ACQUIRE_OUTPUT=$(python -m automated_extraction.profile_manager acquire \
-    --worker-id "${MACHINE_ID}" --dest "${PROFILE_DEST}")
+    --worker-id "${MACHINE_ID}" --dest "${PROFILE_DEST}" --quality)
   PROFILE_INDEX=$(echo "${ACQUIRE_OUTPUT}" | awk '{print $1}')
   export CHATGPT_LOGIN_EMAIL
   CHATGPT_LOGIN_EMAIL=$(echo "${ACQUIRE_OUTPUT}" | awk '{print $2}')
@@ -23,7 +23,7 @@ if [[ "${ACCOUNT_POOL_ENABLED:-false}" == "true" ]]; then
   echo "[entrypoint] Claimed profile ${PROFILE_INDEX} (${CHATGPT_LOGIN_EMAIL})"
 
   # Register cleanup: upload profile + release lock on any exit (SIGTERM, error, normal).
-  # Hard kills (SIGKILL) are covered by the 4-hour lock_expires_at TTL.
+  # Hard kills (SIGKILL) are covered by the 1.5-hour lock_expires_at TTL.
   _release_profile() {
     echo "[entrypoint] EXIT trap — saving and releasing profile ${PROFILE_INDEX} …"
     python -m automated_extraction.profile_manager save-and-release \
