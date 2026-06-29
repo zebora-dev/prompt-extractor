@@ -120,7 +120,7 @@ done
 | `is_locked` | `true` = not available to the pool |
 | `locked_by` | `FLY_MACHINE_ID` of the current holder, or `'disabled'` for permanently locked accounts |
 | `lock_expires_at` | Safety TTL — claim auto-expires after 4 hours |
-| `last_uploaded_at` | When the profile was last saved to Tigris |
+| `last_uploaded_at` | Stamped on every **acquire** (not just upload) — used as the LRU sort key to distribute load |
 | `cooldown_until` | When set, the account is skipped by `acquire_chatgpt_profile` until this timestamp passes |
 | `cooldown_reason` | Why the cooldown was set: `rate_limit`, `login_expired`, `cloudflare`, `consecutive_downgrades`, or `gpt55_session_cap` |
 
@@ -128,10 +128,15 @@ done
 
 `acquire_chatgpt_profile` uses a two-tier ordering to distribute load evenly:
 
-1. **30-minute rest threshold** — accounts used in the last 30 minutes are deprioritised. Accounts that have been idle longer are always preferred, preventing the same accounts from being reclaimed immediately after their cooldown expires.
-2. **Longest-rested first** — within each tier, the account with the oldest `last_uploaded_at` is picked (LRU). New accounts with no upload history are always initialised first.
+1. **30-minute rest threshold** — accounts used in the last 30 minutes are deprioritised. Accounts idle for longer are always preferred, preventing the same accounts being reclaimed immediately after a cooldown expires.
+2. **Longest-rested first** — within each tier, the account with the oldest `last_uploaded_at` is picked. New accounts with no upload history are always initialised first.
 
-This replaced a pure LRU ordering that caused 3 accounts to accumulate 70%+ of all prompts because they happened to be the oldest at startup and kept getting reclaimed right after each cooldown.
+**Critical:** `last_uploaded_at` is stamped at **acquire time** (not just on Tigris upload). This means that even if a session is cancelled or crashes before the profile is uploaded, the account still moves to the back of the queue. Without this, cancelled sessions left `last_uploaded_at` frozen at the previous clean upload — causing burned-out accounts to look like the most rested and be selected repeatedly.
+
+To manually backfill an account's position (e.g. after force-cancelling sessions):
+```sql
+UPDATE chatgpt_profiles SET last_uploaded_at = NOW() WHERE "index" IN (3, 4, 10);
+```
 
 ### `chatgpt_profile_stats` view
 
