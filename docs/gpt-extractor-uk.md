@@ -122,9 +122,33 @@ done
 | `lock_expires_at` | Safety TTL — claim auto-expires after 4 hours |
 | `last_uploaded_at` | When the profile was last saved to Tigris |
 | `cooldown_until` | When set, the account is skipped by `acquire_chatgpt_profile` until this timestamp passes |
-| `cooldown_reason` | Why the cooldown was set: `rate_limit`, `login_expired`, `cloudflare`, or `consecutive_downgrades` |
+| `cooldown_reason` | Why the cooldown was set: `rate_limit`, `login_expired`, `cloudflare`, `consecutive_downgrades`, or `gpt55_session_cap` |
 
-The pool ordering prefers accounts with the oldest `last_uploaded_at` (least recently used), so new accounts without an upload history are always initialised first.
+### Profile selection ordering
+
+`acquire_chatgpt_profile` uses a two-tier ordering to distribute load evenly:
+
+1. **30-minute rest threshold** — accounts used in the last 30 minutes are deprioritised. Accounts that have been idle longer are always preferred, preventing the same accounts from being reclaimed immediately after their cooldown expires.
+2. **Longest-rested first** — within each tier, the account with the oldest `last_uploaded_at` is picked (LRU). New accounts with no upload history are always initialised first.
+
+This replaced a pure LRU ordering that caused 3 accounts to accumulate 70%+ of all prompts because they happened to be the oldest at startup and kept getting reclaimed right after each cooldown.
+
+### `chatgpt_profile_stats` view
+
+A read-only view for monitoring per-account output history:
+
+```sql
+SELECT * FROM chatgpt_profile_stats ORDER BY "index";
+```
+
+| Column | Description |
+|---|---|
+| `status` | `available`, `in_use`, `cooled`, or `disabled` |
+| `last24h_gpt55` | gpt-5-5 outputs in the last 24 hours |
+| `last24h_mini` | gpt-5-3-mini outputs in the last 24 hours |
+| `last24h_gpt55_pct` | Percentage of last-24h outputs that were gpt-5-5 |
+| `last_run_at` | Timestamp of the most recent output from this account |
+| `lifetime_gpt55` / `lifetime_mini` | All-time output counts |
 
 To disable an account without deleting it:
 ```sql
@@ -154,6 +178,23 @@ FROM chatgpt_profiles
 WHERE cooldown_until > NOW()
 ORDER BY cooldown_until;
 ```
+
+---
+
+## gpt-5-5 capture behaviour
+
+Free ChatGPT accounts serve `gpt-5-5` for approximately 30–50 prompts after a rest period, then downgrade to `gpt-5-3-mini`. The worker tracks this per session and rotates proactively:
+
+| Trigger | Condition | Cooldown | Behaviour |
+|---|---|---|---|
+| `gpt55_session_cap` | ≥40 gpt-5-5 outputs captured this session | 30 min | Account has delivered its budget — release early so it can rest |
+| `consecutive_downgrades` | 1st mini output once ≥20 gpt-5-5 captured; or 3rd mini if fewer than 20 | 30 min | Account has downgraded — rotate to a fresher account |
+| `rate_limit_modal` | ChatGPT "Too many requests" modal detected | 2 hours | Hard rate limit — needs a longer rest |
+| `login_expired` | Session cookie invalid at startup | 24 hours | Requires manual VNC re-login |
+
+The 30-minute cooldown for downgrade/cap triggers (down from 2h) reflects that accounts can recover their gpt-5-5 window faster than previously assumed. After 30 minutes, the account re-enters the pool and will be picked again once it has been idle longer than other available accounts.
+
+Both `gpt-5-5` and `gpt-5-3-mini` outputs are always saved to `prompts_outputs` — workers never discard a response. The rotation only stops further prompts being sent to a downgraded account so a fresher one can take over for gpt-5-5 captures.
 
 ---
 
