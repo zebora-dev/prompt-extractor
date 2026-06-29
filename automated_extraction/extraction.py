@@ -254,23 +254,6 @@ def run_extraction_job(
                 )
                 continue
 
-            # Model-aware skip: when session model state is established and required_models is set,
-            # skip prompts that already have the model this account is currently serving.
-            # Claiming and running them would only produce a duplicate.
-            if session_model_state and required_models and not force_rerun:
-                _existing_for_session_model = api.find_existing_prompt_output(
-                    prompt_id,
-                    prompt_brand_id,
-                    resolved_batch_id,
-                    llm_model_filter=session_model_state,
-                )
-                if _existing_for_session_model:
-                    LOGGER.info(
-                        "[%s/%s] Skipping prompt %s — already has %s and account is in %s mode.",
-                        index, len(prompts), prompt_id, session_model_state, session_model_state,
-                    )
-                    skipped_count += 1
-                    continue
 
             # Claim the prompt so no other worker starts processing it concurrently.
             # Skipped when force_rerun=True (intentional re-processing).
