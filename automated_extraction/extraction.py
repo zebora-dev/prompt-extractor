@@ -43,6 +43,8 @@ class ExtractionRunResult:
     saved_outputs: list[dict[str, Any]]
     product_outputs: list[dict[str, Any]]
     entity_outputs: list[dict[str, Any]]
+    consecutive_downgrades: int = 0
+    gpt55_session_count: int = 0
 
 
 def _emit_session_stats(
@@ -86,6 +88,8 @@ def run_extraction_job(
     capture_entities: bool = False,
     measurements_filter: str | None = None,
     max_prompts_per_session: int = 50,
+    initial_consecutive_downgrades: int = 0,
+    initial_gpt55_session_count: int = 0,
 ) -> ExtractionRunResult:
     if not batch_id and not prompts_file:
         raise ValueError("one of batch_id or prompts_file is required")
@@ -241,8 +245,8 @@ def run_extraction_job(
                 entity_outputs=[],
             )
 
-        consecutive_downgrades = 0  # tracks model downgrades within this session
-        gpt55_session_count = 0     # gpt-5-5 captures this session (used for early-exit)
+        consecutive_downgrades = initial_consecutive_downgrades
+        gpt55_session_count = initial_gpt55_session_count
         _recent_model_results: list[bool] = []  # Opt 4: rolling window for rate-based rotation
 
         for index, prompt in enumerate(prompts, start=1):
@@ -558,6 +562,8 @@ def run_extraction_job(
         saved_outputs=saved_outputs,
         product_outputs=product_outputs,
         entity_outputs=entity_outputs,
+        consecutive_downgrades=consecutive_downgrades,
+        gpt55_session_count=gpt55_session_count,
     )
 
 
