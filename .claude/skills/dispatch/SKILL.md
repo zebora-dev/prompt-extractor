@@ -2,8 +2,7 @@
 name: dispatch
 description: Interactive dispatch wizard for BrandSight prompt extraction. Guides you through extraction type, batch, workers, and params — then monitors until complete and stops machines. Trigger with /dispatch [type] [batch_id].
 argument-hint: [gpt|gpt-uk|google-ai-overview|google-ai-mode|claude|perplexity] [batch-id] [--monitor batch_id=X flow_runs=id1,id2,id3 machines=m1,m2,m3 worker_count=N extraction_type=T]
-allowed-tools: Bash, mcp__supabase__execute_sql, AskUserQuestion, ScheduleWakeup, PushNotification
----
+allowed-tools: Bash, mcp__supabase__execute_sql, AskUserQuestion, ScheduleWakeup, PushNotification---
 
 # BrandSight Extraction Dispatch Wizard
 
@@ -174,8 +173,7 @@ Next check: 5 min
 ```
 
 Then call ScheduleWakeup directly with the **updated** flow run IDs (replace any completed/failed
-IDs with their replacements before building the prompt — this is critical):
-- `delaySeconds`: 300
+IDs with their replacements before building the prompt — this is critical):- `delaySeconds`: 300
 - `reason`: "Polling batch <batch_id> — <done> / <total> complete, <N> flows active"
 - `prompt`: `/dispatch --monitor batch_id=<batch_id> flow_runs=<updated_ids> machines=<machines> worker_count=<N> extraction_type=<type> deployment_id=<id> app=<app> required_models=<models>`
 
@@ -493,7 +491,6 @@ Each monitor iteration (Step 6) rebuilds the prompt with updated flow IDs before
 so replacements are always tracked correctly.
 
 Build the monitor prompt (a single string with all state inline):
-
 ```
 /dispatch --monitor batch_id=<batch_id> flow_runs=<id1,id2,...> machines=<m1,m2,...> worker_count=<N> extraction_type=<type> deployment_id=<deployment_id> app=<fly_app> required_models=<model1,model2>
 ```
@@ -508,12 +505,10 @@ Then call ScheduleWakeup directly:
 **Do NOT use the `/loop` skill here.** The loop skill uses `CronCreate` with a static prompt,
 which cannot update flow IDs when replacements are dispatched. `ScheduleWakeup` is the correct
 mechanism — monitor mode rebuilds the prompt with current IDs on every iteration.
-
 When the monitor detects batch completion (all `fully_complete = total`):
 1. Stop all machines
 2. Call `PushNotification` with a summary: batch name, total captured, time taken
 3. Report a final summary and do NOT call ScheduleWakeup (loop ends)
-
 ---
 
 ## Machine ID Reference (check live — may change after cloning)

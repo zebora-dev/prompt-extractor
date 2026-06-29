@@ -63,6 +63,7 @@ def run_extraction_job(
     capture_products: bool = False,
     capture_entities: bool = False,
     measurements_filter: str | None = None,
+    max_prompts_per_session: int = 50,
 ) -> ExtractionRunResult:
     if not batch_id and not prompts_file:
         raise ValueError("one of batch_id or prompts_file is required")
@@ -216,7 +217,9 @@ def run_extraction_job(
                 entity_outputs=[],
             )
 
-        consecutive_downgrades = 0  # tracks model downgrades within this session
+        consecutive_downgrades = 0  # tracks undesired downgrades (needed gpt-5-5, no prior capture, got mini)
+        session_model_state: str | None = None  # "gpt-5-5" or "gpt-5-3-mini" once established
+        consecutive_same_model = 0  # used to establish session_model_state
 
         for index, prompt in enumerate(prompts, start=1):
             prompt_id = str(prompt.get("id") or "")
@@ -251,6 +254,24 @@ def run_extraction_job(
                 )
                 continue
 
+            # Model-aware skip: when session model state is established and required_models is set,
+            # skip prompts that already have the model this account is currently serving.
+            # Claiming and running them would only produce a duplicate.
+            if session_model_state and required_models and not force_rerun:
+                _existing_for_session_model = api.find_existing_prompt_output(
+                    prompt_id,
+                    prompt_brand_id,
+                    resolved_batch_id,
+                    llm_model_filter=session_model_state,
+                )
+                if _existing_for_session_model:
+                    LOGGER.info(
+                        "[%s/%s] Skipping prompt %s — already has %s and account is in %s mode.",
+                        index, len(prompts), prompt_id, session_model_state, session_model_state,
+                    )
+                    skipped_count += 1
+                    continue
+
             # Claim the prompt so no other worker starts processing it concurrently.
             # Skipped when force_rerun=True (intentional re-processing).
             if not force_rerun:
@@ -274,6 +295,16 @@ def run_extraction_job(
 
             text = prompt_text(prompt)
             LOGGER.info("[%s/%s] Running prompt %s", index, len(prompts), prompt_id)
+
+            # Check if gpt-5-5 already exists for this prompt before running.
+            # Used to distinguish a "good" mini output (fills the missing model) from
+            # an undesired downgrade (we needed gpt-5-5, didn't have it, got mini).
+            prompt_already_had_premium = False
+            if required_models and any("gpt-5-5" in m for m in required_models):
+                _existing_premium = api.find_existing_prompt_output(
+                    prompt_id, prompt_brand_id, resolved_batch_id, llm_model_filter="gpt-5-5"
+                )
+                prompt_already_had_premium = bool(_existing_premium)
 
             try:
                 capture = runner.run_prompt(text)
@@ -411,17 +442,49 @@ def run_extraction_job(
                 if not force_rerun:
                     api.complete_claim(prompt_id, resolved_batch_id, llm_model_filter or "gpt")
 
-                # Track model downgrade: when required model is gpt-5 but account returned mini.
-                expected_model_prefix = "gpt-5-5" if required_models and any("gpt-5-5" in m for m in required_models) else None
-                if expected_model_prefix and capture.llm_model and expected_model_prefix not in capture.llm_model:
+                # Update session model state based on what ChatGPT actually served.
+                # Once 2 consecutive captures return the same model family, the state is established.
+                captured_is_mini = bool(capture.llm_model and "gpt-5-5" not in capture.llm_model)
+                if capture.llm_model:
+                    detected_state = "gpt-5-3-mini" if captured_is_mini else "gpt-5-5"
+                    if detected_state == session_model_state:
+                        consecutive_same_model += 1
+                    else:
+                        consecutive_same_model = 1
+                    if consecutive_same_model >= 2 and session_model_state != detected_state:
+                        LOGGER.info(
+                            "[%s/%s] Session model state established: %s (was %s).",
+                            index, len(prompts), detected_state, session_model_state or "unknown",
+                        )
+                        session_model_state = detected_state
+
+                # Undesired downgrade = we needed gpt-5-5, this prompt had no prior gpt-5-5
+                # capture, and the account returned mini. Getting mini on a prompt that already
+                # has gpt-5-5 is the desired outcome — that resets the counter.
+                needs_premium = required_models and any("gpt-5-5" in m for m in required_models)
+                if needs_premium and captured_is_mini and not prompt_already_had_premium:
                     consecutive_downgrades += 1
                     LOGGER.info(
-                        "[%s/%s] Model downgrade detected. expected=%s got=%s consecutive=%s prompt_id=%s",
-                        index, len(prompts), expected_model_prefix, capture.llm_model,
-                        consecutive_downgrades, prompt_id,
+                        "[%s/%s] Undesired downgrade — needed gpt-5-5, no prior capture, got %s. "
+                        "consecutive=%s prompt_id=%s",
+                        index, len(prompts), capture.llm_model, consecutive_downgrades, prompt_id,
                     )
                 else:
+                    if consecutive_downgrades:
+                        LOGGER.info(
+                            "[%s/%s] Downgrade counter reset. model=%s already_had_premium=%s",
+                            index, len(prompts), capture.llm_model, prompt_already_had_premium,
+                        )
                     consecutive_downgrades = 0
+
+                # Session cap: stop after max_prompts_per_session saved outputs so the profile
+                # rotates and a rested account can be claimed by the next dispatcher.
+                if max_prompts_per_session and saved_count >= max_prompts_per_session:
+                    LOGGER.info(
+                        "[%s/%s] Session cap reached (%s prompts saved). Stopping to allow profile rotation.",
+                        index, len(prompts), saved_count,
+                    )
+                    break
 
                 # Check for rate-limiting after each successful capture.
                 rate_limited = runner.check_rate_limit_state()
