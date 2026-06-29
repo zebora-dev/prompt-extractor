@@ -1506,6 +1506,7 @@ def google_ai_overview_extraction_batch_flow(
                     language=language,
                     use_proxy=use_proxy,
                     trigger_scoring=trigger_scoring,
+                    measurements_filter=measurements_filter,
                 )
                 mop_up_results.append(result)
                 flow_logger.info(

@@ -23,6 +23,8 @@ WORK_DIR = os.getenv("PREFECT_WORKING_DIR") or str(PROJECT_ROOT)
 REGIONS = {
     "us": {"suffix": "", "tag": "region:us"},
     "uk": {"suffix": "-uk", "tag": "region:uk"},
+    "google-us": {"suffix": "-google-us", "tag": "region:google-us"},
+    "google-uk": {"suffix": "-google-uk", "tag": "region:google-uk"},
 }
 
 
