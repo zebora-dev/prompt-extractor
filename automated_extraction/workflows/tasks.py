@@ -70,6 +70,8 @@ def extract_chatgpt_batch_task(
     capture_entities: bool = False,
     measurements_filter: str | None = None,
     max_prompts_per_session: int = 50,
+    initial_consecutive_downgrades: int = 0,
+    initial_gpt55_session_count: int = 0,
 ) -> dict[str, Any]:
     """
     Run the current CLI extraction process as one observable Prefect task.
@@ -117,6 +119,8 @@ def extract_chatgpt_batch_task(
         capture_entities=capture_entities,
         measurements_filter=measurements_filter,
         max_prompts_per_session=max_prompts_per_session,
+        initial_consecutive_downgrades=initial_consecutive_downgrades,
+        initial_gpt55_session_count=initial_gpt55_session_count,
     )
     payload = asdict(result)
     task_logger.info("Finished ChatGPT extraction task: %s", summarize_extraction_payload(payload))

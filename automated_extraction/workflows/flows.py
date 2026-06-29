@@ -128,16 +128,20 @@ def prompt_extraction_batch_flow(
     run_results: list[dict[str, Any]] = []
     consecutive_all_failed = 0
     stopped_reason: str | None = None
+    _session_consecutive_downgrades = 0
+    _session_gpt55_count = 0
     for run_index in range(1, run_count + 1):
         run_skip = skip
         effective_limit = min(limit, max_prompts - (run_index - 1) * limit) if max_prompts is not None else limit
         flow_logger.info(
-            "Starting sequential chatgpt-extraction run %s/%s. batch_id=%s limit=%s skip=%s",
+            "Starting sequential chatgpt-extraction run %s/%s. batch_id=%s limit=%s skip=%s consecutive_downgrades=%s gpt55_session_count=%s",
             run_index,
             run_count,
             batch_id,
             effective_limit,
             run_skip,
+            _session_consecutive_downgrades,
+            _session_gpt55_count,
         )
         result = prompt_extraction_flow(
             batch_id=batch_id,
@@ -152,7 +156,11 @@ def prompt_extraction_batch_flow(
             trigger_scoring=trigger_scoring,
             measurements_filter=measurements_filter,
             max_prompts_per_session=max_prompts_per_session,
+            initial_consecutive_downgrades=_session_consecutive_downgrades,
+            initial_gpt55_session_count=_session_gpt55_count,
         )
+        _session_consecutive_downgrades = int(result.get("consecutive_downgrades") or 0)
+        _session_gpt55_count = int(result.get("gpt55_session_count") or 0)
         run_results.append(result)
         flow_logger.info(
             "Finished sequential chatgpt-extraction run %s/%s. saved_count=%s skipped_count=%s failed_count=%s",
@@ -247,11 +255,13 @@ def prompt_extraction_batch_flow(
             )
             for run_index in range(1, mop_up_run_count + 1):
                 flow_logger.info(
-                    "Mop-up run %s/%s. batch_id=%s limit=%s",
+                    "Mop-up run %s/%s. batch_id=%s limit=%s consecutive_downgrades=%s gpt55_session_count=%s",
                     run_index,
                     mop_up_run_count,
                     batch_id,
                     limit,
+                    _session_consecutive_downgrades,
+                    _session_gpt55_count,
                 )
                 result = prompt_extraction_flow(
                     batch_id=batch_id,
@@ -265,7 +275,11 @@ def prompt_extraction_batch_flow(
                     capture_entities=capture_entities,
                     trigger_scoring=trigger_scoring,
                     max_prompts_per_session=max_prompts_per_session,
+                    initial_consecutive_downgrades=_session_consecutive_downgrades,
+                    initial_gpt55_session_count=_session_gpt55_count,
                 )
+                _session_consecutive_downgrades = int(result.get("consecutive_downgrades") or 0)
+                _session_gpt55_count = int(result.get("gpt55_session_count") or 0)
                 mop_up_results.append(result)
                 flow_logger.info(
                     "Mop-up run %s/%s finished. saved_count=%s skipped_count=%s failed_count=%s",
@@ -379,6 +393,8 @@ def prompt_extraction_flow(
     trigger_scoring: bool = True,
     measurements_filter: str | None = None,
     max_prompts_per_session: int = 50,
+    initial_consecutive_downgrades: int = 0,
+    initial_gpt55_session_count: int = 0,
 ) -> dict[str, Any]:
     """
     Orchestrate a ChatGPT prompt extraction run.
@@ -424,6 +440,8 @@ def prompt_extraction_flow(
         capture_entities=capture_entities,
         measurements_filter=measurements_filter,
         max_prompts_per_session=max_prompts_per_session,
+        initial_consecutive_downgrades=initial_consecutive_downgrades,
+        initial_gpt55_session_count=initial_gpt55_session_count,
     )
     product_output_refs = result.pop("product_outputs", []) or []
     entity_output_refs = result.pop("entity_outputs", []) or []
