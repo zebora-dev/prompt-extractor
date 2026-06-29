@@ -77,18 +77,16 @@ WHERE EXISTS (
 
 ### 2. Check account health (gpt-uk only)
 
-If `extraction_type = gpt-uk`, also check the account pool for any problems:
+If `extraction_type = gpt-uk`, query the `chatgpt_profile_stats` view for a full account snapshot:
 ```sql
-SELECT "index", email, cooldown_until, cooldown_reason,
-       CASE WHEN is_locked AND locked_by != 'disabled' THEN locked_by ELSE NULL END AS active_worker
-FROM chatgpt_profiles
-WHERE (cooldown_until > NOW() OR (is_locked AND locked_by != 'disabled'))
-  AND NOT (is_locked AND locked_by = 'disabled')
-ORDER BY "index";
+SELECT "index", email, status, worker, cooldown_until, cooldown_reason,
+       last24h_gpt55, last24h_mini, last24h_total, last24h_gpt55_pct
+FROM chatgpt_profile_stats
+ORDER BY last24h_total DESC;
 ```
 
-If any accounts are cooling down, include that in the report. It means the worker detected
-rate-limiting or model downgrades and the account will auto-recover when `cooldown_until` passes.
+Include this table in the Step 6 report. It shows which accounts are hot (high `last24h_total`),
+cooling down, or downgraded — so each monitor iteration gives a full picture without a separate query.
 
 ### 3. Check flow run states
 
@@ -165,12 +163,22 @@ gpt-5-5          234           237             3
 gpt-5-3-mini     290           295             5
 Fully complete:  229 / 614
 
-Account cooldowns: anna@zebora.io (rate_limit, expires 20:15)
+Account pool (last 24h):
+#   Email                  Status     Worker        24h-55   24h-mini  24h-total  55%
+1   anna@zebora.io         active     worker-abc    42       18        60         70%
+2   bob@zebora.io          cooldown   —             31       12        43         72%
+3   carol@zebora.io        active     worker-def    28       9         37         76%
+...
+
 Flow states: a1b2c3d4 RUNNING · e5f6g7h8 RUNNING · i9j0k1l2 COMPLETED→replaced
 Replacements: 1
 Next check: 5 min
 ─────────────────────────────────────────────────────────
 ```
+
+Include all accounts from `chatgpt_profile_stats` in the account pool table, sorted by `last24h_total DESC`.
+Accounts with `status = 'cooldown'` show the `cooldown_reason` in the Status column.
+Omit this table for non-gpt-uk extraction types.
 
 Then call ScheduleWakeup directly with the **updated** flow run IDs (replace any completed/failed
 IDs with their replacements before building the prompt — this is critical):- `delaySeconds`: 300
