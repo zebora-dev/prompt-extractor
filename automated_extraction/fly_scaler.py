@@ -62,6 +62,8 @@ _APP_REGION: dict[str, str] = {
     "prompt-extractor-perplexity-us": "iad",
     "gpt-extractor-uk": "lhr",
     "gpt-extractor-us": "iad",
+    "prompt-extractor-google-us": "iad",
+    "prompt-extractor-google-uk": "lhr",
 }
 
 

@@ -26,6 +26,7 @@ If `$ARGUMENTS` contains `--monitor`, extract these values:
 - `extraction_type` — gpt / gpt-uk / google-ai-overview / google-ai-mode / claude / perplexity
 - `deployment_id` — Prefect deployment ID for replacements
 - `app` — Fly.io app name
+- `work_pool` — Prefect work pool name (for heartbeat check, e.g. `gpt-extraction-uk`, `prompt-extraction-google-uk`)
 - `required_models` — comma-separated required models (e.g. `gpt-5-5,gpt-5-3-mini`), if set
 - `prev_output_counts` — (optional) `index:last24h_total` pairs from previous iteration, e.g. `9:42,5:21`
 - `zero_output_accounts` — (optional) `index:consecutive_zero_iterations` pairs, e.g. `8:1,5:2`
@@ -216,6 +217,36 @@ Map flow state to action:
 - `COMPLETED` → remove from tracking; dispatch replacement if remaining > 0
 - `CANCELLING` / `CANCELLED` → replace immediately
 
+### 3b. Check worker heartbeat (detect dead workers)
+
+Check the work pool heartbeat to catch Prefect workers that died without stopping the machine.
+If the most recent worker heartbeat is >10 minutes old but machines are `started`, the worker
+process has died and flows will stay SCHEDULED indefinitely.
+
+```bash
+curl -s -X POST "https://prompt-extractor-prefect.fly.dev/api/workers/filter" \
+  -H "Content-Type: application/json" \
+  -d "{\"workers\": {\"work_pool_name\": {\"any_\": [\"<work_pool>\"]}}, \"limit\": 10}" \
+  | python3 -c "
+import sys,json
+from datetime import datetime, timezone
+workers=json.load(sys.stdin)
+now=datetime.now(timezone.utc)
+for w in workers:
+    last=w.get('last_heartbeat_time','')
+    if last:
+        age=(now-datetime.fromisoformat(last.replace('Z','+00:00'))).total_seconds()
+        print(w['name'], 'heartbeat age:', int(age), 's', '⚠ STALE' if age>600 else 'OK')
+    else:
+        print(w['name'], 'no heartbeat')
+"
+```
+
+If workers are STALE (heartbeat age >600s) and flows are stuck SCHEDULED:
+1. Note which machine IDs correspond to those workers (list machines with `flyctl machines list -a <app> --json`)
+2. Restart the stale machines: `flyctl machines restart <machine_id> -a <app>`
+3. Wait ~30s for Prefect workers to reconnect before flows are picked up
+
 #### Opt 6: Dynamic worker count scale-down
 
 Before dispatching replacements, compute the effective worker count based on remaining work.
@@ -401,9 +432,10 @@ Call ScheduleWakeup with the **updated** flow run IDs (use reconciled IDs from S
 
 - `delaySeconds`: 300
 - `reason`: "Polling batch <batch_id> — <done> / <total> complete, <N> flows active"
-- `prompt`: `/dispatch --monitor batch_id=<batch_id> flow_runs=<reconciled_ids> machines=<machines> worker_count=<N> extraction_type=<type> deployment_id=<id> app=<app> required_models=<models> prev_output_counts=<index:total,...> zero_output_accounts=<index:count,...> prev_model_counts=<model:done,...>`
+- `prompt`: `/dispatch --monitor batch_id=<batch_id> flow_runs=<reconciled_ids> machines=<machines> worker_count=<N> extraction_type=<type> deployment_id=<id> app=<app> work_pool=<work_pool> required_models=<models> prev_output_counts=<index:total,...> zero_output_accounts=<index:count,...> prev_model_counts=<model:done,...>`
 
 Omit `required_models` from the prompt if the batch doesn't have them.
+Include `work_pool` so the heartbeat check (step 3b) knows which pool to query (e.g. `gpt-extraction-uk`, `prompt-extraction-google-uk`).
 Omit `prev_output_counts`, `zero_output_accounts`, `prev_model_counts` if empty.
 Only include `zero_output_accounts` for accounts still in_use with non-zero counters (reset on rotation).
 
@@ -503,14 +535,18 @@ AskUserQuestion:
 
 Look up the app from the type:
 
-| Type | Fly App | Work Pool | Deployment suffix |
-|---|---|---|---|
-| gpt-uk | gpt-extractor-uk | gpt-extraction-uk | -gpt-uk |
-| gpt | prompt-extractor-us | prompt-extraction-pool | (none) |
-| google-ai-overview | prompt-extractor-google-us | prompt-extraction-google-us | -google-us |
-| google-ai-mode | prompt-extractor-google-us | prompt-extraction-google-us | -google-us |
-| claude | prompt-extractor-uk | prompt-extraction-uk | -uk |
-| perplexity | prompt-extractor-perplexity-uk | prompt-extraction-perplexity-uk | -uk |
+| Type | Region | Fly App | Work Pool | Deployment suffix |
+|---|---|---|---|---|
+| gpt-uk | uk | gpt-extractor-uk | gpt-extraction-uk | -gpt-uk |
+| gpt | us | prompt-extractor-us | prompt-extraction-pool | (none) |
+| google-ai-overview | us | prompt-extractor-google-us | prompt-extraction-google-us | -google-us |
+| google-ai-overview | uk | prompt-extractor-google-uk | prompt-extraction-google-uk | -google-uk |
+| google-ai-mode | us | prompt-extractor-google-us | prompt-extraction-google-us | -google-us |
+| google-ai-mode | uk | prompt-extractor-google-uk | prompt-extraction-google-uk | -google-uk |
+| claude | uk | prompt-extractor-uk | prompt-extraction-uk | -uk |
+| perplexity | uk | prompt-extractor-perplexity-uk | prompt-extraction-perplexity-uk | -uk |
+
+For Google types, if the region is not clear from context, ask the user: `"Which region for Google extraction?"` with options `US` and `UK (Recommended)`.
 
 Show machine states:
 ```bash
@@ -641,15 +677,19 @@ Deployment IDs (verify via Prefect API if stale):
 |---|---|---|
 | gpt-uk | 1b26c690-9142-4424-96ad-f31725816244 | chatgpt-extraction-batch-gpt-uk |
 | gpt (us) | 65dc0188-c85b-4940-afac-8c298794c0b5 | chatgpt-extraction-batch |
-| google-ai-overview | d1719408-9a21-4f2f-b743-92ee1d5b2756 | google-ai-overview-extraction-batch-google-us |
-| google-ai-mode | c2e4b38b-81be-4bc5-86d6-e36da7e28223 | google-ai-mode-extraction-batch-google-us |
+| google-ai-overview (us) | d1719408-9a21-4f2f-b743-92ee1d5b2756 | google-ai-overview-extraction-batch-google-us |
+| google-ai-overview (uk) | resolve via API — not yet registered | google-ai-overview-extraction-batch-google-uk |
+| google-ai-mode (us) | c2e4b38b-81be-4bc5-86d6-e36da7e28223 | google-ai-mode-extraction-batch-google-us |
+| google-ai-mode (uk) | resolve via API — not yet registered | google-ai-mode-extraction-batch-google-uk |
 | claude | 88c148ef-957f-4c1c-ac74-19fa4df3bdd4 | claude-extraction-batch-uk |
 | perplexity | 52c0135b-3635-4460-a995-2efc698c1ef4 | perplexity-extraction-batch-uk |
 
-If a deployment ID is stale (404), resolve it:
+If a deployment ID is stale (404) or marked "resolve via API", look it up by name:
 ```bash
-curl -s "https://prompt-extractor-prefect.fly.dev/api/deployments/name/chatgpt-extraction-batch/chatgpt-extraction-batch-gpt-uk" \
-  | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('id'))"
+FLOW_NAME="<flow-name>"   # e.g. google-ai-overview-extraction-batch
+DEPLOYMENT_NAME="<deployment-name>"   # e.g. google-ai-overview-extraction-batch-google-uk
+curl -s "https://prompt-extractor-prefect.fly.dev/api/deployments/name/${FLOW_NAME}/${DEPLOYMENT_NAME}" \
+  | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('id','NOT FOUND'))"
 ```
 
 Build params:
@@ -739,7 +779,7 @@ so replacements are always tracked correctly.
 
 Build the monitor prompt (a single string with all state inline):
 ```
-/dispatch --monitor batch_id=<batch_id> flow_runs=<id1,id2,...> machines=<m1,m2,...> worker_count=<N> extraction_type=<type> deployment_id=<deployment_id> app=<fly_app> required_models=<model1,model2>
+/dispatch --monitor batch_id=<batch_id> flow_runs=<id1,id2,...> machines=<m1,m2,...> worker_count=<N> extraction_type=<type> deployment_id=<deployment_id> app=<fly_app> work_pool=<work_pool> required_models=<model1,model2>
 ```
 
 Omit `required_models` if the batch doesn't have them.
@@ -782,6 +822,12 @@ flyctl machines list -a gpt-extractor-uk --json | python3 -c "import sys,json; [
 | e820120f39d208 |
 | 48e1342ae50278 |
 | 7845030b64de18 |
+
+### prompt-extractor-google-uk
+New app — verify live after deployment:
+```bash
+flyctl machines list -a prompt-extractor-google-uk --json | python3 -c "import sys,json; [print(m['id'], m['state']) for m in json.load(sys.stdin)]"
+```
 
 ### prompt-extractor-us (GPT US)
 Verify live — this app has many clones.
