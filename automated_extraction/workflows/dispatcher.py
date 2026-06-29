@@ -66,6 +66,11 @@ _EXTRACTION_TYPES: dict[str, dict[str, str]] = {
         "deployment_base": "perplexity-extraction-batch",
         "model_filter": "perplexity",
     },
+    "api": {
+        "flow_name": "api-extraction-batch",
+        "deployment_base": "api-extraction-batch",
+        "model_filter": "api:",
+    },
 }
 
 _REGION_SUFFIXES: dict[str, str] = {
@@ -361,6 +366,14 @@ def dispatch_extraction_flow(
             }
         )
     elif extraction_type == "perplexity":
+        base_params.update(
+            {
+                "model_filter": model_filter,
+                "trigger_scoring": trigger_scoring,
+                **({"measurements_filter": measurements_filter} if measurements_filter else {}),
+            }
+        )
+    elif extraction_type == "api":
         base_params.update(
             {
                 "model_filter": model_filter,

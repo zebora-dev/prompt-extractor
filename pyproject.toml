@@ -19,6 +19,10 @@ dependencies = [
     "importlib_metadata>=6.0.0",
     "httpx>=0.28.1",
     "supabase>=2.10.0",
+    "openai>=1.30.0",
+    "anthropic>=0.40.0",
+    "langfuse>=3.0.0",
+    "google-genai>=2.8.0",
 ]
 
 [tool.ruff]

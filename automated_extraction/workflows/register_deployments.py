@@ -29,6 +29,8 @@ REGIONS = {
 def get_flows():
     from automated_extraction.workflows.dispatcher import dispatch_extraction_flow
     from automated_extraction.workflows.flows import (
+        api_extraction_batch_flow,
+        api_extraction_flow,
         claude_extraction_batch_flow,
         claude_extraction_flow,
         google_ai_mode_extraction_batch_flow,
@@ -47,6 +49,38 @@ def get_flows():
     )
 
     return {
+        "api-extraction-batch": {
+            "flow": api_extraction_batch_flow,
+            "tags": ["api", "extraction", "llm", "batch"],
+            "description": "Sequentially run api-extraction in chunks until remaining API-model prompts for a batch are covered.",
+            "parameters": {
+                "batch_id": None,
+                "model_filter": "api:",
+                "model_name": "gpt-4o",
+                "use_web_search": False,
+                "temperature": 0.0,
+                "limit": 10,
+                "delay_seconds": 10,
+                "trigger_scoring": True,
+                "startup_delay_seconds": 0,
+            },
+        },
+        "api-extraction": {
+            "flow": api_extraction_flow,
+            "tags": ["api", "extraction", "llm"],
+            "description": "Run BrandSight prompts directly through an LLM provider API and save responses.",
+            "parameters": {
+                "batch_id": None,
+                "brand_id": None,
+                "limit": None,
+                "force_rerun": False,
+                "llm_model_filter": "api:",
+                "model_name": "gpt-4o",
+                "use_web_search": False,
+                "temperature": 0.0,
+                "trigger_scoring": True,
+            },
+        },
         "perplexity-extraction-batch": {
             "flow": perplexity_extraction_batch_flow,
             "tags": ["perplexity", "extraction", "browser", "batch"],

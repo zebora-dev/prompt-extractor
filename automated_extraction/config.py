@@ -54,6 +54,16 @@ class Settings:
     claude_chrome_user_data_dir: str | None
     perplexity_url: str
     perplexity_chrome_user_data_dir: str | None
+    # LLM API (direct SDK) settings
+    openai_api_key: str | None
+    anthropic_api_key: str | None
+    google_api_key: str | None
+    langfuse_public_key: str | None
+    langfuse_secret_key: str | None
+    langfuse_host: str
+    api_default_model: str
+    api_temperature: float
+    api_response_timeout_seconds: int
     accounts: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     @classmethod
@@ -140,6 +150,15 @@ class Settings:
             claude_chrome_user_data_dir=os.getenv("CLAUDE_CHROME_USER_DATA_DIR") or str(DEFAULT_CLAUDE_USER_DATA_DIR),
             perplexity_url=os.getenv("PERPLEXITY_URL", "https://www.perplexity.ai").strip(),
             perplexity_chrome_user_data_dir=os.getenv("PERPLEXITY_CHROME_USER_DATA_DIR") or str(DEFAULT_PERPLEXITY_USER_DATA_DIR),
+            openai_api_key=os.getenv("OPENAI_API_KEY") or None,
+            anthropic_api_key=os.getenv("ANTHROPIC_API_KEY") or None,
+            google_api_key=os.getenv("GOOGLE_API_KEY") or None,
+            langfuse_public_key=os.getenv("LANGFUSE_PUBLIC_KEY") or None,
+            langfuse_secret_key=os.getenv("LANGFUSE_SECRET_KEY") or None,
+            langfuse_host=os.getenv("LANGFUSE_HOST", "https://cloud.langfuse.com").strip(),
+            api_default_model=os.getenv("LLM_API_DEFAULT_MODEL", "gpt-4o").strip(),
+            api_temperature=float(os.getenv("LLM_API_TEMPERATURE", "0.0") or "0.0"),
+            api_response_timeout_seconds=parse_int(os.getenv("LLM_API_RESPONSE_TIMEOUT_SECONDS"), default=120),
             accounts=accounts,
         )
 
