@@ -14,6 +14,8 @@ on a fleet of dedicated Fly.io workers.
 | Doc | Contents |
 |-----|----------|
 | [docs/GPT_WORKERS.md](docs/GPT_WORKERS.md) | **ChatGPT worker fleet** — Fly.io machines, persistent Chrome, VNC login, Cloudflare handling, Slack alerts, deploy process |
+| [docs/GOOGLE_AI_OVERVIEW_IMPROVEMENTS.md](docs/GOOGLE_AI_OVERVIEW_IMPROVEMENTS.md) | **Google AI Overview reliability** — CAPTCHA wait + VNC notify, no-output watchdog, auto-cooldown, stall detection, timing jitter |
+| [docs/DISPATCH_MONITOR_IMPROVEMENTS.md](docs/DISPATCH_MONITOR_IMPROVEMENTS.md) | **Dispatch monitor improvements** — stale lock release, flow reconciliation, zero-output rotation, quality-aware claiming |
 | [docs/PREFECT.md](docs/PREFECT.md) | **Prefect operations** — flows, parameters, triggering batches, troubleshooting |
 | [slack-app-manifest.json](slack-app-manifest.json) | **Slack app manifest** — upload to api.slack.com to create the BrandSight Extractor bot |
 
