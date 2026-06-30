@@ -158,3 +158,93 @@ def notify_cloudflare_cleared(
         }
     ]
     _post(blocks, f"✅ Cloudflare challenge cleared on {machine_id} ({login_email}) — run resuming.")
+
+
+def notify_google_captcha(
+    *,
+    url: str,
+    context: str,
+    batch_id: str | None = None,
+) -> None:
+    """Send a Slack alert when Google presents a CAPTCHA / 'unusual traffic' block."""
+    ctx = _machine_context()
+    machine_id = ctx["machine_id"]
+    region = ctx["region"]
+    app = ctx["app_name"]
+
+    vnc_url = (
+        f"https://{app}.fly.dev/vnc/{machine_id}/vnc.html"
+        f"?autoconnect=true&path=vnc/{machine_id}/websockify"
+        if app != "local" else None
+    )
+
+    summary = f"`{machine_id}` · {region or 'unknown'}"
+    vnc_line = f"<{vnc_url}|VNC in to machine `{machine_id}`>" if vnc_url else "VNC not available locally."
+    batch_line = f"\n*Batch:* `{batch_id}`" if batch_id else ""
+
+    blocks: list[dict] = [
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": (
+                    f":robot_face: *Google CAPTCHA detected* — {summary}\n"
+                    f"{vnc_line}{batch_line}\n"
+                    f"*URL:* `{url[:120]}`\n"
+                    f"VNC in, solve the CAPTCHA, and the run will continue automatically."
+                ),
+            },
+        },
+        {"type": "divider"},
+    ]
+    _post(blocks, f"🤖 Google CAPTCHA on machine {machine_id} ({context}) — VNC in to solve.")
+
+
+def notify_google_captcha_cleared(*, elapsed_seconds: int, context: str) -> None:
+    """Send a Slack message when the Google CAPTCHA is cleared."""
+    ctx = _machine_context()
+    machine_id = ctx["machine_id"]
+    blocks: list[dict] = [
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"✅ *Google CAPTCHA cleared* on `{machine_id}` after {elapsed_seconds}s — run resuming. Context: `{context}`",
+            },
+        }
+    ]
+    _post(blocks, f"✅ Google CAPTCHA cleared on {machine_id} — run resuming.")
+
+
+def notify_google_cooldown(
+    *,
+    batch_id: str,
+    app: str,
+    machine_ids: list[str],
+    reason: str,
+) -> None:
+    """
+    Send a Slack alert when the monitor auto-shuts down due to persistent zero output.
+    Machines have been stopped; the batch can be resumed manually later.
+    """
+    ctx = _machine_context()
+    region = ctx.get("region") or "unknown"
+    machine_list = ", ".join(f"`{m}`" for m in machine_ids)
+    blocks: list[dict] = [
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": (
+                    f":snowflake: *Google extraction auto-shutdown* — cooling down\n"
+                    f"*App:* `{app}` · *Region:* {region}\n"
+                    f"*Batch:* `{batch_id}`\n"
+                    f"*Machines stopped:* {machine_list}\n"
+                    f"*Reason:* {reason}\n\n"
+                    f"Resume with `/dispatch` when ready."
+                ),
+            },
+        },
+        {"type": "divider"},
+    ]
+    _post(blocks, f"❄️ Google extraction auto-shutdown for batch {batch_id} — too many zero-output retries.")

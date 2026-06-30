@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import random
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -19,8 +20,12 @@ from .google_chrome_factory import (
     search_via_box,
     warmup_google_session,
 )
+from .notifications import notify_google_captcha, notify_google_captcha_cleared
 
 LOGGER = logging.getLogger(__name__)
+
+# How long to wait for the user to solve a CAPTCHA before giving up.
+CAPTCHA_WAIT_SECONDS = 600  # 10 minutes
 
 BLOCKING_URL_PATTERNS = [
     "google.com/sorry",
@@ -113,6 +118,10 @@ class GoogleAIOverviewRunner:
 
     def run_prompt(self, prompt_text: str) -> GoogleAIOverviewCapture:
         browser = self.require_browser()
+        # Randomised pre-search pause to vary timing fingerprint (reduces detection).
+        pre_delay = random.uniform(2.0, 6.0)
+        LOGGER.debug("Pre-search jitter: sleeping %.1fs.", pre_delay)
+        time.sleep(pre_delay)
         LOGGER.info("Searching via box for AI Overview: %s", prompt_text[:80])
         t0 = time.time()
         search_via_box(browser, prompt_text)
@@ -120,8 +129,8 @@ class GoogleAIOverviewRunner:
 
         blocked_reason = self.detect_blocking_page()
         if blocked_reason:
-            LOGGER.warning("Blocking page detected after search: %s", blocked_reason)
-            raise RuntimeError(f"Google blocked the request: {blocked_reason}")
+            LOGGER.warning("Blocking page detected after search: %s — waiting for CAPTCHA resolution.", blocked_reason)
+            self.wait_for_captcha_clear(context="run_prompt")
 
         LOGGER.info("No blocking detected — waiting for AI Overview panel.")
         result = self.wait_for_ai_overview()
@@ -234,7 +243,10 @@ class GoogleAIOverviewRunner:
         while time.time() < deadline:
             blocked_reason = self.detect_blocking_page()
             if blocked_reason:
-                raise RuntimeError(f"Google blocked the request: {blocked_reason}")
+                LOGGER.warning("Blocking page detected in poll loop: %s — waiting for CAPTCHA resolution.", blocked_reason)
+                self.wait_for_captcha_clear(context="wait_for_ai_overview")
+                # CAPTCHA cleared — raise so run_prompt retries the full search from scratch.
+                raise RuntimeError("google_captcha_cleared_retry_needed")
 
             result = self.extract_ai_overview()
             last_result = result
@@ -386,6 +398,71 @@ class GoogleAIOverviewRunner:
     # Legacy alias kept so any code holding a reference to require_driver() still works.
     def require_driver(self) -> NodriverBrowser:
         return self.require_browser()
+
+    def wait_for_captcha_clear(
+        self,
+        *,
+        context: str,
+        batch_id: str | None = None,
+        wait_seconds: int = CAPTCHA_WAIT_SECONDS,
+    ) -> None:
+        """
+        Block until the Google CAPTCHA page clears or the timeout expires.
+
+        On first detection: sends a Slack notification with VNC link so an operator
+        can solve it. Polls every 5 seconds. On clearance: sends a cleared notification
+        and returns. On timeout: raises RuntimeError so the flow exits cleanly.
+        """
+        first_seen: float | None = None
+        last_log = 0.0
+        LOG_INTERVAL = 30
+        deadline = time.time() + wait_seconds
+
+        while time.time() < deadline:
+            blocked_reason = self.detect_blocking_page()
+            if not blocked_reason:
+                if first_seen is not None:
+                    elapsed = int(time.time() - first_seen)
+                    LOGGER.info("Google CAPTCHA cleared after %ss — resuming. context=%s", elapsed, context)
+                    notify_google_captcha_cleared(elapsed_seconds=elapsed, context=context)
+                return
+
+            now = time.time()
+            if first_seen is None:
+                first_seen = now
+                browser = self.require_browser()
+                LOGGER.warning(
+                    "Google CAPTCHA/block detected — notifying Slack. "
+                    "VNC in to solve. context=%s url=%s reason=%s",
+                    context,
+                    browser.current_url[:120],
+                    blocked_reason,
+                )
+                notify_google_captcha(
+                    url=browser.current_url or "",
+                    context=context,
+                    batch_id=batch_id,
+                )
+                last_log = now
+            elif now - last_log >= LOG_INTERVAL:
+                elapsed = int(now - first_seen)
+                remaining = int(deadline - now)
+                LOGGER.warning(
+                    "Google CAPTCHA still active — waiting for VNC resolution. "
+                    "elapsed=%ss remaining=%ss context=%s",
+                    elapsed,
+                    remaining,
+                    context,
+                )
+                last_log = now
+
+            time.sleep(5)
+
+        elapsed = int(time.time() - (first_seen or time.time()))
+        raise RuntimeError(
+            f"Google CAPTCHA not resolved within {wait_seconds}s — aborting run. "
+            f"context={context} elapsed={elapsed}s"
+        )
 
 
 # Extracts sidebar sources that are NEW since the last extraction pass.

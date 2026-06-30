@@ -31,6 +31,7 @@ If `$ARGUMENTS` contains `--monitor`, extract these values:
 - `prev_output_counts` — (optional) `index:last24h_total` pairs from previous iteration, e.g. `9:42,5:21`
 - `zero_output_accounts` — (optional) `index:consecutive_zero_iterations` pairs, e.g. `8:1,5:2`
 - `prev_model_counts` — (optional) `model:unique_done` pairs from previous iteration, e.g. `gpt-5-5:333,gpt-5-3-mini:635`
+- `consecutive_zero_replacements` — (optional) integer: how many consecutive iterations had Δ=0 AND a replacement was dispatched this iteration (for Google AIO cooldown logic)
 
 Then run one monitoring iteration:
 
@@ -70,6 +71,15 @@ FROM prompts_outputs
 WHERE batch_id = '<batch_id>' AND active = true
 GROUP BY llm_model;
 ```
+
+For **google-ai-overview** batches also query last-output age — if >20 min while flows are RUNNING, treat as a stall even if Δ is from a previous check:
+```sql
+SELECT
+  EXTRACT(EPOCH FROM (NOW() - MAX(run_at))) / 60 AS minutes_since_last_output
+FROM prompts_outputs
+WHERE batch_id = '<batch_id>' AND active = true AND llm_model = 'google-ai-overview';
+```
+If `minutes_since_last_output > 20` and there are active RUNNING flows, show `⚠ STALL DETECTED: no new outputs in <N> min`. This catches stalls within the current 5-min polling window rather than waiting for 2 consecutive Δ=0 checks.
 
 Get total prompts in batch:
 ```sql
@@ -364,6 +374,44 @@ Fully complete:  218 / 759   Δ+10
 Show `⚠ STALLED` if any required model had Δ=0 this iteration. If Δ=0 for 2 consecutive
 iterations on the same model, escalate: `🚨 STALLED 2 ITERATIONS — consider forced rotation`.
 
+#### Google AIO auto-cooldown (extraction_type=google-ai-overview only)
+
+Track `consecutive_zero_replacements` across monitor iterations. This counter increments when:
+- Δ=0 for **all** models this iteration, AND
+- At least 1 replacement flow was dispatched in **this** iteration (i.e., flows crashed/failed and were replaced)
+
+Reset the counter to 0 when Δ>0 for any model.
+
+```python
+prev_czr = int(consecutive_zero_replacements or 0)
+replacements_dispatched_this_iter = (number of new flows dispatched in Step 4)
+all_delta_zero = all(d == 0 for d in delta.values())
+
+if all_delta_zero and replacements_dispatched_this_iter > 0:
+    new_czr = prev_czr + 1
+else:
+    new_czr = 0  # reset
+```
+
+**Threshold: if `new_czr >= 2`** → auto-cooldown:
+1. Stop ALL machines: `flyctl machines stop <machine_id> -a <app>` for each in `machines=`
+2. Run this Python to send the Slack cooldown notification:
+```python
+import os, sys
+sys.path.insert(0, '.')
+from automated_extraction.notifications import notify_google_cooldown
+notify_google_cooldown(
+    batch_id='<batch_id>',
+    app='<app>',
+    machine_ids=['<m1>', '<m2>', ...],
+    reason='2 consecutive replacement cycles with zero new outputs — Google IP block suspected',
+)
+```
+3. Do **NOT** call ScheduleWakeup — end the monitor loop. The operator resumes manually with `/dispatch --monitor ...` once conditions improve.
+4. Print: `❄️ Auto-cooldown triggered: stopped all machines. Resume with /dispatch when ready.`
+
+Pass `consecutive_zero_replacements=<new_czr>` in the ScheduleWakeup prompt (omit when 0).
+
 Account pool (last 24h):
 ```
 #   Email                  Status     Worker            24h-55  24h-mini  Total  55%    Zero-iters
@@ -432,12 +480,13 @@ Call ScheduleWakeup with the **updated** flow run IDs (use reconciled IDs from S
 
 - `delaySeconds`: 300
 - `reason`: "Polling batch <batch_id> — <done> / <total> complete, <N> flows active"
-- `prompt`: `/dispatch --monitor batch_id=<batch_id> flow_runs=<reconciled_ids> machines=<machines> worker_count=<N> extraction_type=<type> deployment_id=<id> app=<app> work_pool=<work_pool> required_models=<models> prev_output_counts=<index:total,...> zero_output_accounts=<index:count,...> prev_model_counts=<model:done,...>`
+- `prompt`: `/dispatch --monitor batch_id=<batch_id> flow_runs=<reconciled_ids> machines=<machines> worker_count=<N> extraction_type=<type> deployment_id=<id> app=<app> work_pool=<work_pool> required_models=<models> prev_output_counts=<index:total,...> zero_output_accounts=<index:count,...> prev_model_counts=<model:done,...> consecutive_zero_replacements=<N>`
 
 Omit `required_models` from the prompt if the batch doesn't have them.
 Include `work_pool` so the heartbeat check (step 3b) knows which pool to query (e.g. `gpt-extraction-uk`, `prompt-extraction-google-uk`).
 Omit `prev_output_counts`, `zero_output_accounts`, `prev_model_counts` if empty.
 Only include `zero_output_accounts` for accounts still in_use with non-zero counters (reset on rotation).
+Omit `consecutive_zero_replacements` if 0 or not applicable (non-Google AIO batches).
 
 ---
 

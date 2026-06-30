@@ -6,6 +6,20 @@ Tracked improvements for the prompt-extractor system. Items are grouped by theme
 
 ## ✅ Recently Fixed
 
+### Google AI Overview — CAPTCHA wait, no-output watchdog, auto-cooldown, timing jitter
+**Fixed:** 2026-06-30  
+**Files:** `automated_extraction/google_ai_overview_runner.py`, `automated_extraction/extraction.py`, `automated_extraction/notifications.py`, `.claude/skills/dispatch/SKILL.md`  
+**Details:** [docs/GOOGLE_AI_OVERVIEW_IMPROVEMENTS.md](GOOGLE_AI_OVERVIEW_IMPROVEMENTS.md)
+
+Following a 75-min silent stall during a live Range Rover batch run (both workers showed `RUNNING` but produced zero DB output), four improvements were added:
+
+1. **CAPTCHA Slack notify + VNC wait** — `detect_blocking_page()` now sends a Slack alert with a VNC deep-link and waits up to 10 min for the operator to solve it, then resumes automatically (mirrors GPT Cloudflare handling).
+2. **No-output watchdog** — after 10 consecutive non-triggered saves AND 15 min since last real AI Overview, the extraction job raises a sentinel error and exits cleanly so the monitor can restart.
+3. **Monitor auto-cooldown** — after 2 consecutive replacement cycles with Δ=0, the monitor stops all machines, sends a `❄️ cooldown` Slack alert, and ends the loop. Operator resumes manually once Google's block decays.
+4. **Timing jitter** — inter-prompt delay widened to 5–15s; added 2–6s pre-search jitter inside `run_prompt` to reduce detection fingerprint.
+
+---
+
 ### `completed_prompt_ids` / `_active_claimed_ids` — Supabase 1000-row limit
 **Fixed:** 2026-06-15  
 **Files:** `automated_extraction/supabase_prompt_outputs.py`
