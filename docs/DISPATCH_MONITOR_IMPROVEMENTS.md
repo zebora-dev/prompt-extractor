@@ -1,8 +1,13 @@
 # Dispatch Monitor — Reliability Fixes & Optimisations
 
-This document describes the 10 improvements made to the gpt-uk extraction dispatch loop
-(implemented in `.claude/skills/dispatch/SKILL.md`, `extraction.py`, `profile_manager.py`,
-and `migrations/003_profile_quality_aware_claiming.sql`).
+This document describes the 10 improvements made to the gpt-uk extraction dispatch loop.
+The current portable dispatch skill is documented in `docs/DISPATCH_SKILL.md`; monitor
+procedures now live in `.claude/skills/dispatch/references/monitor.md`, with shared helper
+scripts in `.claude/skills/dispatch/scripts/`. The original monolithic skill is preserved at
+`.claude/skills/dispatch/SKILL.original.md`.
+
+Related implementation files include `extraction.py`, `profile_manager.py`, and
+`migrations/003_profile_quality_aware_claiming.sql`.
 
 ---
 
@@ -172,7 +177,10 @@ naturally drains to the effective target. The report shows: `Scaling 3→1 worke
 
 | File | Change |
 |---|---|
-| `.claude/skills/dispatch/SKILL.md` | All 10 improvements — monitor loop logic |
+| `.claude/skills/dispatch/SKILL.md` | Portable skill entrypoint and routing |
+| `.claude/skills/dispatch/references/monitor.md` | Monitor loop logic for the reliability improvements |
+| `.claude/skills/dispatch/scripts/` | Portable Prefect, Fly, Supabase, and monitor-prompt helpers |
+| `.claude/skills/dispatch/SKILL.original.md` | Backup of the original monolithic skill |
 | `automated_extraction/extraction.py` | Opt 2 session stats reporting; Opt 4 rolling rate detection |
 | `automated_extraction/profile_manager.py` | Opt 2 `acquire_profile_quality()`, `update_session_stats()`; Opt 3 TTL default |
 | `migrations/003_profile_quality_aware_claiming.sql` | Opt 2 new columns + RPCs; Opt 3 TTL defaults |

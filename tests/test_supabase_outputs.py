@@ -5,7 +5,9 @@ from __future__ import annotations
 from automated_extraction.supabase_prompt_outputs import (
     PROMPT_OUTPUT_COLUMNS,
     PROMPT_OUTPUT_INSERT_COLUMNS,
+    SupabasePromptOutputRepository,
     compact_row,
+    model_filter_matches_required_models,
     output_to_row,
     row_to_output,
 )
@@ -101,3 +103,36 @@ class TestRowToOutput:
         row = {"prompt_id": "p1", "brand_id": "b1", "batch_id": "ba1"}
         output = row_to_output(row)
         assert output["prompt_id"] == "p1"
+
+
+class TestRequiredModelFiltering:
+    def test_broad_gpt_filter_matches_required_gpt_models(self):
+        assert model_filter_matches_required_models("gpt", ["gpt-5-5", "gpt-5-3-mini"])
+
+    def test_google_ai_overview_filter_does_not_match_required_gpt_models(self):
+        assert not model_filter_matches_required_models(
+            "google-ai-overview",
+            ["gpt-5-5", "gpt-5-3-mini"],
+        )
+
+    def test_unrelated_filter_uses_own_model_outputs_not_required_model_completion(self):
+        class FakeRepository(SupabasePromptOutputRepository):
+            def _completed_output_ids(self, *, batch_id, brand_id, llm_model_filter):
+                assert batch_id == "batch-1"
+                assert brand_id == "brand-1"
+                assert llm_model_filter == "google-ai-overview"
+                return {"google-done"}
+
+            def _active_claimed_ids(self, *, batch_id, llm_model_filter):
+                assert batch_id == "batch-1"
+                assert llm_model_filter == "google-ai-overview"
+                return {"google-claimed"}
+
+        repo = FakeRepository.__new__(FakeRepository)
+
+        assert repo.completed_prompt_ids(
+            batch_id="batch-1",
+            brand_id="brand-1",
+            llm_model_filter="google-ai-overview",
+            required_models=["gpt-5-5", "gpt-5-3-mini"],
+        ) == {"google-done", "google-claimed"}
