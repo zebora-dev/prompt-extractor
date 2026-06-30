@@ -844,15 +844,17 @@ async def _start_nodriver(
 # ---------------------------------------------------------------------------
 
 
-def warmup_google_session(browser: NodriverBrowser, warmup_url: str = "https://www.google.com") -> None:
+def warmup_google_session(browser: NodriverBrowser, warmup_url: str = "https://www.google.com") -> str | None:
     """
-    Establish a natural-looking Google session before the first real search.
+    Establish a Google session before the first real search.
 
-    Steps:
-    1. Visit the homepage and pause briefly.
-    2. Dismiss any cookie consent overlays.
-    3. Type a benign warmup query into the search box character-by-character.
-    4. Submit and wait for the results page to load.
+    Visits the homepage to pick up cookies and dismisses any consent overlays.
+    Returns a blocking reason string if Google is already blocking this IP/session
+    on the homepage (caller should treat this as an early block signal), or None if clean.
+
+    Note: we deliberately do NOT submit a warmup search query. An extra benign
+    search before the real prompts adds another fingerprint event and risks
+    triggering a block before any real work is done.
     """
     try:
         LOGGER.info("Warming up Google session via %s", warmup_url)
@@ -863,30 +865,18 @@ def warmup_google_session(browser: NodriverBrowser, warmup_url: str = "https://w
         _dismiss_google_overlays(browser, origin_url=current_url)
         _log_page_state(browser, "warmup: after overlay dismissal")
 
-        search_box = None
-        for css in ("textarea[name='q']", "input[name='q']"):
-            elems = browser.find_elements_by_css(css)
-            if elems:
-                search_box = elems[0]
-                break
+        # Early block detection — check before any real searches run.
+        current_url_lower = (browser.current_url or "").lower()
+        blocking_url_patterns = ["google.com/sorry", "recaptcha", "captcha"]
+        if any(p in current_url_lower for p in blocking_url_patterns):
+            LOGGER.warning("Warmup: blocking URL detected on homepage — %s", browser.current_url)
+            return current_url_lower
 
-        if search_box is None:
-            LOGGER.warning("Warmup: could not find search box — skipping warmup query.")
-            return
-
-        search_box.click()
-        time.sleep(random.uniform(0.3, 0.6))
-        warmup_query = random.choice(_WARMUP_QUERIES)
-        LOGGER.info("Typing warmup query: %r", warmup_query)
-        search_box.send_keys(warmup_query)
-        time.sleep(random.uniform(0.4, 0.9))
-
-        # Press Enter
-        _press_enter(browser)
-        time.sleep(random.uniform(2.5, 4.0))
-        LOGGER.info("Warmup search complete.")
+        LOGGER.info("Warmup complete — session ready, no block detected.")
+        return None
     except Exception as exc:
         LOGGER.warning("Session warmup failed (non-fatal): %s", exc)
+        return None
 
 
 def _log_page_state(browser: NodriverBrowser, label: str) -> str:

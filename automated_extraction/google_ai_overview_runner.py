@@ -108,8 +108,13 @@ class GoogleAIOverviewRunner:
             headless=self.headless,
             proxy_url=self.proxy_url,
         )
-        warmup_google_session(self.browser)
-        LOGGER.info("GoogleAIOverviewRunner ready.")
+        blocked = warmup_google_session(self.browser)
+        if blocked:
+            LOGGER.warning(
+                "GoogleAIOverviewRunner: blocking page on warmup — will check again before first prompt. reason=%s",
+                blocked,
+            )
+        LOGGER.info("GoogleAIOverviewRunner ready. warmup_blocked=%s", bool(blocked))
 
     def close(self) -> None:
         if self.browser:
@@ -120,7 +125,7 @@ class GoogleAIOverviewRunner:
         browser = self.require_browser()
         # Randomised pre-search pause to vary timing fingerprint (reduces detection).
         pre_delay = random.uniform(2.0, 6.0)
-        LOGGER.debug("Pre-search jitter: sleeping %.1fs.", pre_delay)
+        LOGGER.info("Pre-search jitter: sleeping %.1fs. prompt=%s", pre_delay, prompt_text[:60])
         time.sleep(pre_delay)
         LOGGER.info("Searching via box for AI Overview: %s", prompt_text[:80])
         t0 = time.time()

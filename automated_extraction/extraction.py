@@ -854,6 +854,8 @@ def run_google_ai_overview_extraction_job(
     use_proxy: bool = False,
     paa_titles_only: bool = True,
     measurements_filter: str | None = None,
+    max_rounds_per_session: int = 1,
+    delay_between_rounds: int = 60,
 ) -> ExtractionRunResult:
     if not batch_id and not prompts_file:
         raise ValueError("one of batch_id or prompts_file is required")
@@ -926,13 +928,32 @@ def run_google_ai_overview_extraction_job(
     last_triggered_at: float | None = None
     consecutive_no_trigger: int = 0
 
+    # Cold-start watchdog: if we've NEVER triggered an AI Overview in this session and
+    # have already attempted N prompts, Google is likely blocking from the very first search.
+    COLD_START_WATCHDOG_MIN_CONSECUTIVE = 15
+
+    # Prefect-visible logger — surfaces key events in the Prefect UI task log.
+    try:
+        from prefect import get_run_logger as _get_run_logger
+        prefect_logger = _get_run_logger()
+    except Exception:
+        prefect_logger = LOGGER
+
     proxy_url = resolve_proxy_url(use_proxy)
     LOGGER.info(
-        "Starting Google AI Overview browser session. chrome_user_data_dir=%s headless=%s country=%s language=%s proxy=%s",
+        "Starting Google AI Overview browser session. chrome_user_data_dir=%s headless=%s country=%s language=%s proxy=%s max_rounds=%s",
         resolved_chrome_user_data_dir,
         headless if headless is not None else settings.headless,
         resolved_country or "<default>",
         resolved_language,
+        "yes" if proxy_url else "no",
+        max_rounds_per_session,
+    )
+    prefect_logger.info(
+        "Chrome starting. batch_id=%s prompts=%s rounds_planned=%s proxy=%s",
+        resolved_batch_id or "local",
+        len(prompts),
+        max_rounds_per_session,
         "yes" if proxy_url else "no",
     )
 
@@ -945,173 +966,250 @@ def run_google_ai_overview_extraction_job(
         language=resolved_language,
         proxy_url=proxy_url,
     ) as runner:
-        for index, prompt in enumerate(prompts, start=1):
-            prompt_id = str(prompt.get("id") or "")
-            prompt_brand_id = str(prompt.get("brand_id") or resolved_brand_id or "")
-            if not prompt_id or not prompt_brand_id:
-                skipped_count += 1
-                LOGGER.warning("Skipping Google AI Overview prompt missing id or brand_id: %s", prompt)
-                continue
+        prefect_logger.info("Chrome ready — beginning extraction.")
+        current_prompts = prompts
 
-            existing_output = (
-                None
-                if force_rerun
-                else api.find_existing_prompt_output(
-                    prompt_id,
-                    prompt_brand_id,
-                    resolved_batch_id,
+        for round_num in range(1, max_rounds_per_session + 1):
+            if round_num > 1:
+                # Reload remaining prompts for subsequent rounds.
+                current_prompts, _, _ = load_prompt_work(
+                    api=api,
+                    batch_id=batch_id,
+                    prompts_file=prompts_file,
+                    brand_id=brand_id,
+                    only_remaining=not force_rerun,
                     llm_model_filter=llm_model_filter,
+                    measurements_filter=measurements_filter,
                 )
-            )
-            if existing_output:
-                skipped_count += 1
-                LOGGER.info(
-                    "[%s/%s] Skipping existing Google AI Overview output for prompt %s. output_id=%s llm_model=%s run_at=%s",
-                    index,
-                    len(prompts),
-                    prompt_id,
-                    existing_output.get("output_id") or existing_output.get("id"),
-                    existing_output.get("llm_model"),
-                    existing_output.get("run_at"),
+                if limit:
+                    current_prompts = current_prompts[:limit]
+                if not current_prompts:
+                    prefect_logger.info("Round %s/%s: no remaining prompts — ending session.", round_num, max_rounds_per_session)
+                    LOGGER.info("Round %s: no remaining prompts — ending session.", round_num)
+                    break
+                prefect_logger.info(
+                    "Round %s/%s: pausing %ss then continuing with same Chrome session. prompts=%s",
+                    round_num, max_rounds_per_session, delay_between_rounds, len(current_prompts),
                 )
-                continue
+                LOGGER.info("Round %s: pausing %ss before continuing with same browser.", round_num, delay_between_rounds)
+                time.sleep(delay_between_rounds)
 
-            if not force_rerun:
-                claimed = api.try_claim_prompt(
-                    prompt_id,
-                    resolved_batch_id,
-                    prompt_brand_id,
-                    llm_model_filter or "google-ai-overview",
-                    WORKER_ID,
+            round_triggered = 0
+            round_saved = 0
+            prefect_logger.info(
+                "Round %s/%s starting. prompts=%s",
+                round_num, max_rounds_per_session, len(current_prompts),
+            )
+
+            for index, prompt in enumerate(current_prompts, start=1):
+                prompt_id = str(prompt.get("id") or "")
+                prompt_brand_id = str(prompt.get("brand_id") or resolved_brand_id or "")
+                if not prompt_id or not prompt_brand_id:
+                    skipped_count += 1
+                    LOGGER.warning("Skipping Google AI Overview prompt missing id or brand_id: %s", prompt)
+                    continue
+
+                existing_output = (
+                    None
+                    if force_rerun
+                    else api.find_existing_prompt_output(
+                        prompt_id,
+                        prompt_brand_id,
+                        resolved_batch_id,
+                        llm_model_filter=llm_model_filter,
+                    )
                 )
-                if not claimed:
+                if existing_output:
+                    skipped_count += 1
                     LOGGER.info(
-                        "[%s/%s] Google AI Overview prompt %s already claimed by another worker — skipping.",
+                        "[%s/%s] Skipping existing Google AI Overview output for prompt %s. output_id=%s llm_model=%s run_at=%s",
                         index,
                         len(prompts),
                         prompt_id,
+                        existing_output.get("output_id") or existing_output.get("id"),
+                        existing_output.get("llm_model"),
+                        existing_output.get("run_at"),
                     )
-                    skipped_count += 1
                     continue
 
-            text = prompt_text(prompt)
-            LOGGER.info("[%s/%s] Running Google AI Overview prompt %s", index, len(prompts), prompt_id)
-            try:
-                capture = runner.run_prompt(text)
-                output = build_google_ai_overview_prompt_output(
-                    prompt,
-                    capture.response,
-                    capture.markdown,
-                    capture.capture_method,
-                    capture.markdown_capture_method,
-                    capture.raw_html,
-                    capture.raw_html_capture_method,
-                    capture.llm_model,
-                    capture.url,
-                    resolved_batch_id,
-                    capture.sources,
-                    capture.source_capture_method,
-                    ai_overview_triggered=capture.ai_overview_triggered,
-                    capture_state=capture.capture_state,
-                    error=capture.error,
-                    country=resolved_country,
-                    language=resolved_language,
-                )
-                # Record proxy bytes for cost attribution.
-                proxy_bytes = runner.browser.take_proxy_bytes() if runner.browser else 0
-                if isinstance(output.get("output_metadata"), dict):
-                    output["output_metadata"]["proxy_usage"] = {
-                        "bytes_transferred": proxy_bytes,
-                        "use_proxy": bool(proxy_url),
-                        "provider": "dataimpulse" if proxy_url else None,
-                    }
-                saved = api.save_prompt_output(output)
-                saved_count += 1
-                saved_output = normalize_saved_output(saved, output)
-                saved_outputs.append(saved_output)
-                LOGGER.info(
-                    "[%s/%s] Saved Google AI Overview output for prompt %s. output_id=%s triggered=%s response_length=%s source_count=%s state=%s",
-                    index,
-                    len(prompts),
-                    prompt_id,
-                    saved_output.get("output_id"),
-                    capture.ai_overview_triggered,
-                    len(capture.response or ""),
-                    len(capture.sources or []),
-                    capture.capture_state,
-                )
-                if capture.ai_overview_triggered:
-                    last_triggered_at = time.time()
-                    consecutive_no_trigger = 0
-                else:
-                    consecutive_no_trigger += 1
-                    if (
-                        last_triggered_at is not None
-                        and consecutive_no_trigger >= NO_TRIGGER_WATCHDOG_MIN_CONSECUTIVE
-                        and time.time() - last_triggered_at > NO_TRIGGER_WATCHDOG_SECONDS
-                    ):
-                        raise RuntimeError(
-                            f"no_overview_watchdog: {consecutive_no_trigger} consecutive non-triggered prompts, "
-                            f"{int(time.time() - last_triggered_at)}s since last AI Overview — aborting to allow restart"
-                        )
-                suggestion_count = _capture_and_save_suggestions(
-                    api=api,
-                    driver=runner.driver,
-                    saved_output=saved_output,
-                    prompt=prompt,
-                    batch_id=resolved_batch_id,
-                    llm_model="google-ai-overview",
-                    index=index,
-                    total=len(prompts),
-                    paa_titles_only=paa_titles_only,
-                )
-                if suggestion_count > 0:
-                    current_metadata = (
-                        output.get("output_metadata") if isinstance(output.get("output_metadata"), dict) else {}
+                if not force_rerun:
+                    claimed = api.try_claim_prompt(
+                        prompt_id,
+                        resolved_batch_id,
+                        prompt_brand_id,
+                        llm_model_filter or "google-ai-overview",
+                        WORKER_ID,
                     )
-                    try:
-                        api.update_prompt_output(
-                            saved_output,
-                            {
-                                "output_metadata": {**current_metadata, "suggestion_count": suggestion_count},
-                            },
-                        )
-                    except Exception as patch_exc:
-                        LOGGER.warning(
-                            "[%s/%s] Could not patch suggestion_count for prompt %s: %s",
+                    if not claimed:
+                        LOGGER.info(
+                            "[%s/%s] Google AI Overview prompt %s already claimed by another worker — skipping.",
                             index,
                             len(prompts),
                             prompt_id,
-                            patch_exc,
                         )
-            except Exception as exc:
-                if str(exc).startswith("no_overview_watchdog:"):
-                    # Watchdog triggered — propagate immediately so the batch flow can restart.
-                    LOGGER.error(
-                        "[%s/%s] No-overview watchdog triggered — aborting extraction run. prompt_id=%s reason=%s",
-                        index, len(prompts), prompt_id, exc,
-                    )
-                    raise
-                failed_count += 1
-                failure = {"prompt_id": prompt_id, "brand_id": prompt_brand_id, "error": str(exc)}
-                failures.append(failure)
-                LOGGER.exception("[%s/%s] Google AI Overview prompt %s failed: %s", index, len(prompts), prompt_id, exc)
-                if not force_rerun:
-                    api.release_claim(
-                        prompt_id,
-                        resolved_batch_id,
-                        llm_model_filter or "google-ai-overview",
-                        error_message=str(exc)[:500],
-                    )
-            else:
-                if not force_rerun:
-                    api.complete_claim(prompt_id, resolved_batch_id, llm_model_filter or "google-ai-overview")
+                        skipped_count += 1
+                        continue
 
-            if index < len(prompts):
-                # Wider jitter (5–15s) to reduce Google rate-limit detection fingerprint.
-                delay = random.uniform(5.0, 15.0)
-                LOGGER.info("[%s/%s] Pausing %.1fs before next prompt.", index, len(prompts), delay)
-                time.sleep(delay)
+                text = prompt_text(prompt)
+                LOGGER.info("[%s/%s] Running Google AI Overview prompt %s", index, len(current_prompts), prompt_id)
+                prefect_logger.info("[r%s %s/%s] Searching: %s", round_num, index, len(current_prompts), text[:80])
+                try:
+                    capture = runner.run_prompt(text)
+                    output = build_google_ai_overview_prompt_output(
+                        prompt,
+                        capture.response,
+                        capture.markdown,
+                        capture.capture_method,
+                        capture.markdown_capture_method,
+                        capture.raw_html,
+                        capture.raw_html_capture_method,
+                        capture.llm_model,
+                        capture.url,
+                        resolved_batch_id,
+                        capture.sources,
+                        capture.source_capture_method,
+                        ai_overview_triggered=capture.ai_overview_triggered,
+                        capture_state=capture.capture_state,
+                        error=capture.error,
+                        country=resolved_country,
+                        language=resolved_language,
+                    )
+                    # Record proxy bytes for cost attribution.
+                    proxy_bytes = runner.browser.take_proxy_bytes() if runner.browser else 0
+                    if isinstance(output.get("output_metadata"), dict):
+                        output["output_metadata"]["proxy_usage"] = {
+                            "bytes_transferred": proxy_bytes,
+                            "use_proxy": bool(proxy_url),
+                            "provider": "dataimpulse" if proxy_url else None,
+                        }
+                    saved = api.save_prompt_output(output)
+                    saved_count += 1
+                    round_saved += 1
+                    saved_output = normalize_saved_output(saved, output)
+                    saved_outputs.append(saved_output)
+                    LOGGER.info(
+                        "[%s/%s] Saved Google AI Overview output for prompt %s. output_id=%s triggered=%s response_length=%s source_count=%s state=%s",
+                        index,
+                        len(current_prompts),
+                        prompt_id,
+                        saved_output.get("output_id"),
+                        capture.ai_overview_triggered,
+                        len(capture.response or ""),
+                        len(capture.sources or []),
+                        capture.capture_state,
+                    )
+                    prefect_logger.info(
+                        "[r%s %s/%s] Saved. triggered=%s state=%s sources=%s",
+                        round_num, index, len(current_prompts),
+                        capture.ai_overview_triggered,
+                        capture.capture_state,
+                        len(capture.sources or []),
+                    )
+                    if capture.ai_overview_triggered:
+                        last_triggered_at = time.time()
+                        consecutive_no_trigger = 0
+                        round_triggered += 1
+                    else:
+                        consecutive_no_trigger += 1
+                        if (
+                            last_triggered_at is not None
+                            and consecutive_no_trigger >= NO_TRIGGER_WATCHDOG_MIN_CONSECUTIVE
+                            and time.time() - last_triggered_at > NO_TRIGGER_WATCHDOG_SECONDS
+                        ):
+                            raise RuntimeError(
+                                f"no_overview_watchdog: {consecutive_no_trigger} consecutive non-triggered prompts, "
+                                f"{int(time.time() - last_triggered_at)}s since last AI Overview — aborting to allow restart"
+                            )
+                        # Cold-start watchdog: never had a trigger AND already past threshold.
+                        if (
+                            last_triggered_at is None
+                            and consecutive_no_trigger >= COLD_START_WATCHDOG_MIN_CONSECUTIVE
+                        ):
+                            raise RuntimeError(
+                                f"no_overview_watchdog: {consecutive_no_trigger} consecutive non-triggered prompts "
+                                f"with zero successful AI Overviews — Google likely blocking from start, aborting"
+                            )
+                    suggestion_count = _capture_and_save_suggestions(
+                        api=api,
+                        driver=runner.driver,
+                        saved_output=saved_output,
+                        prompt=prompt,
+                        batch_id=resolved_batch_id,
+                        llm_model="google-ai-overview",
+                        index=index,
+                        total=len(prompts),
+                        paa_titles_only=paa_titles_only,
+                    )
+                    if suggestion_count > 0:
+                        current_metadata = (
+                            output.get("output_metadata") if isinstance(output.get("output_metadata"), dict) else {}
+                        )
+                        try:
+                            api.update_prompt_output(
+                                saved_output,
+                                {
+                                    "output_metadata": {**current_metadata, "suggestion_count": suggestion_count},
+                                },
+                            )
+                        except Exception as patch_exc:
+                            LOGGER.warning(
+                                "[%s/%s] Could not patch suggestion_count for prompt %s: %s",
+                                index,
+                                len(prompts),
+                                prompt_id,
+                                patch_exc,
+                            )
+                except Exception as exc:
+                    if str(exc).startswith("no_overview_watchdog:"):
+                        # Watchdog triggered — propagate immediately so the batch flow can restart.
+                        LOGGER.error(
+                            "[%s/%s] No-overview watchdog triggered — aborting extraction run. prompt_id=%s reason=%s",
+                            index, len(current_prompts), prompt_id, exc,
+                        )
+                        prefect_logger.error("Watchdog triggered — aborting. reason=%s", exc)
+                        raise
+                    failed_count += 1
+                    failure = {"prompt_id": prompt_id, "brand_id": prompt_brand_id, "error": str(exc)}
+                    failures.append(failure)
+                    LOGGER.exception("[%s/%s] Google AI Overview prompt %s failed: %s", index, len(current_prompts), prompt_id, exc)
+                    prefect_logger.warning("[r%s %s/%s] FAILED prompt=%s: %s", round_num, index, len(current_prompts), prompt_id, str(exc)[:120])
+                    if not force_rerun:
+                        api.release_claim(
+                            prompt_id,
+                            resolved_batch_id,
+                            llm_model_filter or "google-ai-overview",
+                            error_message=str(exc)[:500],
+                        )
+                else:
+                    if not force_rerun:
+                        api.complete_claim(prompt_id, resolved_batch_id, llm_model_filter or "google-ai-overview")
+
+                if index < len(current_prompts):
+                    # Wider jitter (5–15s) to reduce Google rate-limit detection fingerprint.
+                    delay = random.uniform(5.0, 15.0)
+                    LOGGER.info("[%s/%s] Pausing %.1fs before next prompt.", index, len(current_prompts), delay)
+                    time.sleep(delay)
+
+                # End of prompt loop for this round.
+
+            # Round complete — log summary and decide whether to continue the session.
+            prefect_logger.info(
+                "Round %s/%s complete. saved=%s triggered=%s total_saved_so_far=%s",
+                round_num, max_rounds_per_session, round_saved, round_triggered, saved_count,
+            )
+            LOGGER.info(
+                "Round %s complete. saved=%s triggered=%s total_saved=%s",
+                round_num, round_saved, round_triggered, saved_count,
+            )
+            if round_triggered == 0 and round_num < max_rounds_per_session:
+                prefect_logger.warning(
+                    "Round %s had zero AI Overview triggers — ending session early to avoid wasting a blocked session.",
+                    round_num,
+                )
+                LOGGER.warning("Round %s: zero triggers — ending session early.", round_num)
+                break
+
+            # End of round loop.
 
         if debug_pause_seconds > 0:
             LOGGER.info("Debug pause: browser staying open for %s seconds. Inspect at will.", debug_pause_seconds)
