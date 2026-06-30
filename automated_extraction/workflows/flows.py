@@ -1368,17 +1368,21 @@ def google_ai_overview_extraction_batch_flow(
         measurements_filter=measurements_filter,
     )
     remaining_count = max(0, len(remaining_prompts) - skip)
-    run_count = math.ceil(remaining_count / limit) if remaining_count else 0
+    # Each subflow call runs up to limit * max_rounds_per_session prompts in one Chrome session.
+    prompts_per_session = limit * max_rounds_per_session
+    run_count = math.ceil(remaining_count / prompts_per_session) if remaining_count else 0
     if max_prompts is not None:
-        run_count = min(run_count, math.ceil(max_prompts / limit))
+        run_count = min(run_count, math.ceil(max_prompts / prompts_per_session))
     flow_logger.info(
-        "Starting sequential Google AI Overview batch. batch_id=%s brand_id=%s model_filter=%s remaining_count=%s skip=%s limit_per_run=%s planned_runs=%s delay_seconds=%s country=%s language=%s use_proxy=%s max_prompts=%s measurements_filter=%s",
+        "Starting sequential Google AI Overview batch. batch_id=%s brand_id=%s model_filter=%s remaining_count=%s skip=%s limit_per_run=%s max_rounds_per_session=%s prompts_per_session=%s planned_runs=%s delay_seconds=%s country=%s language=%s use_proxy=%s max_prompts=%s measurements_filter=%s",
         batch_id,
         brand_id,
         model_filter or "any",
         remaining_count,
         skip,
         limit,
+        max_rounds_per_session,
+        prompts_per_session,
         run_count,
         delay_seconds,
         country or "<env>",
