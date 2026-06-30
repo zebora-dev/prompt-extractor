@@ -15,11 +15,11 @@ from .api_client import ApiClient
 from .chatgpt_runner import ChatGPTRunner
 from .claude_runner import ClaudeRunner
 from .config import Settings
-from .llm_api_runner import LLMApiRunner
-from .perplexity_runner import PerplexityRunner
 from .google_ai_mode_runner import GoogleAIModeRunner
 from .google_ai_overview_runner import GoogleAIOverviewRunner
 from .google_suggestions_runner import capture_people_also_ask
+from .llm_api_runner import LLMApiRunner
+from .perplexity_runner import PerplexityRunner
 
 LOGGER = logging.getLogger(__name__)
 
@@ -56,8 +56,9 @@ def _emit_session_stats(
     if chrome_profile_index is None or saved_count <= 0:
         return
     try:
-        from automated_extraction.profile_manager import update_session_stats
         import os
+
+        from automated_extraction.profile_manager import update_session_stats
         update_session_stats(
             int(chrome_profile_index),
             os.environ.get("FLY_MACHINE_ID", "local"),
@@ -918,6 +919,13 @@ def run_google_ai_overview_extraction_job(
     resolved_language = language or settings.google_language
     from .google_chrome_factory import resolve_proxy_url
 
+    # Watchdog: abort if no AI Overview trigger in 15 minutes AND 10+ consecutive misses.
+    # Prevents silent hangs where every prompt returns "no AI Overview" (Google blocking).
+    NO_TRIGGER_WATCHDOG_SECONDS = 900  # 15 minutes
+    NO_TRIGGER_WATCHDOG_MIN_CONSECUTIVE = 10
+    last_triggered_at: float | None = None
+    consecutive_no_trigger: int = 0
+
     proxy_url = resolve_proxy_url(use_proxy)
     LOGGER.info(
         "Starting Google AI Overview browser session. chrome_user_data_dir=%s headless=%s country=%s language=%s proxy=%s",
@@ -1032,6 +1040,20 @@ def run_google_ai_overview_extraction_job(
                     len(capture.sources or []),
                     capture.capture_state,
                 )
+                if capture.ai_overview_triggered:
+                    last_triggered_at = time.time()
+                    consecutive_no_trigger = 0
+                else:
+                    consecutive_no_trigger += 1
+                    if (
+                        last_triggered_at is not None
+                        and consecutive_no_trigger >= NO_TRIGGER_WATCHDOG_MIN_CONSECUTIVE
+                        and time.time() - last_triggered_at > NO_TRIGGER_WATCHDOG_SECONDS
+                    ):
+                        raise RuntimeError(
+                            f"no_overview_watchdog: {consecutive_no_trigger} consecutive non-triggered prompts, "
+                            f"{int(time.time() - last_triggered_at)}s since last AI Overview — aborting to allow restart"
+                        )
                 suggestion_count = _capture_and_save_suggestions(
                     api=api,
                     driver=runner.driver,
@@ -1063,6 +1085,13 @@ def run_google_ai_overview_extraction_job(
                             patch_exc,
                         )
             except Exception as exc:
+                if str(exc).startswith("no_overview_watchdog:"):
+                    # Watchdog triggered — propagate immediately so the batch flow can restart.
+                    LOGGER.error(
+                        "[%s/%s] No-overview watchdog triggered — aborting extraction run. prompt_id=%s reason=%s",
+                        index, len(prompts), prompt_id, exc,
+                    )
+                    raise
                 failed_count += 1
                 failure = {"prompt_id": prompt_id, "brand_id": prompt_brand_id, "error": str(exc)}
                 failures.append(failure)
@@ -1079,7 +1108,8 @@ def run_google_ai_overview_extraction_job(
                     api.complete_claim(prompt_id, resolved_batch_id, llm_model_filter or "google-ai-overview")
 
             if index < len(prompts):
-                delay = random.uniform(3.0, 7.0)
+                # Wider jitter (5–15s) to reduce Google rate-limit detection fingerprint.
+                delay = random.uniform(5.0, 15.0)
                 LOGGER.info("[%s/%s] Pausing %.1fs before next prompt.", index, len(prompts), delay)
                 time.sleep(delay)
 
