@@ -8,7 +8,7 @@ Tracked improvements for the prompt-extractor system. Items are grouped by theme
 
 ### Google AI Overview — CAPTCHA wait, no-output watchdog, auto-cooldown, timing jitter
 **Fixed:** 2026-06-30  
-**Files:** `automated_extraction/google_ai_overview_runner.py`, `automated_extraction/extraction.py`, `automated_extraction/notifications.py`, `.claude/skills/dispatch/SKILL.md`  
+**Files:** `automated_extraction/google_ai_overview_runner.py`, `automated_extraction/extraction.py`, `automated_extraction/notifications.py`, `.claude/skills/dispatch/references/monitor.md`
 **Details:** [docs/GOOGLE_AI_OVERVIEW_IMPROVEMENTS.md](GOOGLE_AI_OVERVIEW_IMPROVEMENTS.md)
 
 Following a 75-min silent stall during a live Range Rover batch run (both workers showed `RUNNING` but produced zero DB output), four improvements were added:
@@ -207,4 +207,3 @@ Build a Claude extraction runner mirroring the existing ChatGPT flow:
 - Considerations: Claude.ai rate limits, session handling, response format differences vs ChatGPT
 
 ---
-

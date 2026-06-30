@@ -149,6 +149,12 @@ PROMPT_OUTPUT_SUGGESTION_COLUMNS = tuple(field.name for field in fields(PromptOu
 PROMPT_OUTPUT_SUGGESTION_INSERT_COLUMNS = tuple(column for column in PROMPT_OUTPUT_SUGGESTION_COLUMNS if column != "id")
 
 
+def model_filter_matches_required_models(llm_model_filter: str, required_models: list[str]) -> bool:
+    """Return True when a broad filter applies to the batch required models."""
+    needle = llm_model_filter.lower()
+    return any(needle in model.lower() or model.lower() in needle for model in required_models)
+
+
 @dataclass(frozen=True)
 class SupabasePromptOutputRepository:
     supabase_url: str
@@ -262,6 +268,24 @@ class SupabasePromptOutputRepository:
         When absent, falls back to the existing ILIKE behaviour on
         ``llm_model_filter``.
         """
+        if required_models and llm_model_filter and not model_filter_matches_required_models(
+            llm_model_filter, required_models
+        ):
+            LOGGER.info(
+                "Ignoring batch required_models for unrelated extractor. "
+                "llm_model_filter=%s required_models=%s batch_id=%s brand_id=%s",
+                llm_model_filter,
+                required_models,
+                batch_id,
+                brand_id,
+            )
+            done_ids = self._completed_output_ids(
+                batch_id=batch_id,
+                brand_id=brand_id,
+                llm_model_filter=llm_model_filter,
+            )
+            return done_ids | self._active_claimed_ids(batch_id=batch_id, llm_model_filter=llm_model_filter)
+
         if required_models:
             # Per-model exact-match sets; intersection = prompts with ALL models.
             # Paginate in pages of 1000 — Supabase enforces a server-side 1000-row cap
@@ -300,18 +324,6 @@ class SupabasePromptOutputRepository:
                 batch_id,
                 brand_id,
             )
-            # If this extractor's llm_model_filter is not in required_models (e.g. running
-            # google-ai-overview on a batch whose required_models are gpt variants), also
-            # mark prompts that already have an output for this extractor as complete so they
-            # are not reloaded and immediately skipped.
-            if llm_model_filter and not any(
-                llm_model_filter.lower() in m.lower() or m.lower() in llm_model_filter.lower()
-                for m in required_models
-            ):
-                already_done = self._completed_output_ids(
-                    batch_id=batch_id, brand_id=brand_id, llm_model_filter=llm_model_filter
-                )
-                complete = complete | already_done
             # Also exclude any prompts currently claimed by another worker.
             return complete | self._active_claimed_ids(batch_id=batch_id, llm_model_filter=llm_model_filter)
 

@@ -99,7 +99,7 @@ omits AI Overviews — a state that was previously invisible to the pipeline.
 
 ### 3. Monitor-level auto-cooldown
 
-**File:** `.claude/skills/dispatch/SKILL.md`
+**File:** `.claude/skills/dispatch/references/monitor.md`
 
 The dispatch monitor tracks a new `consecutive_zero_replacements` counter across iterations.
 It increments when:
@@ -121,7 +121,7 @@ clears (typically after 30–60 minutes).
 
 ### 4. Faster stall detection via last-output age query
 
-**File:** `.claude/skills/dispatch/SKILL.md`
+**File:** `.claude/skills/dispatch/references/monitor.md`
 
 For `google-ai-overview` batches, each monitor iteration now runs an additional query:
 
@@ -168,7 +168,7 @@ with significant variance between runs.
 | `automated_extraction/notifications.py` | New: `notify_google_captcha`, `notify_google_captcha_cleared`, `notify_google_cooldown` |
 | `automated_extraction/google_ai_overview_runner.py` | New: `wait_for_captcha_clear()` method; CAPTCHA handling in `run_prompt` and `wait_for_ai_overview`; timing jitter; `import random` |
 | `automated_extraction/extraction.py` | No-output watchdog counters + re-raise logic; wider inter-prompt delay |
-| `.claude/skills/dispatch/SKILL.md` | Auto-cooldown logic; last-output-age stall query; `consecutive_zero_replacements` param |
+| `.claude/skills/dispatch/references/monitor.md` | Auto-cooldown logic; last-output-age stall query; `consecutive_zero_replacements` param |
 
 ---
 

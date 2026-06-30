@@ -891,6 +891,17 @@ def run_google_ai_overview_extraction_job(
         not force_rerun,
         llm_model_filter or "any",
     )
+    if not prompts:
+        LOGGER.info(
+            "No Google AI Overview prompts loaded. batch_id=%s brand_id=%s only_remaining=%s "
+            "llm_model_filter=%s measurements_filter=%s. This means all prompts are complete "
+            "for this model or currently claimed; no browser scraping will be attempted.",
+            resolved_batch_id or "local",
+            resolved_brand_id or "mixed",
+            not force_rerun,
+            llm_model_filter or "any",
+            measurements_filter or "any",
+        )
 
     if dry_run:
         for prompt in prompts[:5]:
@@ -956,6 +967,28 @@ def run_google_ai_overview_extraction_job(
         max_rounds_per_session,
         "yes" if proxy_url else "no",
     )
+
+    if not prompts:
+        prefect_logger.info(
+            "No Google AI Overview prompts to scrape. batch_id=%s llm_model_filter=%s measurements_filter=%s",
+            resolved_batch_id or "local",
+            llm_model_filter or "any",
+            measurements_filter or "any",
+        )
+        return ExtractionRunResult(
+            status="no_prompts",
+            loaded_count=0,
+            attempted_count=0,
+            saved_count=0,
+            skipped_count=0,
+            failed_count=0,
+            batch_id=resolved_batch_id,
+            brand_id=resolved_brand_id,
+            failures=[],
+            saved_outputs=[],
+            product_outputs=[],
+            entity_outputs=[],
+        )
 
     with GoogleAIOverviewRunner(
         settings.google_url,
@@ -1051,8 +1084,21 @@ def run_google_ai_overview_extraction_job(
                         continue
 
                 text = prompt_text(prompt)
-                LOGGER.info("[%s/%s] Running Google AI Overview prompt %s", index, len(current_prompts), prompt_id)
-                prefect_logger.info("[r%s %s/%s] Searching: %s", round_num, index, len(current_prompts), text[:80])
+                LOGGER.info(
+                    "[%s/%s] Running Google AI Overview prompt %s. text=%r",
+                    index,
+                    len(current_prompts),
+                    prompt_id,
+                    text[:500],
+                )
+                prefect_logger.info(
+                    "[r%s %s/%s] Searching prompt_id=%s text=%r",
+                    round_num,
+                    index,
+                    len(current_prompts),
+                    prompt_id,
+                    text[:300],
+                )
                 try:
                     capture = runner.run_prompt(text)
                     output = build_google_ai_overview_prompt_output(
@@ -1099,11 +1145,14 @@ def run_google_ai_overview_extraction_job(
                         capture.capture_state,
                     )
                     prefect_logger.info(
-                        "[r%s %s/%s] Saved. triggered=%s state=%s sources=%s",
+                        "[r%s %s/%s] Saved prompt_id=%s. triggered=%s state=%s sources=%s error=%s url=%s",
                         round_num, index, len(current_prompts),
+                        prompt_id,
                         capture.ai_overview_triggered,
                         capture.capture_state,
                         len(capture.sources or []),
+                        capture.error or "none",
+                        (capture.url or "")[:160],
                     )
                     if capture.ai_overview_triggered:
                         last_triggered_at = time.time()
