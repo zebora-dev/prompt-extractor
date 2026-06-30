@@ -249,13 +249,15 @@ def extract_google_ai_overview_batch_task(
     use_proxy: bool = False,
     paa_titles_only: bool = True,
     measurements_filter: str | None = None,
+    max_rounds_per_session: int = 1,
+    delay_between_rounds: int = 60,
 ) -> dict[str, Any]:
     """
     Run BrandSight prompts through Google Search and capture AI Overview output.
     """
     task_logger = get_run_logger()
     task_logger.info(
-        "Starting Google AI Overview extraction task. batch_id=%s prompts_file=%s limit=%s skip=%s dry_run=%s force_rerun=%s llm_model_filter=%s country=%s language=%s use_proxy=%s measurements_filter=%s",
+        "Starting Google AI Overview extraction task. batch_id=%s prompts_file=%s limit=%s skip=%s dry_run=%s force_rerun=%s llm_model_filter=%s country=%s language=%s use_proxy=%s measurements_filter=%s max_rounds=%s delay_between_rounds=%s",
         batch_id,
         prompts_file,
         limit,
@@ -267,6 +269,8 @@ def extract_google_ai_overview_batch_task(
         language or "<env>",
         use_proxy,
         measurements_filter or "any",
+        max_rounds_per_session,
+        delay_between_rounds,
     )
     settings = Settings.from_env(require_api_key=True, require_auto_login_credentials=False)
     result = run_google_ai_overview_extraction_job(
@@ -287,6 +291,8 @@ def extract_google_ai_overview_batch_task(
         use_proxy=use_proxy,
         paa_titles_only=paa_titles_only,
         measurements_filter=measurements_filter,
+        max_rounds_per_session=max_rounds_per_session,
+        delay_between_rounds=delay_between_rounds,
     )
     payload = asdict(result)
     task_logger.info("Finished Google AI Overview extraction task: %s", summarize_extraction_payload(payload))

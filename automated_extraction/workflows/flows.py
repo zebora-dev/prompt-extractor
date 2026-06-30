@@ -1320,6 +1320,8 @@ def google_ai_overview_extraction_batch_flow(
     trigger_scoring: bool = True,
     paa_titles_only: bool = True,
     measurements_filter: str | None = None,
+    max_rounds_per_session: int = 5,
+    delay_between_rounds: int = 60,
 ) -> dict[str, Any]:
     """
     Sequentially run google-ai-overview-extraction until all remaining prompts
@@ -1412,6 +1414,8 @@ def google_ai_overview_extraction_batch_flow(
             trigger_scoring=trigger_scoring,
             paa_titles_only=paa_titles_only,
             measurements_filter=measurements_filter,
+            max_rounds_per_session=max_rounds_per_session,
+            delay_between_rounds=delay_between_rounds,
         )
         run_results.append(result)
         flow_logger.info(
@@ -1706,6 +1710,8 @@ def google_ai_overview_extraction_flow(
     trigger_scoring: bool = True,
     paa_titles_only: bool = True,
     measurements_filter: str | None = None,
+    max_rounds_per_session: int = 1,
+    delay_between_rounds: int = 60,
 ) -> dict[str, Any]:
     """
     Orchestrate a Google AI Overview prompt extraction run.
@@ -1744,6 +1750,8 @@ def google_ai_overview_extraction_flow(
         use_proxy=use_proxy,
         paa_titles_only=paa_titles_only,
         measurements_filter=measurements_filter,
+        max_rounds_per_session=max_rounds_per_session,
+        delay_between_rounds=delay_between_rounds,
     )
 
     processing_result: dict[str, Any] | None = None
